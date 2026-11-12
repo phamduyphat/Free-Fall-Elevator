@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from enum import StrEnum
 import json
 from typing import Any, Optional
@@ -191,7 +192,7 @@ class CardSwipePayload:
 
     elevator_id: ElevatorId | str
     credential_id: str
-    timestamp: int
+    timestamp: datetime = field(default_factory=datetime.now)
     origin_floor: int = 1
 
 
@@ -202,7 +203,7 @@ class CarDestinationRequestPayload:
     elevator_id: ElevatorId | str
     origin_floor: int
     requested_floor: int
-    timestamp: int
+    timestamp: datetime = field(default_factory=datetime.now)
 
 
 @dataclass
@@ -212,7 +213,7 @@ class E5ServiceRunPayload:
     elevator_id: ElevatorId | str
     destination_floor: int
     purpose: str
-    timestamp: int
+    timestamp: datetime = field(default_factory=datetime.now)
 
 
 @dataclass
@@ -222,7 +223,7 @@ class MaintenanceOperationPayload:
     credential_id: str
     elevator_id: ElevatorId | str
     operation_type: MaintenanceOperationType | str
-    timestamp: int
+    timestamp: datetime = field(default_factory=datetime.now)
 
 
 @dataclass
@@ -232,7 +233,7 @@ class ReturnToServicePayload:
     credential_id: str
     elevator_id: ElevatorId | str
     technician_confirmation: bool
-    timestamp: int
+    timestamp: datetime = field(default_factory=datetime.now)
 
 
 @dataclass
@@ -244,7 +245,7 @@ class EmergencyOverridePayload:
     target_car_id: Optional[ElevatorId | str]
     incident_id: Optional[str]
     reason: str
-    timestamp: int
+    timestamp: datetime = field(default_factory=datetime.now)
 
 
 @dataclass
@@ -256,7 +257,7 @@ class RescueCarDispatchPayload:
     rescue_car_id: ElevatorId | str
     incident_floor: int
     dwell_wait_seconds: int = 120
-    timestamp: int = 0
+    timestamp: datetime = field(default_factory=datetime.now)
 
 
 @dataclass
@@ -268,7 +269,7 @@ class CredentialManagementPayload:
     target_user_id: Optional[str]
     target_credential_id: Optional[str]
     payload_details: dict[str, Any] = field(default_factory=dict)
-    timestamp: int = 0
+    timestamp: datetime = field(default_factory=datetime.now)
 
 
 @dataclass
@@ -279,7 +280,7 @@ class RevokeAndReissuePayload:
     lost_credential_id: str
     replacement_credential_id: str
     reason: str = "LOST_AND_REPLACED"
-    timestamp: int = 0
+    timestamp: datetime = field(default_factory=datetime.now)
 
 
 # =============================================================================
@@ -295,10 +296,7 @@ class AccessControl:
     and delegates persistence & tamper-evident hash-chaining to `ACS.Logging`.
     """
 
-    # Configurable simulation tick rate (default: 1 tick = 1 second)
-    TICKS_PER_SECOND: int = 1
-
-    # Policy time windows (in seconds, scaled by TICKS_PER_SECOND)
+    # Policy time windows (in seconds)
     RESIDENT_VISITOR_WINDOW_SECONDS: int = 5
     STAFF_TECH_WINDOW_SECONDS: int = 30
     CLONE_DETECTION_WINDOW_SECONDS: int = 10
@@ -310,21 +308,17 @@ class AccessControl:
     VISITOR_PASS_DEFAULT_DURATION_SECONDS: int = 4 * 3600  # 4 hours
 
     # Section 6: Operational In-Memory State
-    # 1. car_id -> { session_token, credential_id, role, allowed_floors, granted_tick, expires_at_tick, consumed }
+    # 1. car_id -> { session_token, credential_id, role, allowed_floors, granted_at, expires_at, consumed }
     active_car_sessions: dict[str, dict[str, Any]] = {}
 
-    # 2. Rolling queue of { credential_id, car_id, tick_timestamp } for last 10s
+    # 2. Rolling queue of { credential_id, car_id, timestamp } for last 10s
     recent_presentations_window: list[dict[str, Any]] = []
 
-    # 3. credential_id -> [failed tick timestamps in last 60s]
-    failed_attempts_counter: dict[str, list[int]] = {}
+    # 3. credential_id -> [failed timestamps in last 60s]
+    failed_attempts_counter: dict[str, list[datetime]] = {}
 
-    # 4. Sliding 5-minute log of (credential_id, tick_timestamp) for unknown card IDs
-    unregistered_scan_counter: list[tuple[str, int]] = []
-
-    @staticmethod
-    def _seconds_to_ticks(seconds: int) -> int:
-        return seconds * max(1, AccessControl.TICKS_PER_SECOND)
+    # 4. Sliding 5-minute log of (credential_id, timestamp) for unknown card IDs
+    unregistered_scan_counter: list[tuple[str, datetime]] = []
 
     @staticmethod
     def reset_in_memory_state() -> None:
@@ -366,7 +360,7 @@ class AccessControl:
         *,
         credential_id: str,
         car_id: Optional[str],
-        timestamp: int,
+        timestamp: datetime,
         reason: str,
         db_pool: type[DbConnectionPool],
     ) -> bool:
@@ -374,10 +368,7 @@ class AccessControl:
         Increment the 60-second sliding window of failed attempts for `credential_id` (`SEC-2.7`).
         Triggers a `REPEATED_FAILURES` security alert when >= 3 attempts occur within 60s.
         """
-        window_ticks = AccessControl._seconds_to_ticks(
-            AccessControl.REPEATED_FAILURES_WINDOW_SECONDS
-        )
-        cutoff = timestamp - window_ticks
+        cutoff = timestamp - timedelta(seconds=AccessControl.REPEATED_FAILURES_WINDOW_SECONDS)
         history = [
             t for t in AccessControl.failed_attempts_counter.get(credential_id, []) if t >= cutoff
         ]
@@ -405,15 +396,14 @@ class AccessControl:
         *,
         credential_id: str,
         car_id: Optional[str],
-        timestamp: int,
+        timestamp: datetime,
         db_pool: type[DbConnectionPool],
     ) -> bool:
         """
         Track distinct unknown credentials over a 5-minute sliding window (`SEC-2.19, VT-32`).
         Triggers a `CARD_SCANNING` alert when >= 11 distinct unregistered IDs are presented.
         """
-        window_ticks = AccessControl._seconds_to_ticks(AccessControl.SCANNING_WINDOW_SECONDS)
-        cutoff = timestamp - window_ticks
+        cutoff = timestamp - timedelta(seconds=AccessControl.SCANNING_WINDOW_SECONDS)
         AccessControl.unregistered_scan_counter = [
             (cid, t) for cid, t in AccessControl.unregistered_scan_counter if t >= cutoff
         ]
@@ -440,11 +430,11 @@ class AccessControl:
     async def _fetch_and_refresh_credential(
         conn: asyncpg.Connection,
         credential_id: str,
-        current_tick: int,
+        current_time: datetime,
         db_pool: type[DbConnectionPool] = DbConnectionPool,
     ) -> Optional[dict[str, Any]]:
         """
-        Fetch a credential joined with its user record and apply automatic tick-based
+        Fetch a credential joined with its user record and apply automatic timestamp-based
         state transitions (4h visitor pass expiration `SEC-2.22` and 72h lost-card revocation `SEC-2.17`).
         """
         row = await conn.fetchrow(
@@ -480,37 +470,36 @@ class AccessControl:
         status = record["status"]
 
         # 1. Check Visitor Pass / Time-Limited Credential Expiration (SEC-2.22, VT-31)
-        if (
-            status == CredentialStatus.ACTIVE
-            and record["expires_at"] is not None
-            and current_tick >= int(record["expires_at"])
-        ):
-            await conn.execute(
-                """
-                UPDATE credentials
-                SET status = $2, updated_at = $3
-                WHERE credential_id = $1
-                """,
-                credential_id,
-                CredentialStatus.EXPIRED.value,
-                current_tick,
-            )
-            record["status"] = CredentialStatus.EXPIRED.value
-            record["updated_at"] = current_tick
-            await Logging.write_audit(
-                timestamp=current_tick,
-                actor_id=UserRole.SYSTEM,
-                actor_role=UserRole.SYSTEM,
-                action_type=AuditActionType.VISITOR_PASS_EXPIRED,
-                target_id=credential_id,
-                event_payload={
-                    "credential_id": credential_id,
-                    "expires_at": int(record["expires_at"]),
-                    "total_valid_duration": int(record["expires_at"]) - int(record["created_at"]),
-                    "final_status": CredentialStatus.EXPIRED.value,
-                },
-                db_pool=db_pool,
-            )
+        if status == CredentialStatus.ACTIVE and record["expires_at"] is not None:
+            expires_at_dt = Logging.normalize_timestamp(record["expires_at"])
+            created_at_dt = Logging.normalize_timestamp(record["created_at"])
+            if current_time >= expires_at_dt:
+                await conn.execute(
+                    """
+                    UPDATE credentials
+                    SET status = $2, updated_at = $3
+                    WHERE credential_id = $1
+                    """,
+                    credential_id,
+                    CredentialStatus.EXPIRED.value,
+                    current_time,
+                )
+                record["status"] = CredentialStatus.EXPIRED.value
+                record["updated_at"] = current_time
+                await Logging.write_audit(
+                    timestamp=current_time,
+                    actor_id=UserRole.SYSTEM,
+                    actor_role=UserRole.SYSTEM,
+                    action_type=AuditActionType.VISITOR_PASS_EXPIRED,
+                    target_id=credential_id,
+                    event_payload={
+                        "credential_id": credential_id,
+                        "expires_at": Logging.format_timestamp(expires_at_dt),
+                        "total_valid_duration_seconds": (expires_at_dt - created_at_dt).total_seconds(),
+                        "final_status": CredentialStatus.EXPIRED.value,
+                    },
+                    db_pool=db_pool,
+                )
 
         # 2. Check 72-Hour Lost Card Review Window Auto-Revocation (SEC-2.17)
         elif (
@@ -518,10 +507,9 @@ class AccessControl:
             and record["suspension_reason"] == SuspensionReason.LOST
             and record["suspension_start"] is not None
         ):
-            review_window_ticks = AccessControl._seconds_to_ticks(
-                AccessControl.LOST_CARD_REVIEW_WINDOW_SECONDS
-            )
-            if current_tick - int(record["suspension_start"]) >= review_window_ticks:
+            suspension_start_dt = Logging.normalize_timestamp(record["suspension_start"])
+            review_window = timedelta(seconds=AccessControl.LOST_CARD_REVIEW_WINDOW_SECONDS)
+            if (current_time - suspension_start_dt) >= review_window:
                 await conn.execute(
                     """
                     UPDATE credentials
@@ -533,14 +521,14 @@ class AccessControl:
                     """,
                     credential_id,
                     CredentialStatus.REVOKED.value,
-                    current_tick,
+                    current_time,
                 )
                 record["status"] = CredentialStatus.REVOKED.value
                 record["revocation_reason"] = "WINDOW_EXPIRED"
-                record["revoked_at"] = current_tick
-                record["updated_at"] = current_tick
+                record["revoked_at"] = current_time
+                record["updated_at"] = current_time
                 await Logging.write_audit(
-                    timestamp=current_tick,
+                    timestamp=current_time,
                     actor_id=UserRole.SYSTEM,
                     actor_role=UserRole.SYSTEM,
                     action_type=AuditActionType.CREDENTIAL_REVOKED,
@@ -548,13 +536,121 @@ class AccessControl:
                     event_payload={
                         "credential_id": credential_id,
                         "trigger": "WINDOW_EXPIRED",
-                        "suspension_start": int(record["suspension_start"]),
-                        "revoked_at": current_tick,
+                        "suspension_start": Logging.format_timestamp(suspension_start_dt),
+                        "revoked_at": Logging.format_timestamp(current_time),
                     },
                     db_pool=db_pool,
                 )
 
         return record
+
+    @staticmethod
+    async def refresh_all_credentials(
+        current_time: Optional[datetime] = None,
+        db_pool: type[DbConnectionPool] = DbConnectionPool,
+    ) -> dict[str, list[str]]:
+        """
+        Scan the entire `credentials` table and apply automatic timestamp-based
+        state transitions for expired time-limited/visitor credentials (`SEC-2.22`)
+        and suspended lost cards past the 72-hour review window (`SEC-2.17`).
+        """
+        ts = Logging.normalize_timestamp(current_time or datetime.now())
+        expired_ids: list[str] = []
+        revoked_ids: list[str] = []
+        review_window = timedelta(seconds=AccessControl.LOST_CARD_REVIEW_WINDOW_SECONDS)
+
+        async with db_pool.transaction() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT
+                    credential_id,
+                    status,
+                    suspension_reason,
+                    suspension_start,
+                    expires_at,
+                    created_at
+                FROM credentials
+                """
+            )
+
+            for row in rows:
+                credential_id = row["credential_id"]
+                status = row["status"]
+
+                # 1. Check Visitor Pass / Time-Limited Credential Expiration (SEC-2.22, VT-31)
+                if status == CredentialStatus.ACTIVE and row["expires_at"] is not None:
+                    expires_at_dt = Logging.normalize_timestamp(row["expires_at"])
+                    created_at_dt = Logging.normalize_timestamp(row["created_at"])
+                    if ts >= expires_at_dt:
+                        await conn.execute(
+                            """
+                            UPDATE credentials
+                            SET status = $2, updated_at = $3
+                            WHERE credential_id = $1
+                            """,
+                            credential_id,
+                            CredentialStatus.EXPIRED.value,
+                            ts,
+                        )
+                        expired_ids.append(credential_id)
+                        await Logging.write_audit(
+                            timestamp=ts,
+                            actor_id=UserRole.SYSTEM,
+                            actor_role=UserRole.SYSTEM,
+                            action_type=AuditActionType.VISITOR_PASS_EXPIRED,
+                            target_id=credential_id,
+                            event_payload={
+                                "credential_id": credential_id,
+                                "expires_at": Logging.format_timestamp(expires_at_dt),
+                                "total_valid_duration_seconds": (
+                                    expires_at_dt - created_at_dt
+                                ).total_seconds(),
+                                "final_status": CredentialStatus.EXPIRED.value,
+                            },
+                            db_pool=db_pool,
+                        )
+
+                # 2. Check 72-Hour Lost Card Review Window Auto-Revocation (SEC-2.17)
+                elif (
+                    status == CredentialStatus.SUSPENDED
+                    and row["suspension_reason"] == SuspensionReason.LOST
+                    and row["suspension_start"] is not None
+                ):
+                    suspension_start_dt = Logging.normalize_timestamp(row["suspension_start"])
+                    if (ts - suspension_start_dt) >= review_window:
+                        await conn.execute(
+                            """
+                            UPDATE credentials
+                            SET status = $2,
+                                revocation_reason = 'WINDOW_EXPIRED',
+                                revoked_at = $3,
+                                updated_at = $3
+                            WHERE credential_id = $1
+                            """,
+                            credential_id,
+                            CredentialStatus.REVOKED.value,
+                            ts,
+                        )
+                        revoked_ids.append(credential_id)
+                        await Logging.write_audit(
+                            timestamp=ts,
+                            actor_id=UserRole.SYSTEM,
+                            actor_role=UserRole.SYSTEM,
+                            action_type=AuditActionType.CREDENTIAL_REVOKED,
+                            target_id=credential_id,
+                            event_payload={
+                                "credential_id": credential_id,
+                                "trigger": "WINDOW_EXPIRED",
+                                "suspension_start": Logging.format_timestamp(suspension_start_dt),
+                                "revoked_at": Logging.format_timestamp(ts),
+                            },
+                            db_pool=db_pool,
+                        )
+
+        return {
+            "expired_credentials": expired_ids,
+            "revoked_credentials": revoked_ids,
+        }
 
     # -------------------------------------------------------------------------
     # 4.1 CardSwipePayload Validation (`SEC-2.16, SEC-2.17, SEC-2.18, SEC-2.19, SEC-2.21`)
@@ -564,10 +660,12 @@ class AccessControl:
         payload: CardSwipePayload,
         db_pool: type[DbConnectionPool] = DbConnectionPool,
     ) -> AuthorizationResult:
+        ts = Logging.normalize_timestamp(payload.timestamp)
+
         if not ElevatorId.has_value(payload.elevator_id):
             try:
                 await Logging.write_audit(
-                    timestamp=payload.timestamp,
+                    timestamp=ts,
                     actor_id=UserRole.SYSTEM,
                     actor_role=UserRole.SYSTEM,
                     action_type=AuditActionType.MALFORMED_MSG_REJECTED,
@@ -595,13 +693,11 @@ class AccessControl:
         try:
             async with db_pool.transaction() as conn:
                 # Step 1: Cloned Card Check (< 10 seconds across different cars, SEC-2.18)
-                clone_window_ticks = AccessControl._seconds_to_ticks(
-                    AccessControl.CLONE_DETECTION_WINDOW_SECONDS
-                )
+                clone_window = timedelta(seconds=AccessControl.CLONE_DETECTION_WINDOW_SECONDS)
                 AccessControl.recent_presentations_window = [
                     entry
                     for entry in AccessControl.recent_presentations_window
-                    if (payload.timestamp - entry["tick_timestamp"]) < clone_window_ticks
+                    if (ts - entry["timestamp"]) < clone_window
                 ]
 
                 conflicting_entry = next(
@@ -610,7 +706,7 @@ class AccessControl:
                         for entry in AccessControl.recent_presentations_window
                         if entry["credential_id"] == payload.credential_id
                         and entry["car_id"] != payload.elevator_id
-                        and 0 <= (payload.timestamp - entry["tick_timestamp"]) < clone_window_ticks
+                        and timedelta(0) <= (ts - entry["timestamp"]) < clone_window
                     ),
                     None,
                 )
@@ -619,7 +715,7 @@ class AccessControl:
                     {
                         "credential_id": payload.credential_id,
                         "car_id": str(payload.elevator_id),
-                        "tick_timestamp": payload.timestamp,
+                        "timestamp": ts,
                     }
                 )
 
@@ -647,10 +743,10 @@ class AccessControl:
                             payload.credential_id,
                             CredentialStatus.SUSPENDED.value,
                             SuspensionReason.CLONE_SUSPECTED.value,
-                            payload.timestamp,
+                            ts,
                         )
                         await Logging.write_audit(
-                            timestamp=payload.timestamp,
+                            timestamp=ts,
                             actor_id=UserRole.SYSTEM,
                             actor_role=UserRole.SYSTEM,
                             action_type=AuditActionType.CREDENTIAL_SUSPENDED,
@@ -674,11 +770,11 @@ class AccessControl:
                             f"Cloned credential '{payload.credential_id}' tapped in {payload.elevator_id} "
                             f"and {prior_car} within < {AccessControl.CLONE_DETECTION_WINDOW_SECONDS}s."
                         ),
-                        created_at=payload.timestamp,
+                        created_at=ts,
                         db_pool=db_pool,
                     )
                     await Logging.log_authorization_event(
-                        timestamp=payload.timestamp,
+                        timestamp=ts,
                         credential_id=payload.credential_id,
                         elevator_id=str(payload.elevator_id),
                         origin_floor=payload.origin_floor,
@@ -689,7 +785,7 @@ class AccessControl:
                         db_pool=db_pool,
                     )
                     await Logging.write_audit(
-                        timestamp=payload.timestamp,
+                        timestamp=ts,
                         actor_id=payload.credential_id,
                         actor_role=UserRole.SYSTEM,
                         action_type=AuditActionType.ACCESS_DENIAL,
@@ -715,27 +811,27 @@ class AccessControl:
 
                 # Step 2: Credential Registration & Status Lookup (SEC-2.16, SEC-2.19)
                 record = await AccessControl._fetch_and_refresh_credential(
-                    conn, payload.credential_id, payload.timestamp, db_pool=db_pool
+                    conn, payload.credential_id, ts, db_pool=db_pool
                 )
 
                 if record is None:
                     repeat_alert = await AccessControl._record_failed_attempt(
                         credential_id=payload.credential_id,
                         car_id=str(payload.elevator_id),
-                        timestamp=payload.timestamp,
+                        timestamp=ts,
                         reason=DenialReason.UNREGISTERED_CARD,
                         db_pool=db_pool,
                     )
                     scan_alert = await AccessControl._record_unregistered_scan(
                         credential_id=payload.credential_id,
                         car_id=str(payload.elevator_id),
-                        timestamp=payload.timestamp,
+                        timestamp=ts,
                         db_pool=db_pool,
                     )
                     alert_fired = repeat_alert or scan_alert
 
                     await Logging.log_authorization_event(
-                        timestamp=payload.timestamp,
+                        timestamp=ts,
                         credential_id=payload.credential_id,
                         elevator_id=str(payload.elevator_id),
                         origin_floor=payload.origin_floor,
@@ -746,7 +842,7 @@ class AccessControl:
                         db_pool=db_pool,
                     )
                     await Logging.write_audit(
-                        timestamp=payload.timestamp,
+                        timestamp=ts,
                         actor_id=payload.credential_id,
                         actor_role=UserRole.SYSTEM,
                         action_type=AuditActionType.ACCESS_DENIAL,
@@ -791,7 +887,7 @@ class AccessControl:
                                 f"Suspended credential '{payload.credential_id}' "
                                 f"(reason: {record.get('suspension_reason')}) tapped in {payload.elevator_id}."
                             ),
-                            created_at=payload.timestamp,
+                            created_at=ts,
                             db_pool=db_pool,
                         )
                         alert_fired = True
@@ -803,7 +899,7 @@ class AccessControl:
                             credential_id=payload.credential_id,
                             primary_car_id=str(payload.elevator_id),
                             details=f"Revoked credential '{payload.credential_id}' tapped in {payload.elevator_id}.",
-                            created_at=payload.timestamp,
+                            created_at=ts,
                             db_pool=db_pool,
                         )
                         alert_fired = True
@@ -813,14 +909,14 @@ class AccessControl:
                     repeat_alert = await AccessControl._record_failed_attempt(
                         credential_id=payload.credential_id,
                         car_id=str(payload.elevator_id),
-                        timestamp=payload.timestamp,
+                        timestamp=ts,
                         reason=denial_reason,
                         db_pool=db_pool,
                     )
                     alert_fired = alert_fired or repeat_alert
 
                     await Logging.log_authorization_event(
-                        timestamp=payload.timestamp,
+                        timestamp=ts,
                         credential_id=payload.credential_id,
                         elevator_id=str(payload.elevator_id),
                         origin_floor=payload.origin_floor,
@@ -831,7 +927,7 @@ class AccessControl:
                         db_pool=db_pool,
                     )
                     await Logging.write_audit(
-                        timestamp=payload.timestamp,
+                        timestamp=ts,
                         actor_id=payload.credential_id,
                         actor_role=user_role,
                         action_type=AuditActionType.ACCESS_DENIAL,
@@ -862,9 +958,7 @@ class AccessControl:
                     else AccessControl.RESIDENT_VISITOR_WINDOW_SECONDS
                 )
                 session_token = str(uuid.uuid4())
-                expires_at_tick = payload.timestamp + AccessControl._seconds_to_ticks(
-                    timeout_seconds
-                )
+                expires_at = ts + timedelta(seconds=timeout_seconds)
 
                 AccessControl.active_car_sessions[str(payload.elevator_id)] = {
                     "session_token": session_token,
@@ -872,8 +966,8 @@ class AccessControl:
                     "user_id": record["user_id"],
                     "role": user_role,
                     "allowed_floors": allowed_floors,
-                    "granted_tick": payload.timestamp,
-                    "expires_at_tick": expires_at_tick,
+                    "granted_at": ts,
+                    "expires_at": expires_at,
                     "consumed": False,
                 }
 
@@ -885,7 +979,7 @@ class AccessControl:
                         "elevator_id": str(payload.elevator_id),
                         "role": user_role,
                         "allowed_floors": allowed_floors,
-                        "expires_at_tick": expires_at_tick,
+                        "expires_at": expires_at,
                     },
                 )
         except Exception:
@@ -903,12 +997,14 @@ class AccessControl:
         payload: CarDestinationRequestPayload,
         db_pool: type[DbConnectionPool] = DbConnectionPool,
     ) -> AuthorizationResult:
+        ts = Logging.normalize_timestamp(payload.timestamp)
+
         if not ElevatorId.has_value(payload.elevator_id) or not (
             payload.requested_floor == -1 or (1 <= payload.requested_floor <= 30)
         ):
             try:
                 await Logging.write_audit(
-                    timestamp=payload.timestamp,
+                    timestamp=ts,
                     actor_id=UserRole.SYSTEM,
                     actor_role=UserRole.SYSTEM,
                     action_type=AuditActionType.MALFORMED_MSG_REJECTED,
@@ -932,7 +1028,7 @@ class AccessControl:
             )
 
         try:
-            async with db_pool.transaction() as conn:
+            async with db_pool.transaction():
                 # Step 1: B1 Universal Exemption (SEC-2.5) & E5 B1 Prohibition (FR-1.10)
                 if payload.requested_floor == -1:
                     if payload.elevator_id == ElevatorId.E5:
@@ -940,7 +1036,7 @@ class AccessControl:
                         cred_id = session["credential_id"] if session else None
                         actor_role = session["role"] if session else UserRole.SYSTEM
                         await Logging.log_authorization_event(
-                            timestamp=payload.timestamp,
+                            timestamp=ts,
                             credential_id=cred_id,
                             elevator_id=str(payload.elevator_id),
                             origin_floor=payload.origin_floor,
@@ -951,7 +1047,7 @@ class AccessControl:
                             db_pool=db_pool,
                         )
                         await Logging.write_audit(
-                            timestamp=payload.timestamp,
+                            timestamp=ts,
                             actor_id=cred_id or UserRole.SYSTEM,
                             actor_role=actor_role,
                             action_type=AuditActionType.ACCESS_DENIAL,
@@ -971,7 +1067,7 @@ class AccessControl:
                         )
 
                     await Logging.log_authorization_event(
-                        timestamp=payload.timestamp,
+                        timestamp=ts,
                         credential_id=None,
                         elevator_id=str(payload.elevator_id),
                         origin_floor=payload.origin_floor,
@@ -993,7 +1089,7 @@ class AccessControl:
                 session = AccessControl.active_car_sessions.get(str(payload.elevator_id))
                 if session is None:
                     await Logging.log_authorization_event(
-                        timestamp=payload.timestamp,
+                        timestamp=ts,
                         credential_id=None,
                         elevator_id=str(payload.elevator_id),
                         origin_floor=payload.origin_floor,
@@ -1004,7 +1100,7 @@ class AccessControl:
                         db_pool=db_pool,
                     )
                     await Logging.write_audit(
-                        timestamp=payload.timestamp,
+                        timestamp=ts,
                         actor_id=UserRole.SYSTEM,
                         actor_role=UserRole.SYSTEM,
                         action_type=AuditActionType.ACCESS_DENIAL,
@@ -1029,12 +1125,12 @@ class AccessControl:
                     alert_fired = await AccessControl._record_failed_attempt(
                         credential_id=cred_id,
                         car_id=str(payload.elevator_id),
-                        timestamp=payload.timestamp,
+                        timestamp=ts,
                         reason=DenialReason.ONE_TAP_LIMIT_EXCEEDED,
                         db_pool=db_pool,
                     )
                     await Logging.log_authorization_event(
-                        timestamp=payload.timestamp,
+                        timestamp=ts,
                         credential_id=cred_id,
                         elevator_id=str(payload.elevator_id),
                         origin_floor=payload.origin_floor,
@@ -1045,7 +1141,7 @@ class AccessControl:
                         db_pool=db_pool,
                     )
                     await Logging.write_audit(
-                        timestamp=payload.timestamp,
+                        timestamp=ts,
                         actor_id=cred_id,
                         actor_role=role,
                         action_type=AuditActionType.ONE_TAP_VIOLATION,
@@ -1053,7 +1149,7 @@ class AccessControl:
                         event_payload={
                             "elevator_id": str(payload.elevator_id),
                             "denied_floor": payload.requested_floor,
-                            "token_age": payload.timestamp - int(session["granted_tick"]),
+                            "token_age_seconds": (ts - session["granted_at"]).total_seconds(),
                         },
                         db_pool=db_pool,
                     )
@@ -1064,16 +1160,16 @@ class AccessControl:
                         alert_triggered=alert_fired,
                     )
 
-                if payload.timestamp > int(session["expires_at_tick"]):
+                if ts > session["expires_at"]:
                     alert_fired = await AccessControl._record_failed_attempt(
                         credential_id=cred_id,
                         car_id=str(payload.elevator_id),
-                        timestamp=payload.timestamp,
+                        timestamp=ts,
                         reason=DenialReason.TOKEN_WINDOW_EXPIRED,
                         db_pool=db_pool,
                     )
                     await Logging.log_authorization_event(
-                        timestamp=payload.timestamp,
+                        timestamp=ts,
                         credential_id=cred_id,
                         elevator_id=str(payload.elevator_id),
                         origin_floor=payload.origin_floor,
@@ -1084,7 +1180,7 @@ class AccessControl:
                         db_pool=db_pool,
                     )
                     await Logging.write_audit(
-                        timestamp=payload.timestamp,
+                        timestamp=ts,
                         actor_id=cred_id,
                         actor_role=role,
                         action_type=AuditActionType.ACCESS_DENIAL,
@@ -1115,12 +1211,12 @@ class AccessControl:
                     alert_fired = await AccessControl._record_failed_attempt(
                         credential_id=cred_id,
                         car_id=str(payload.elevator_id),
-                        timestamp=payload.timestamp,
+                        timestamp=ts,
                         reason=DenialReason.UNAUTHORIZED_FLOOR,
                         db_pool=db_pool,
                     )
                     await Logging.log_authorization_event(
-                        timestamp=payload.timestamp,
+                        timestamp=ts,
                         credential_id=cred_id,
                         elevator_id=str(payload.elevator_id),
                         origin_floor=payload.origin_floor,
@@ -1131,7 +1227,7 @@ class AccessControl:
                         db_pool=db_pool,
                     )
                     await Logging.write_audit(
-                        timestamp=payload.timestamp,
+                        timestamp=ts,
                         actor_id=cred_id,
                         actor_role=role,
                         action_type=AuditActionType.ACCESS_DENIAL,
@@ -1154,7 +1250,7 @@ class AccessControl:
                 # Step 4: Consume Token (SEC-2.21)
                 session["consumed"] = True
                 await Logging.log_authorization_event(
-                    timestamp=payload.timestamp,
+                    timestamp=ts,
                     credential_id=cred_id,
                     elevator_id=str(payload.elevator_id),
                     origin_floor=payload.origin_floor,
@@ -1187,8 +1283,10 @@ class AccessControl:
         payload: E5ServiceRunPayload,
         db_pool: type[DbConnectionPool] = DbConnectionPool,
     ) -> AuthorizationResult:
+        ts = Logging.normalize_timestamp(payload.timestamp)
+
         try:
-            async with db_pool.transaction() as conn:
+            async with db_pool.transaction():
                 if payload.elevator_id != ElevatorId.E5 or not (
                     1 <= payload.destination_floor <= 30
                 ):
@@ -1198,7 +1296,7 @@ class AccessControl:
                         else DenialReason.MALFORMED_MSG_REJECTED
                     )
                     await Logging.write_audit(
-                        timestamp=payload.timestamp,
+                        timestamp=ts,
                         actor_id=UserRole.SYSTEM,
                         actor_role=UserRole.SYSTEM,
                         action_type=(
@@ -1232,7 +1330,7 @@ class AccessControl:
 
                 if session.get("consumed", False):
                     await Logging.write_audit(
-                        timestamp=payload.timestamp,
+                        timestamp=ts,
                         actor_id=cred_id,
                         actor_role=role,
                         action_type=AuditActionType.ONE_TAP_VIOLATION,
@@ -1240,7 +1338,7 @@ class AccessControl:
                         event_payload={
                             "elevator_id": ElevatorId.E5.value,
                             "denied_floor": payload.destination_floor,
-                            "token_age": payload.timestamp - int(session["granted_tick"]),
+                            "token_age_seconds": (ts - session["granted_at"]).total_seconds(),
                         },
                         db_pool=db_pool,
                     )
@@ -1250,7 +1348,7 @@ class AccessControl:
                         credential_id=cred_id,
                     )
 
-                if payload.timestamp > int(session["expires_at_tick"]):
+                if ts > session["expires_at"]:
                     return AuthorizationResult.deny(
                         DenialReason.TOKEN_WINDOW_EXPIRED,
                         message="Session token expired.",
@@ -1259,7 +1357,7 @@ class AccessControl:
 
                 if not UserRole.can_initiate_service_run(role):
                     await Logging.write_audit(
-                        timestamp=payload.timestamp,
+                        timestamp=ts,
                         actor_id=cred_id,
                         actor_role=role,
                         action_type=AuditActionType.UNAUTHORIZED_CMD_REJECTED,
@@ -1284,7 +1382,7 @@ class AccessControl:
 
                 session["consumed"] = True
                 await Logging.write_audit(
-                    timestamp=payload.timestamp,
+                    timestamp=ts,
                     actor_id=cred_id,
                     actor_role=role,
                     action_type=AuditActionType.E5_SERVICE_RUN_START,
@@ -1320,13 +1418,15 @@ class AccessControl:
         payload: MaintenanceOperationPayload,
         db_pool: type[DbConnectionPool] = DbConnectionPool,
     ) -> AuthorizationResult:
+        ts = Logging.normalize_timestamp(payload.timestamp)
+
         try:
             async with db_pool.transaction() as conn:
                 if not ElevatorId.has_value(
                     payload.elevator_id
                 ) or not MaintenanceOperationType.has_value(payload.operation_type):
                     await Logging.write_audit(
-                        timestamp=payload.timestamp,
+                        timestamp=ts,
                         actor_id=UserRole.SYSTEM,
                         actor_role=UserRole.SYSTEM,
                         action_type=AuditActionType.MALFORMED_MSG_REJECTED,
@@ -1345,7 +1445,7 @@ class AccessControl:
                     )
 
                 record = await AccessControl._fetch_and_refresh_credential(
-                    conn, payload.credential_id, payload.timestamp, db_pool=db_pool
+                    conn, payload.credential_id, ts, db_pool=db_pool
                 )
                 if record is None or record["status"] != CredentialStatus.ACTIVE:
                     reason = (
@@ -1362,7 +1462,7 @@ class AccessControl:
                 role = record["user_role"]
                 if not UserRole.can_perform_maintenance(role):
                     await Logging.write_audit(
-                        timestamp=payload.timestamp,
+                        timestamp=ts,
                         actor_id=payload.credential_id,
                         actor_role=role,
                         action_type=AuditActionType.UNAUTHORIZED_CMD_REJECTED,
@@ -1383,7 +1483,7 @@ class AccessControl:
                     )
 
                 await Logging.write_audit(
-                    timestamp=payload.timestamp,
+                    timestamp=ts,
                     actor_id=payload.credential_id,
                     actor_role=role,
                     action_type=AuditActionType.MAINTENANCE_ENTER,
@@ -1418,11 +1518,13 @@ class AccessControl:
         payload: ReturnToServicePayload,
         db_pool: type[DbConnectionPool] = DbConnectionPool,
     ) -> AuthorizationResult:
+        ts = Logging.normalize_timestamp(payload.timestamp)
+
         try:
             async with db_pool.transaction() as conn:
                 if not ElevatorId.has_value(payload.elevator_id):
                     await Logging.write_audit(
-                        timestamp=payload.timestamp,
+                        timestamp=ts,
                         actor_id=UserRole.SYSTEM,
                         actor_role=UserRole.SYSTEM,
                         action_type=AuditActionType.MALFORMED_MSG_REJECTED,
@@ -1440,7 +1542,7 @@ class AccessControl:
                     )
 
                 record = await AccessControl._fetch_and_refresh_credential(
-                    conn, payload.credential_id, payload.timestamp, db_pool=db_pool
+                    conn, payload.credential_id, ts, db_pool=db_pool
                 )
                 if record is None or record["status"] != CredentialStatus.ACTIVE:
                     reason = (
@@ -1457,7 +1559,7 @@ class AccessControl:
                 role = record["user_role"]
                 if not UserRole.can_perform_maintenance(role):
                     await Logging.write_audit(
-                        timestamp=payload.timestamp,
+                        timestamp=ts,
                         actor_id=payload.credential_id,
                         actor_role=role,
                         action_type=AuditActionType.UNAUTHORIZED_CMD_REJECTED,
@@ -1485,7 +1587,7 @@ class AccessControl:
                     )
 
                 await Logging.write_audit(
-                    timestamp=payload.timestamp,
+                    timestamp=ts,
                     actor_id=payload.credential_id,
                     actor_role=role,
                     action_type=AuditActionType.RETURN_TO_SERVICE,
@@ -1516,11 +1618,13 @@ class AccessControl:
         payload: EmergencyOverridePayload,
         db_pool: type[DbConnectionPool] = DbConnectionPool,
     ) -> AuthorizationResult:
+        ts = Logging.normalize_timestamp(payload.timestamp)
+
         try:
             async with db_pool.transaction() as conn:
                 if not EmergencyOverrideType.has_value(payload.override_type):
                     await Logging.write_audit(
-                        timestamp=payload.timestamp,
+                        timestamp=ts,
                         actor_id=UserRole.SYSTEM,
                         actor_role=UserRole.SYSTEM,
                         action_type=AuditActionType.MALFORMED_MSG_REJECTED,
@@ -1538,7 +1642,7 @@ class AccessControl:
                     )
 
                 record = await AccessControl._fetch_and_refresh_credential(
-                    conn, payload.credential_id, payload.timestamp, db_pool=db_pool
+                    conn, payload.credential_id, ts, db_pool=db_pool
                 )
                 if record is None or record["status"] != CredentialStatus.ACTIVE:
                     reason = (
@@ -1556,7 +1660,7 @@ class AccessControl:
                 target_entity = str(payload.target_car_id or payload.incident_id or UserRole.SYSTEM)
                 if not UserRole.is_admin(role):
                     await Logging.write_audit(
-                        timestamp=payload.timestamp,
+                        timestamp=ts,
                         actor_id=payload.credential_id,
                         actor_role=role,
                         action_type=AuditActionType.UNAUTHORIZED_CMD_REJECTED,
@@ -1579,7 +1683,7 @@ class AccessControl:
                     else AuditActionType.EMERGENCY_OVERRIDE
                 )
                 await Logging.write_audit(
-                    timestamp=payload.timestamp,
+                    timestamp=ts,
                     actor_id=payload.credential_id,
                     actor_role=role,
                     action_type=audit_action,
@@ -1616,10 +1720,12 @@ class AccessControl:
         payload: RescueCarDispatchPayload,
         db_pool: type[DbConnectionPool] = DbConnectionPool,
     ) -> AuthorizationResult:
+        ts = Logging.normalize_timestamp(payload.timestamp)
+
         try:
             async with db_pool.transaction() as conn:
                 record = await AccessControl._fetch_and_refresh_credential(
-                    conn, payload.credential_id, payload.timestamp, db_pool=db_pool
+                    conn, payload.credential_id, ts, db_pool=db_pool
                 )
                 if record is None or record["status"] != CredentialStatus.ACTIVE:
                     reason = (
@@ -1636,7 +1742,7 @@ class AccessControl:
                 role = record["user_role"]
                 if not UserRole.is_admin(role):
                     await Logging.write_audit(
-                        timestamp=payload.timestamp,
+                        timestamp=ts,
                         actor_id=payload.credential_id,
                         actor_role=role,
                         action_type=AuditActionType.UNAUTHORIZED_CMD_REJECTED,
@@ -1657,7 +1763,7 @@ class AccessControl:
                 # E5 is never eligible as a rescue car (EMR-3.12, OR-15)
                 if not ElevatorId.is_residential(payload.rescue_car_id):
                     await Logging.write_audit(
-                        timestamp=payload.timestamp,
+                        timestamp=ts,
                         actor_id=payload.credential_id,
                         actor_role=role,
                         action_type=AuditActionType.COMMAND_CONFLICT_REJECTED,
@@ -1684,7 +1790,7 @@ class AccessControl:
                     )
 
                 await Logging.write_audit(
-                    timestamp=payload.timestamp,
+                    timestamp=ts,
                     actor_id=payload.credential_id,
                     actor_role=role,
                     action_type=AuditActionType.RESCUE_CAR_DISPATCHED,
@@ -1722,10 +1828,12 @@ class AccessControl:
         payload: CredentialManagementPayload,
         db_pool: type[DbConnectionPool] = DbConnectionPool,
     ) -> AuthorizationResult:
+        ts = Logging.normalize_timestamp(payload.timestamp)
+
         try:
             async with db_pool.transaction() as conn:
                 admin_record = await AccessControl._fetch_and_refresh_credential(
-                    conn, payload.admin_credential_id, payload.timestamp, db_pool=db_pool
+                    conn, payload.admin_credential_id, ts, db_pool=db_pool
                 )
                 if admin_record is None or admin_record["status"] != CredentialStatus.ACTIVE:
                     reason = (
@@ -1743,7 +1851,7 @@ class AccessControl:
                 admin_user_id = admin_record["user_id"]
                 if not UserRole.is_admin(admin_role):
                     await Logging.write_audit(
-                        timestamp=payload.timestamp,
+                        timestamp=ts,
                         actor_id=payload.admin_credential_id,
                         actor_role=admin_role,
                         action_type=AuditActionType.UNAUTHORIZED_CMD_REJECTED,
@@ -1823,7 +1931,7 @@ class AccessControl:
                             target_role,
                             apartment_unit,
                             assigned_floor,
-                            payload.timestamp,
+                            ts,
                         )
 
                     allowed_floors = AccessControl._parse_allowed_floors(
@@ -1839,7 +1947,12 @@ class AccessControl:
                     )
                     cred_type = str(details.get("credential_type", default_cred_type.value))
 
-                    expires_at: Optional[int] = details.get("expires_at")
+                    raw_expires_at = details.get("expires_at")
+                    expires_at: Optional[datetime] = (
+                        Logging.normalize_timestamp(raw_expires_at)
+                        if raw_expires_at is not None
+                        else None
+                    )
                     if action == CredentialAction.ISSUE_VISITOR_PASS and expires_at is None:
                         duration_seconds = int(
                             details.get(
@@ -1847,9 +1960,7 @@ class AccessControl:
                                 AccessControl.VISITOR_PASS_DEFAULT_DURATION_SECONDS,
                             )
                         )
-                        expires_at = payload.timestamp + AccessControl._seconds_to_ticks(
-                            duration_seconds
-                        )
+                        expires_at = ts + timedelta(seconds=duration_seconds)
 
                     await conn.execute(
                         """
@@ -1875,7 +1986,7 @@ class AccessControl:
                         expires_at,
                         json.dumps(allowed_floors),
                         admin_user_id,
-                        payload.timestamp,
+                        ts,
                     )
 
                     audit_type = (
@@ -1884,7 +1995,7 @@ class AccessControl:
                         else AuditActionType.CREDENTIAL_ISSUED
                     )
                     await Logging.write_audit(
-                        timestamp=payload.timestamp,
+                        timestamp=ts,
                         actor_id=payload.admin_credential_id,
                         actor_role=admin_role,
                         action_type=audit_type,
@@ -1894,7 +2005,9 @@ class AccessControl:
                             "credential_id": payload.target_credential_id,
                             "role": target_role,
                             "allowed_floors": allowed_floors,
-                            "expires_at": expires_at,
+                            "expires_at": Logging.format_timestamp(expires_at)
+                            if expires_at is not None
+                            else None,
                         },
                         db_pool=db_pool,
                     )
@@ -1919,7 +2032,7 @@ class AccessControl:
                     )
 
                 target_record = await AccessControl._fetch_and_refresh_credential(
-                    conn, payload.target_credential_id, payload.timestamp, db_pool=db_pool
+                    conn, payload.target_credential_id, ts, db_pool=db_pool
                 )
                 if target_record is None:
                     return AuthorizationResult.deny(
@@ -1941,7 +2054,7 @@ class AccessControl:
                     or admin_user_id == target_record["user_id"]
                 ):
                     await Logging.write_audit(
-                        timestamp=payload.timestamp,
+                        timestamp=ts,
                         actor_id=payload.admin_credential_id,
                         actor_role=admin_role,
                         action_type=AuditActionType.UNAUTHORIZED_CMD_REJECTED,
@@ -1984,10 +2097,10 @@ class AccessControl:
                         payload.target_credential_id,
                         CredentialStatus.SUSPENDED.value,
                         suspension_reason,
-                        payload.timestamp,
+                        ts,
                     )
                     await Logging.write_audit(
-                        timestamp=payload.timestamp,
+                        timestamp=ts,
                         actor_id=payload.admin_credential_id,
                         actor_role=admin_role,
                         action_type=AuditActionType.CREDENTIAL_SUSPENDED,
@@ -2024,10 +2137,10 @@ class AccessControl:
                         """,
                         payload.target_credential_id,
                         CredentialStatus.ACTIVE.value,
-                        payload.timestamp,
+                        ts,
                     )
                     await Logging.write_audit(
-                        timestamp=payload.timestamp,
+                        timestamp=ts,
                         actor_id=payload.admin_credential_id,
                         actor_role=admin_role,
                         action_type=AuditActionType.CREDENTIAL_REINSTATED,
@@ -2066,10 +2179,10 @@ class AccessControl:
                         payload.target_credential_id,
                         CredentialStatus.REVOKED.value,
                         revocation_reason,
-                        payload.timestamp,
+                        ts,
                     )
                     await Logging.write_audit(
-                        timestamp=payload.timestamp,
+                        timestamp=ts,
                         actor_id=payload.admin_credential_id,
                         actor_role=admin_role,
                         action_type=AuditActionType.CREDENTIAL_REVOKED,
@@ -2110,11 +2223,13 @@ class AccessControl:
         Revokes `lost_credential_id` and issues `replacement_credential_id` with identical
         user association, role, and floor permissions in a single ACID transaction.
         """
+        ts = Logging.normalize_timestamp(payload.timestamp)
+
         try:
             async with db_pool.transaction() as conn:
                 # Step 1: Admin Authorization & Peer Check (SEC-2.17)
                 admin_record = await AccessControl._fetch_and_refresh_credential(
-                    conn, payload.admin_credential_id, payload.timestamp, db_pool=db_pool
+                    conn, payload.admin_credential_id, ts, db_pool=db_pool
                 )
                 if admin_record is None or admin_record["status"] != CredentialStatus.ACTIVE:
                     reason = (
@@ -2132,7 +2247,7 @@ class AccessControl:
                 admin_user_id = admin_record["user_id"]
                 if not UserRole.is_admin(admin_role):
                     await Logging.write_audit(
-                        timestamp=payload.timestamp,
+                        timestamp=ts,
                         actor_id=payload.admin_credential_id,
                         actor_role=admin_role,
                         action_type=AuditActionType.UNAUTHORIZED_CMD_REJECTED,
@@ -2150,7 +2265,7 @@ class AccessControl:
                     )
 
                 lost_record = await AccessControl._fetch_and_refresh_credential(
-                    conn, payload.lost_credential_id, payload.timestamp, db_pool=db_pool
+                    conn, payload.lost_credential_id, ts, db_pool=db_pool
                 )
                 if lost_record is None:
                     return AuthorizationResult.deny(
@@ -2168,7 +2283,7 @@ class AccessControl:
                     or admin_user_id == lost_record["user_id"]
                 ):
                     await Logging.write_audit(
-                        timestamp=payload.timestamp,
+                        timestamp=ts,
                         actor_id=payload.admin_credential_id,
                         actor_role=admin_role,
                         action_type=AuditActionType.UNAUTHORIZED_CMD_REJECTED,
@@ -2216,7 +2331,7 @@ class AccessControl:
                     payload.lost_credential_id,
                     CredentialStatus.REVOKED.value,
                     payload.reason,
-                    payload.timestamp,
+                    ts,
                 )
 
                 await conn.execute(
@@ -2245,12 +2360,12 @@ class AccessControl:
                     lost_record["expires_at"],
                     json.dumps(allowed_floors),
                     admin_user_id,
-                    payload.timestamp,
+                    ts,
                 )
 
                 # Step 4: Audit Logging & Non-Repudiation
                 await Logging.write_audit(
-                    timestamp=payload.timestamp,
+                    timestamp=ts,
                     actor_id=payload.admin_credential_id,
                     actor_role=admin_role,
                     action_type=AuditActionType.CREDENTIAL_REPLACED,
@@ -2302,17 +2417,19 @@ class AccessControl:
     @staticmethod
     async def run_audit_integrity_check(
         admin_credential_id: str,
-        timestamp: int = 0,
+        timestamp: Optional[datetime] = None,
         db_pool: type[DbConnectionPool] = DbConnectionPool,
     ) -> tuple[AuthorizationResult, Optional[IntegrityCheckResult]]:
         """
         Authorized wrapper for `ANA-5.8`: verifies that `admin_credential_id` belongs to
         `ADMIN`, then executes `Logging.verify_audit_chain`.
         """
+        ts = Logging.normalize_timestamp(timestamp or datetime.now())
+
         try:
             async with db_pool.acquire() as conn:
                 admin_record = await AccessControl._fetch_and_refresh_credential(
-                    conn, admin_credential_id, timestamp, db_pool=db_pool
+                    conn, admin_credential_id, ts, db_pool=db_pool
                 )
                 if admin_record is None or admin_record["status"] != CredentialStatus.ACTIVE:
                     reason = (
@@ -2332,7 +2449,7 @@ class AccessControl:
                 role = admin_record["user_role"]
                 if not UserRole.is_admin(role):
                     await Logging.write_audit(
-                        timestamp=timestamp,
+                        timestamp=ts,
                         actor_id=admin_credential_id,
                         actor_role=role,
                         action_type=AuditActionType.UNAUTHORIZED_CMD_REJECTED,
@@ -2355,7 +2472,7 @@ class AccessControl:
             check_result = await Logging.verify_audit_chain(
                 admin_credential_id=admin_credential_id,
                 admin_role=role,
-                timestamp=timestamp,
+                timestamp=ts,
                 db_pool=db_pool,
             )
             return (

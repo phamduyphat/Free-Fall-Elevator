@@ -85,7 +85,7 @@ class DbConnectionPool:
                 "SELECT setval(pg_get_serial_sequence('audit_log_chain', 'log_index'), 1, false);"
             )
 
-            # Re-seed initial Admin user and Admin card (tick 0) matching acs/seed.sql
+            # Re-seed initial Admin user and Admin card matching acs/seed.sql
             await conn.execute(
                 """
                 INSERT INTO users (
@@ -103,8 +103,8 @@ class DbConnectionPool:
                     'ADMIN',
                     NULL,
                     NULL,
-                    0,
-                    0
+                    CURRENT_TIMESTAMP,
+                    CURRENT_TIMESTAMP
                 )
                 ON CONFLICT (user_id) DO NOTHING;
                 """
@@ -135,8 +135,8 @@ class DbConnectionPool:
                     NULL,
                     '[-1, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30]'::jsonb,
                     '00000000-0000-0000-0000-000000000001',
-                    0,
-                    0
+                    CURRENT_TIMESTAMP,
+                    CURRENT_TIMESTAMP
                 )
                 ON CONFLICT (credential_id) DO NOTHING;
                 """

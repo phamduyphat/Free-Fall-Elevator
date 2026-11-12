@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from enum import StrEnum
 import hashlib
 import json
@@ -106,20 +107,36 @@ class Logging:
     GENESIS_PREV_HASH: str = "0" * 64
 
     @staticmethod
+    def normalize_timestamp(ts: datetime | str) -> datetime:
+        """Normalize a timestamp to a naive datetime suitable for PostgreSQL TIMESTAMP columns."""
+        if isinstance(ts, str):
+            ts = datetime.fromisoformat(ts)
+        if ts.tzinfo is not None:
+            return ts.astimezone(timezone.utc).replace(tzinfo=None)
+        return ts
+
+    @staticmethod
+    def format_timestamp(ts: datetime | str) -> str:
+        """Deterministically format a timestamp to microsecond precision for SHA-256 hashing."""
+        return Logging.normalize_timestamp(ts).isoformat(sep=" ", timespec="microseconds")
+
+    @staticmethod
     def canonicalize_payload(event_payload: dict[str, Any] | str) -> str:
         """Deterministically serialize an event payload for SHA-256 hashing."""
         if isinstance(event_payload, str):
             try:
                 parsed = json.loads(event_payload)
-                return json.dumps(parsed, sort_keys=True, separators=(",", ":"))
+                return json.dumps(parsed, sort_keys=True, separators=(",", ":"), default=str)
             except json.JSONDecodeError:
-                return json.dumps({"raw": event_payload}, sort_keys=True, separators=(",", ":"))
-        return json.dumps(event_payload, sort_keys=True, separators=(",", ":"))
+                return json.dumps(
+                    {"raw": event_payload}, sort_keys=True, separators=(",", ":"), default=str
+                )
+        return json.dumps(event_payload, sort_keys=True, separators=(",", ":"), default=str)
 
     @staticmethod
     def compute_audit_hash(
         log_index: int,
-        timestamp: int,
+        timestamp: datetime | str,
         actor_id: str,
         action_type: str,
         canonical_payload: str,
@@ -129,13 +146,17 @@ class Logging:
         Compute SHA-256(log_index || timestamp || actor_id || action_type || event_payload || prev_hash)
         as specified in Section 5.5 of design_decisions_ACS.md.
         """
-        preimage = f"{log_index}||{timestamp}||{actor_id}||{action_type}||{canonical_payload}||{prev_hash}"
+        formatted_ts = Logging.format_timestamp(timestamp)
+        preimage = (
+            f"{log_index}||{formatted_ts}||{actor_id}||{action_type}||"
+            f"{canonical_payload}||{prev_hash}"
+        )
         return hashlib.sha256(preimage.encode("utf-8")).hexdigest()
 
     @staticmethod
     async def write_audit(
         *,
-        timestamp: int,
+        timestamp: datetime,
         actor_id: str,
         actor_role: str,
         action_type: AuditActionType | str,
@@ -144,6 +165,7 @@ class Logging:
         db_pool: type[DbConnectionPool] = DbConnectionPool,
     ) -> dict[str, Any]:
         """Append a tamper-evident record to `audit_log_chain`."""
+        normalized_ts = Logging.normalize_timestamp(timestamp)
         canonical_payload = Logging.canonicalize_payload(event_payload)
         action_type_str = str(action_type)
         actor_role_str = str(actor_role)
@@ -167,7 +189,7 @@ class Logging:
 
             current_hash = Logging.compute_audit_hash(
                 log_index=next_index,
-                timestamp=timestamp,
+                timestamp=normalized_ts,
                 actor_id=actor_id,
                 action_type=action_type_str,
                 canonical_payload=canonical_payload,
@@ -190,7 +212,7 @@ class Logging:
                 VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9)
                 """,
                 next_index,
-                timestamp,
+                normalized_ts,
                 actor_id,
                 actor_role_str,
                 action_type_str,
@@ -202,7 +224,7 @@ class Logging:
 
         return {
             "log_index": next_index,
-            "timestamp": timestamp,
+            "timestamp": normalized_ts,
             "actor_id": actor_id,
             "actor_role": actor_role_str,
             "action_type": action_type_str,
@@ -215,7 +237,7 @@ class Logging:
     @staticmethod
     async def log_authorization_event(
         *,
-        timestamp: int,
+        timestamp: datetime,
         credential_id: Optional[str],
         elevator_id: str,
         origin_floor: int,
@@ -227,6 +249,7 @@ class Logging:
     ) -> str:
         """Record an operational decision or denial in `access_authorization_events`."""
         event_id = str(uuid.uuid4())
+        normalized_ts = Logging.normalize_timestamp(timestamp)
         query = """
             INSERT INTO access_authorization_events (
                 event_id,
@@ -245,7 +268,7 @@ class Logging:
             await conn.execute(
                 query,
                 event_id,
-                timestamp,
+                normalized_ts,
                 credential_id,
                 str(elevator_id),
                 origin_floor,
@@ -262,7 +285,7 @@ class Logging:
         severity: AlertSeverity | str,
         alert_type: AlertType | str,
         details: str,
-        created_at: int,
+        created_at: datetime,
         credential_id: Optional[str] = None,
         primary_car_id: Optional[str] = None,
         secondary_car_id: Optional[str] = None,
@@ -270,6 +293,7 @@ class Logging:
     ) -> str:
         """Create a security incident record in `security_alerts` (`SEC-2.8`)."""
         alert_id = str(uuid.uuid4())
+        normalized_ts = Logging.normalize_timestamp(created_at)
         query = """
             INSERT INTO security_alerts (
                 alert_id,
@@ -297,7 +321,7 @@ class Logging:
                 str(secondary_car_id) if secondary_car_id is not None else None,
                 details,
                 AlertStatus.OPEN.value,
-                created_at,
+                normalized_ts,
             )
         return alert_id
 
@@ -307,7 +331,7 @@ class Logging:
         alert_id: str,
         new_status: AlertStatus | str,
         admin_user_id: str,
-        timestamp: int,
+        timestamp: datetime,
         db_pool: type[DbConnectionPool] = DbConnectionPool,
     ) -> bool:
         """Acknowledge or resolve a security alert (`OPEN` -> `ACKNOWLEDGED` | `RESOLVED`)."""
@@ -316,8 +340,9 @@ class Logging:
         except ValueError as exc:
             raise ValueError(f"Invalid alert status: {new_status}") from exc
 
+        normalized_ts = Logging.normalize_timestamp(timestamp)
         resolved_by = admin_user_id if validated_status == AlertStatus.RESOLVED else None
-        resolved_at = timestamp if validated_status == AlertStatus.RESOLVED else None
+        resolved_at = normalized_ts if validated_status == AlertStatus.RESOLVED else None
 
         async with db_pool.acquire() as conn:
             result = await conn.execute(
@@ -340,7 +365,7 @@ class Logging:
         *,
         admin_credential_id: Optional[str] = None,
         admin_role: str = "ADMIN",
-        timestamp: int = 0,
+        timestamp: Optional[datetime] = None,
         db_pool: type[DbConnectionPool] = DbConnectionPool,
     ) -> IntegrityCheckResult:
         """
@@ -395,7 +420,7 @@ class Logging:
             canonical_payload = Logging.canonicalize_payload(row["event_payload_text"])
             recomputed_hash = Logging.compute_audit_hash(
                 log_index=actual_index,
-                timestamp=int(row["timestamp"]),
+                timestamp=row["timestamp"],
                 actor_id=str(row["actor_id"]),
                 action_type=str(row["action_type"]),
                 canonical_payload=canonical_payload,
@@ -424,7 +449,7 @@ class Logging:
 
         if admin_credential_id is not None and check_result.passed:
             await Logging.write_audit(
-                timestamp=timestamp,
+                timestamp=timestamp or datetime.now(),
                 actor_id=admin_credential_id,
                 actor_role=admin_role,
                 action_type=AuditActionType.INTEGRITY_CHECK_RUN,
@@ -446,8 +471,8 @@ class Logging:
         elevator_id: Optional[str] = None,
         outcome: Optional[AuthorizationOutcome | str] = None,
         denial_reason: Optional[DenialReason | str] = None,
-        start_tick: Optional[int] = None,
-        end_tick: Optional[int] = None,
+        start_time: Optional[datetime] = None,
+        end_time: Optional[datetime] = None,
         limit: int = 100,
         db_pool: type[DbConnectionPool] = DbConnectionPool,
     ) -> list[dict[str, Any]]:
@@ -467,11 +492,11 @@ class Logging:
         if denial_reason is not None:
             params.append(str(denial_reason))
             clauses.append(f"denial_reason = ${len(params)}")
-        if start_tick is not None:
-            params.append(start_tick)
+        if start_time is not None:
+            params.append(Logging.normalize_timestamp(start_time))
             clauses.append(f"timestamp >= ${len(params)}")
-        if end_tick is not None:
-            params.append(end_tick)
+        if end_time is not None:
+            params.append(Logging.normalize_timestamp(end_time))
             clauses.append(f"timestamp <= ${len(params)}")
 
         where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
@@ -494,8 +519,8 @@ class Logging:
         severity: Optional[AlertSeverity | str] = None,
         alert_type: Optional[AlertType | str] = None,
         credential_id: Optional[str] = None,
-        start_tick: Optional[int] = None,
-        end_tick: Optional[int] = None,
+        start_time: Optional[datetime] = None,
+        end_time: Optional[datetime] = None,
         limit: int = 100,
         db_pool: type[DbConnectionPool] = DbConnectionPool,
     ) -> list[dict[str, Any]]:
@@ -515,11 +540,11 @@ class Logging:
         if credential_id is not None:
             params.append(credential_id)
             clauses.append(f"credential_id = ${len(params)}")
-        if start_tick is not None:
-            params.append(start_tick)
+        if start_time is not None:
+            params.append(Logging.normalize_timestamp(start_time))
             clauses.append(f"created_at >= ${len(params)}")
-        if end_tick is not None:
-            params.append(end_tick)
+        if end_time is not None:
+            params.append(Logging.normalize_timestamp(end_time))
             clauses.append(f"created_at <= ${len(params)}")
 
         where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
@@ -541,8 +566,8 @@ class Logging:
         actor_id: Optional[str] = None,
         action_type: Optional[AuditActionType | str] = None,
         target_id: Optional[str] = None,
-        start_tick: Optional[int] = None,
-        end_tick: Optional[int] = None,
+        start_time: Optional[datetime] = None,
+        end_time: Optional[datetime] = None,
         limit: int = 100,
         db_pool: type[DbConnectionPool] = DbConnectionPool,
     ) -> list[dict[str, Any]]:
@@ -559,11 +584,11 @@ class Logging:
         if target_id is not None:
             params.append(target_id)
             clauses.append(f"target_id = ${len(params)}")
-        if start_tick is not None:
-            params.append(start_tick)
+        if start_time is not None:
+            params.append(Logging.normalize_timestamp(start_time))
             clauses.append(f"timestamp >= ${len(params)}")
-        if end_tick is not None:
-            params.append(end_tick)
+        if end_time is not None:
+            params.append(Logging.normalize_timestamp(end_time))
             clauses.append(f"timestamp <= ${len(params)}")
 
         where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
