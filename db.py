@@ -70,22 +70,31 @@ class DbConnectionPool:
     async def reset_database_tables(cls) -> None:
         """
         Delete all rows from all SREMS tables and re-seed the default Admin user
-        and Admin credential (matching `acs/seed.sql`) without dropping tables or DB.
+        and Admin credential (matching `seed.sql`) without dropping tables or DB.
         """
         async with cls.transaction() as conn:
             # Delete in child-to-parent order to respect foreign key constraints
+            await conn.execute("DELETE FROM incidents WHERE TRUE;")
+            await conn.execute("DELETE FROM car_downtime_intervals WHERE TRUE;")
+            await conn.execute("DELETE FROM trips WHERE TRUE;")
+            await conn.execute("DELETE FROM car_calls WHERE TRUE;")
+            await conn.execute("DELETE FROM hall_calls WHERE TRUE;")
+            await conn.execute("DELETE FROM system_heartbeats WHERE TRUE;")
             await conn.execute("DELETE FROM audit_log_chain WHERE TRUE;")
             await conn.execute("DELETE FROM access_authorization_events WHERE TRUE;")
             await conn.execute("DELETE FROM security_alerts WHERE TRUE;")
             await conn.execute("DELETE FROM credentials WHERE TRUE;")
             await conn.execute("DELETE FROM users WHERE TRUE;")
 
-            # Reset the identity sequence on audit_log_chain back to 1
+            # Reset the identity sequences back to 1
             await conn.execute(
                 "SELECT setval(pg_get_serial_sequence('audit_log_chain', 'log_index'), 1, false);"
             )
+            await conn.execute(
+                "SELECT setval(pg_get_serial_sequence('system_heartbeats', 'heartbeat_id'), 1, false);"
+            )
 
-            # Re-seed initial Admin user and Admin card matching acs/seed.sql
+            # Re-seed initial Admin user and Admin card matching seed.sql
             await conn.execute(
                 """
                 INSERT INTO users (

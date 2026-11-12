@@ -1,7 +1,7 @@
 -- =============================================================================
--- SREMS Access Control System (ACS) - PostgreSQL Database & Schema Seed
--- Based on: acs/design_decisions_ACS.md
--- Execution: psql -U postgres -f acs/seed.sql
+-- SREMS Database & Schema Seed (ACS & Analytics / Operations)
+-- Based on: acs/design_decisions_ACS.md & analytics/design_decisions_analytics.md
+-- Execution: psql -U postgres -f seed.sql
 -- =============================================================================
 
 -- -----------------------------------------------------------------------------
@@ -173,7 +173,170 @@ CREATE INDEX IF NOT EXISTS idx_audit_log_chain_timestamp ON audit_log_chain (tim
 CREATE INDEX IF NOT EXISTS idx_audit_log_chain_action_type ON audit_log_chain (action_type);
 
 -- -----------------------------------------------------------------------------
--- 4. Privilege Configuration for `srems_user`
+-- 4. Mode 5 (Analytics) & Operational Tables (Section 5 of design_decisions_analytics.md)
+-- -----------------------------------------------------------------------------
+
+-- 4.1 `trips` (Cab Physical Movement Legs - DAT-1, ANA-5.1, ANA-5.4)
+CREATE TABLE IF NOT EXISTS trips (
+    trip_id             VARCHAR(36)      PRIMARY KEY DEFAULT gen_random_uuid()::text,
+    elevator_id         VARCHAR(5)       NOT NULL CHECK (elevator_id IN ('E1', 'E2', 'E3', 'E4', 'E5')),
+    origin_floor        INT              NOT NULL CHECK (origin_floor = -1 OR (origin_floor BETWEEN 1 AND 30)),
+    destination_floor   INT              NOT NULL CHECK (destination_floor = -1 OR (destination_floor BETWEEN 1 AND 30)),
+    departure_time      TIMESTAMP        NOT NULL,
+    arrival_time        TIMESTAMP        NOT NULL,
+    travel_time_seconds DOUBLE PRECISION NOT NULL,
+    floors_traversed    INT              NOT NULL,
+    motor_starts        INT              NOT NULL DEFAULT 1,
+    traffic_profile     VARCHAR(20)      NOT NULL CHECK (traffic_profile IN ('PEAK', 'OFF_PEAK', 'NORMAL', 'STRESS')),
+    is_service_run      BOOLEAN          NOT NULL DEFAULT FALSE,
+    is_estimated        BOOLEAN          NOT NULL DEFAULT FALSE
+);
+
+CREATE INDEX IF NOT EXISTS idx_trips_elevator_id ON trips (elevator_id);
+CREATE INDEX IF NOT EXISTS idx_trips_departure_time ON trips (departure_time);
+CREATE INDEX IF NOT EXISTS idx_trips_arrival_time ON trips (arrival_time);
+CREATE INDEX IF NOT EXISTS idx_trips_traffic_profile ON trips (traffic_profile);
+
+-- 4.2 `hall_calls` (Hall Request Lifecycle - DAT-1, ANA-5.1, FR-1.7, FR-1.18, FR-1.21)
+CREATE TABLE IF NOT EXISTS hall_calls (
+    call_id              VARCHAR(36)      PRIMARY KEY DEFAULT gen_random_uuid()::text,
+    origin_floor         INT              NOT NULL CHECK (origin_floor = -1 OR (origin_floor BETWEEN 1 AND 30)),
+    direction            VARCHAR(5)       NOT NULL CHECK (direction IN ('UP', 'DOWN')),
+    is_freight           BOOLEAN          NOT NULL DEFAULT FALSE,
+    assigned_elevator_id VARCHAR(5)       NULL CHECK (assigned_elevator_id IS NULL OR assigned_elevator_id IN ('E1', 'E2', 'E3', 'E4', 'E5')),
+    status               VARCHAR(30)      NOT NULL CHECK (
+        status IN (
+            'RECEIVED',
+            'QUEUED',
+            'ASSIGNED',
+            'APPROACHING',
+            'ARRIVED',
+            'COMPLETED',
+            'CANCELLED',
+            'FAILED',
+            'BLOCKED'
+        )
+    ),
+    created_at           TIMESTAMP        NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    assigned_at          TIMESTAMP        NULL,
+    approaching_at       TIMESTAMP        NULL,
+    arrived_at           TIMESTAMP        NULL,
+    completed_at         TIMESTAMP        NULL,
+    wait_time_seconds    DOUBLE PRECISION NULL,
+    reassignments_count  INT              NOT NULL DEFAULT 0,
+    no_boarding          BOOLEAN          NOT NULL DEFAULT FALSE,
+    cancellation_reason  VARCHAR(50)      NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_hall_calls_status ON hall_calls (status);
+CREATE INDEX IF NOT EXISTS idx_hall_calls_created_at ON hall_calls (created_at);
+CREATE INDEX IF NOT EXISTS idx_hall_calls_assigned_elevator ON hall_calls (assigned_elevator_id);
+CREATE INDEX IF NOT EXISTS idx_hall_calls_origin_floor ON hall_calls (origin_floor);
+
+-- 4.3 `car_calls` (In-Cabin Destination Request Lifecycle - DAT-1, ANA-5.1, FR-1.8, FR-1.9, FR-1.12)
+CREATE TABLE IF NOT EXISTS car_calls (
+    call_id            VARCHAR(36) PRIMARY KEY DEFAULT gen_random_uuid()::text,
+    elevator_id        VARCHAR(5)  NOT NULL CHECK (elevator_id IN ('E1', 'E2', 'E3', 'E4', 'E5')),
+    destination_floor  INT         NOT NULL CHECK (destination_floor = -1 OR (destination_floor BETWEEN 1 AND 30)),
+    credential_id      VARCHAR(64) NULL,
+    status             VARCHAR(30) NOT NULL CHECK (
+        status IN (
+            'RECEIVED',
+            'AUTHORIZATION_CHECK',
+            'QUEUED',
+            'IN_TRANSIT',
+            'COMPLETED',
+            'REJECTED',
+            'CANCELLED',
+            'BLOCKED'
+        )
+    ),
+    created_at         TIMESTAMP   NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    authorized_at      TIMESTAMP   NULL,
+    command_sent_at    TIMESTAMP   NULL,
+    completed_at       TIMESTAMP   NULL,
+    rejection_reason   VARCHAR(40) NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_car_calls_elevator_id ON car_calls (elevator_id);
+CREATE INDEX IF NOT EXISTS idx_car_calls_status ON car_calls (status);
+CREATE INDEX IF NOT EXISTS idx_car_calls_created_at ON car_calls (created_at);
+
+-- 4.4 `car_downtime_intervals` (Availability & Maintenance - DAT-1, ANA-5.5, MNT-4.1..4.7)
+CREATE TABLE IF NOT EXISTS car_downtime_intervals (
+    interval_id      VARCHAR(36)      PRIMARY KEY DEFAULT gen_random_uuid()::text,
+    elevator_id      VARCHAR(5)       NOT NULL CHECK (elevator_id IN ('E1', 'E2', 'E3', 'E4', 'E5')),
+    state            VARCHAR(20)      NOT NULL CHECK (state IN ('MAINTENANCE', 'FAULT', 'EMERGENCY')),
+    reason           TEXT             NOT NULL,
+    started_at       TIMESTAMP        NOT NULL,
+    ended_at         TIMESTAMP        NULL,
+    duration_seconds DOUBLE PRECISION NULL,
+    technician_id    VARCHAR(36)      NULL REFERENCES users(user_id) ON DELETE SET NULL ON UPDATE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_car_downtime_elevator_id ON car_downtime_intervals (elevator_id);
+CREATE INDEX IF NOT EXISTS idx_car_downtime_state ON car_downtime_intervals (state);
+CREATE INDEX IF NOT EXISTS idx_car_downtime_started_at ON car_downtime_intervals (started_at);
+CREATE INDEX IF NOT EXISTS idx_car_downtime_technician ON car_downtime_intervals (technician_id);
+
+-- 4.5 `system_heartbeats` (SREMS Availability Ledger - AVL-1)
+CREATE TABLE IF NOT EXISTS system_heartbeats (
+    heartbeat_id          BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    timestamp             TIMESTAMP   NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    status                VARCHAR(10) NOT NULL CHECK (status IN ('HEALTHY', 'DEGRADED', 'RECOVERING')),
+    active_cars_count     INT         NOT NULL CHECK (active_cars_count BETWEEN 0 AND 5),
+    active_requests_count INT         NOT NULL CHECK (active_requests_count >= 0)
+);
+
+CREATE INDEX IF NOT EXISTS idx_system_heartbeats_timestamp ON system_heartbeats (timestamp);
+CREATE INDEX IF NOT EXISTS idx_system_heartbeats_status ON system_heartbeats (status);
+
+-- 4.6 `incidents` (Emergency Incident Tracking - DAT-1, EMR-3.4, ANA-5.7)
+CREATE TABLE IF NOT EXISTS incidents (
+    incident_id    VARCHAR(36) PRIMARY KEY DEFAULT gen_random_uuid()::text,
+    emergency_type VARCHAR(30) NOT NULL CHECK (
+        emergency_type IN (
+            'FIRE_ALARM',
+            'POWER_FAILURE',
+            'MEDICAL_EMERGENCY',
+            'STUCK_CAR',
+            'DOOR_OBSTRUCTION',
+            'COMMUNICATION_LOSS',
+            'OVERLOAD'
+        )
+    ),
+    scope          VARCHAR(20) NOT NULL CHECK (scope IN ('BUILDING_WIDE', 'CAR_SPECIFIC')),
+    elevator_id    VARCHAR(5)  NULL CHECK (elevator_id IS NULL OR elevator_id IN ('E1', 'E2', 'E3', 'E4', 'E5')),
+    floor          INT         NULL CHECK (floor IS NULL OR floor = -1 OR (floor BETWEEN 1 AND 30)),
+    trigger_source VARCHAR(30) NOT NULL CHECK (
+        trigger_source IN (
+            'PASSENGER_HELP',
+            'PASSENGER_MEDICAL',
+            'SENSOR_TRIP',
+            'ADMIN_MANUAL',
+            'TIMEOUT'
+        )
+    ),
+    status         VARCHAR(20) NOT NULL DEFAULT 'OPEN' CHECK (
+        status IN (
+            'OPEN',
+            'RESCUE_DISPATCHED',
+            'RESOLVED',
+            'FALSE_ALARM'
+        )
+    ),
+    created_at     TIMESTAMP   NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    resolved_at    TIMESTAMP   NULL,
+    resolved_by    VARCHAR(36) NULL REFERENCES users(user_id) ON DELETE SET NULL ON UPDATE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_incidents_status ON incidents (status);
+CREATE INDEX IF NOT EXISTS idx_incidents_created_at ON incidents (created_at);
+CREATE INDEX IF NOT EXISTS idx_incidents_elevator_id ON incidents (elevator_id);
+CREATE INDEX IF NOT EXISTS idx_incidents_emergency_type ON incidents (emergency_type);
+
+-- -----------------------------------------------------------------------------
+-- 5. Privilege Configuration for `srems_user`
 --    Grants CRUD (SELECT, INSERT, UPDATE, DELETE) on all tables in `srems`,
 --    while preventing DROP DATABASE, DROP TABLE, ALTER TABLE, or CREATE TABLE.
 -- -----------------------------------------------------------------------------
@@ -194,7 +357,7 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA public
     GRANT USAGE, SELECT, UPDATE ON SEQUENCES TO srems_user;
 
 -- -----------------------------------------------------------------------------
--- 5. Initial Seed Data: 1 Admin User & 1 Admin Credential (Idempotent)
+-- 6. Initial Seed Data: 1 Admin User & 1 Admin Credential (Idempotent)
 -- -----------------------------------------------------------------------------
 INSERT INTO users (
     user_id,

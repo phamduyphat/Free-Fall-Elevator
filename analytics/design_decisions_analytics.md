@@ -75,12 +75,31 @@ To prevent software execution speed (e.g., 1 Hz interactive UI vs. 1,000 Hz head
 * **Operational State Duration Distribution (`ANA-5.4` - Derived Calculation):**
   To maintain a lightweight database footprint without a redundant high-frequency state-transition table, state durations are derived directly from existing tables:
   * $\text{Time}_{\text{FAULT}}$, $\text{Time}_{\text{MAINTENANCE}}$, $\text{Time}_{\text{EMERGENCY}}$: Aggregated directly from `car_downtime_intervals` ($\sum \text{duration\_seconds}$).
-  * $\text{Time}_{\text{OCCUPIED}}$: Aggregated from `trips` where `traffic_profile = 'E5_SERVICE_RUN'` (`FR-1.13`).
+  * $\text{Time}_{\text{OCCUPIED}}$: Aggregated from `trips` where `elevator_id = 'E5' AND is_service_run = TRUE` (`FR-1.13, VT-14`).
   * $\text{Time}_{\text{STALE}}$: Aggregated from communication fault intervals in `car_downtime_intervals` (`reason = 'COMMUNICATION_LOSS'`).
   * $\text{Time}_{\text{IN\_SERVICE}}$ (Available for ordinary dispatch):
     $$\text{Time}_{\text{IN\_SERVICE}} = T_{\text{report\_window}} - (\text{Time}_{\text{FAULT}} + \text{Time}_{\text{MAINTENANCE}} + \text{Time}_{\text{EMERGENCY}} + \text{Time}_{\text{OCCUPIED}} + \text{Time}_{\text{STALE}})$$
 
-### 3.4 Downtime & Availability Metrics (`ANA-5.5, AVL-1`)
+### 3.4 Trip Distribution & Direction Share Metrics (`OR-10, BEN-1, BEN-4`)
+To verify benchmark traffic profile assumptions (`OR-10`) and validate passenger traffic distribution across off-peak, peak, and stress scenarios, SREMS partitions all physical elevator movement legs into three disjoint directional/destination categories:
+1. **Up Trips ($\text{Trip}_{\text{up}}$):** Motion legs moving upward:
+   $$\text{destination\_floor} > \text{origin\_floor}$$
+   *(Note: Since B1 is floor $-1$, any upward trip naturally terminates at Floor 1 or above; an up trip is never to B1).*
+2. **Down Trips (Excluding B1) ($\text{Trip}_{\text{down\_non\_b1}}$):** Motion legs moving downward that terminate at a regular passenger or common floor above B1:
+   $$\text{destination\_floor} < \text{origin\_floor} \quad \text{AND} \quad \text{destination\_floor} \ne -1$$
+3. **Down Trips to B1 ($\text{Trip}_{\text{down\_to\_b1}}$):** Downward motion legs terminating at Basement 1:
+   $$\text{destination\_floor} = -1 \quad (\text{with } \text{origin\_floor} > -1)$$
+
+* **Statistical Share Formulations:**
+  For total recorded physical motion legs $N_{\text{total}} = N_{\text{up}} + N_{\text{down\_non\_b1}} + N_{\text{down\_to\_b1}}$:
+  $$\text{Share}_{\text{up}} = \frac{N_{\text{up}}}{N_{\text{total}}} \times 100\%$$
+  $$\text{Share}_{\text{down\_non\_b1}} = \frac{N_{\text{down\_non\_b1}}}{N_{\text{total}}} \times 100\%$$
+  $$\text{Share}_{\text{down\_to\_b1}} = \frac{N_{\text{down\_to\_b1}}}{N_{\text{total}}} \times 100\%$$
+  *(Where $\text{Share}_{\text{up}} + \text{Share}_{\text{down\_non\_b1}} + \text{Share}_{\text{down\_to\_b1}} = 100\%$, returning $0.0\%$ gracefully when $N_{\text{total}} = 0$).*
+* **Dedicated Service Run Tracking (`FR-1.13, VT-14`):**
+  Independent of general resident traffic shares, the system reports the count and share of dedicated E5 service runs ($N_{\text{service\_runs}}$ where `elevator_id = 'E5' AND is_service_run = TRUE`) to isolate service/freight transport from normal passenger traffic.
+
+### 3.5 Downtime & Availability Metrics (`ANA-5.5, AVL-1`)
 * **Car Downtime (`ANA-5.5`):** Cumulative time an elevator is out of ordinary service due to faults or maintenance:
   $$\text{Downtime}_{\text{car}} = \sum (t_{\text{return\_to\_service}} - t_{\text{fault\_or\_maint\_start}})$$
 * **Ongoing Intervals (`ANA-5.5`):** Any downtime interval with `ended_at IS NULL` at query time is tagged as **ongoing**, with current downtime accumulated up to $T_{\text{current\_sim}}$.
@@ -88,7 +107,7 @@ To prevent software execution speed (e.g., 1 Hz interactive UI vs. 1,000 Hz head
   $$\text{Availability} = \frac{T_{\text{total\_calendar\_seconds}} - T_{\text{srems\_downtime}}}{T_{\text{total\_calendar\_seconds}}} \times 100\% \ge 99.5\%$$
   * SREMS software downtime is tracked via `system_heartbeats` (sampled every 10 seconds) and process crash/restart audit logs (`SYSTEM_STARTUP`, `SYSTEM_SHUTDOWN`).
 
-### 3.5 Security & Anomaly Summaries (`ANA-5.6`)
+### 3.6 Security & Anomaly Summaries (`ANA-5.6`)
 Aggregates security counters across configurable time windows:
 * Total Authorization Denials (`SEC-2.6`) grouped by denial reason (`UNAUTHORIZED_FLOOR`, `EXPIRED_CARD`, `ONE_TAP_LIMIT`, etc.).
 * Failed Authentication Attempts (`SEC-2.7`).
@@ -128,6 +147,8 @@ Provides pure on-demand SQL aggregation queries:
   Executes indexed SQL queries over `hall_calls` returning total calls, mean, median, P90, P95, and max wait time.
 * `get_travel_time_kpis(start_time, end_time, elevator_id=None) -> TravelTimeReport`:
   Executes indexed SQL queries over `trips` returning average and median car travel times, total legs, and count of estimated timestamps.
+* `get_trip_distribution(start_time, end_time, elevator_id=None, traffic_profile=None) -> TripDistributionReport`:
+  Executes indexed SQL queries over `trips` returning total trips, count/share of upward trips (`destination_floor > origin_floor`), count/share of downward non-B1 trips (`destination_floor < origin_floor AND destination_floor != -1`), count/share of downward B1 trips (`destination_floor = -1`), and count/share of dedicated E5 service runs (`is_service_run = TRUE`) (`OR-10, BEN-1, BEN-4`).
 * `get_utilization_kpis(start_time, end_time) -> dict[str, CarUtilizationReport]`:
   Executes indexed SQL queries over `trips` returning per-car `trip_count`, `motor_starts`, `floors_traversed`, estimated meters, and state hours.
 * `get_downtime_summary(start_time, end_time) -> DowntimeReport`:
@@ -140,7 +161,7 @@ Fulfills `ANA-5.9, BEN-4, VT-29`:
 * `export_run_report(run_id, export_format: Literal['CSV', 'JSON'], include_per_request: bool) -> ExportPayload`:
   Serializes benchmark or historical run results into standard downloadable formats:
   * **Per-Request Dataset:** Tabular rows of `(call_id, type, origin, dest, created_at, arrived_at, completed_at, wait_seconds, status, reassignments)`.
-  * **Aggregate Summary:** Wait time quantiles, per-car utilization, downtime, and security metrics (retrieved from `Analytics.Metrics`).
+  * **Aggregate Summary:** Wait time quantiles, trip distribution shares (Up, Down non-B1, Down to B1, Service runs), per-car utilization, downtime, and security metrics (retrieved from `Analytics.Metrics`).
   * Emits a `REPORT_EXPORTED` event to `ACS.Logging`.
 
 ### 4.3 Audit Search & Integrity Verification Delegation (`ACS.Logging`)
@@ -181,14 +202,15 @@ Buffers in-memory during transit and committed via the Elevator Interface API at
 | :--- | :--- | :--- | :--- |
 | `trip_id` | `VARCHAR(36)` | PK, UUID | Unique motion leg identifier |
 | `elevator_id` | `VARCHAR(5)` | NOT NULL | Car identifier (`E1` to `E5`) |
-| `origin_floor` | `INT` | NOT NULL | Floor where doors closed & car departed |
-| `destination_floor`| `INT` | NOT NULL | Floor where car stopped & doors opened |
+| `origin_floor` | `INT` | NOT NULL | Floor where doors closed & car departed (-1 for B1, 1 to 30) |
+| `destination_floor`| `INT` | NOT NULL | Floor where car stopped & doors opened (-1 for B1, 1 to 30) |
 | `departure_time` | `TIMESTAMP` | NOT NULL | Virtual departure timestamp |
 | `arrival_time` | `TIMESTAMP` | NOT NULL | Virtual arrival timestamp |
 | `travel_time_seconds`| `DOUBLE PRECISION`| NOT NULL | Physical transit duration (`ANA-5.3`) |
 | `floors_traversed` | `INT` | NOT NULL | $|\text{destination\_floor} - \text{origin\_floor}|$ (`ANA-5.4`) |
 | `motor_starts` | `INT` | NOT NULL, DEFAULT 1 | Acceleration cycles for this leg |
-| `traffic_profile` | `VARCHAR(20)` | NOT NULL | Enum: `PEAK`, `OFF_PEAK`, `NORMAL` (`OR-10`) |
+| `traffic_profile` | `VARCHAR(20)` | NOT NULL | Enum: `PEAK`, `OFF_PEAK`, `NORMAL`, `STRESS` (`OR-10, BEN-1`) |
+| `is_service_run` | `BOOLEAN` | NOT NULL, DEFAULT 0 | True if leg was an authorized E5 freight/service run (`FR-1.13, VT-14`) |
 | `is_estimated` | `BOOLEAN` | NOT NULL, DEFAULT 0 | True if arrival timestamp was locally estimated |
 
 ### 5.2 `hall_calls` (Hall Request Lifecycle - `DAT-1, ANA-5.1, FR-1.7, FR-1.18, FR-1.21`)
@@ -199,7 +221,7 @@ $$\mathbf{RECEIVED} \longrightarrow \mathbf{QUEUED} \longrightarrow \mathbf{ASSI
 | Field Name | Data Type | Constraints | Description |
 | :--- | :--- | :--- | :--- |
 | `call_id` | `VARCHAR(36)` | PK, UUID | Unique hall call identifier |
-| `origin_floor` | `INT` | NOT NULL | Floor where hall call was pressed |
+| `origin_floor` | `INT` | NOT NULL | Floor where hall call was pressed (-1 for B1, 1 to 30) |
 | `direction` | `VARCHAR(5)` | NOT NULL | Enum: `UP`, `DOWN` |
 | `is_freight` | `BOOLEAN` | NOT NULL, DEFAULT 0 | True for freight call directed to E5 (`FR-1.3, FR-1.13`) |
 | `assigned_elevator_id`| `VARCHAR(5)`| NULLABLE | Assigned car (`E1`–`E5`; NULLABLE while in `QUEUED`) |
@@ -223,7 +245,7 @@ $$\mathbf{RECEIVED} \longrightarrow \mathbf{AUTHORIZATION\_CHECK} \longrightarro
 | :--- | :--- | :--- | :--- |
 | `call_id` | `VARCHAR(36)` | PK, UUID | Unique car call identifier |
 | `elevator_id` | `VARCHAR(5)` | NOT NULL | Car where destination button was pressed (`E1`–`E5`) |
-| `destination_floor`| `INT` | NOT NULL | Target floor requested |
+| `destination_floor`| `INT` | NOT NULL | Target floor requested (-1 for B1, 1 to 30) |
 | `credential_id` | `VARCHAR(64)` | NULLABLE | Presented card ID context (if swiped per Table 6) |
 | `status` | `VARCHAR(30)` | NOT NULL | Enum: `RECEIVED`, `AUTHORIZATION_CHECK`, `QUEUED`, `IN_TRANSIT`, `COMPLETED`, `REJECTED`, `CANCELLED`, `BLOCKED` |
 | `created_at` | `TIMESTAMP` | NOT NULL | Virtual button press timestamp |
@@ -315,7 +337,9 @@ The existing 9-column schema in `design_decisions_ACS.md §5.5` is preserved int
 | **`VT-01` (Hall Call & Dispatch)** | Record request acceptance, assignment, and pickup timestamps | `hall_calls` table lifecycle updates |
 | **`VT-05` (Direction-Aware Dispatch)**| Evaluate predicted service times vs. actual recorded wait times | `Analytics.Metrics.get_wait_time_kpis()` |
 | **`VT-10` (Tamper-Evidence Check)** | Detect altered/removed records and identify exact first invalid index | `ACS.Logging.verify_audit_chain()` |
+| **`VT-14` (Freight Service Run)** | Track dedicated direct service runs and isolate from resident traffic | `trips.is_service_run = TRUE` & `get_trip_distribution()` |
 | **`VT-23` (Traffic Profiles)** | Compute wait times stratified by Peak vs. Off-Peak profiles | `Analytics.Metrics.get_wait_time_kpis(traffic_profile)` |
 | **`VT-25` (Backup & Restore)** | Verify audit-integrity check passes after database restore | `ACS.Logging.verify_audit_chain()` run post-restore |
 | **`VT-26` (SREMS Crash & Recovery)**| Track host availability and ensure no commands issued while down | `system_heartbeats` & `SYSTEM_STARTUP` audit logs |
 | **`VT-29` (Search & Export)** | Search audit logs by multi-field filters; export per-request and summary data | `ACS.Logging.search_audit_records()` & `Analytics.ExportEngine` (CSV/JSON) |
+| **`OR-10` / `BEN-1` (Profile Splits)**| Validate request distributions and trip direction shares (Up, Down, B1) | `Analytics.Metrics.get_trip_distribution()` |
