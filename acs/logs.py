@@ -1,109 +1,22 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from datetime import datetime, timezone
-from enum import StrEnum
 import hashlib
 import json
 from typing import Any, Optional
 import uuid
 
+from acs.enums import (
+    AlertSeverity,
+    AlertStatus,
+    AlertType,
+    AuditActionType,
+    AuthorizationOutcome,
+    DenialReason,
+    UserRole,
+)
+from acs.payloads import IntegrityCheckResult
 from db import DbConnectionPool
-
-
-class AuthorizationOutcome(StrEnum):
-    ALLOWED = "ALLOWED"
-    DENIED = "DENIED"
-
-
-class DenialReason(StrEnum):
-    UNREGISTERED_CARD = "UNREGISTERED_CARD"
-    CARD_SUSPENDED = "CARD_SUSPENDED"
-    CARD_REVOKED = "CARD_REVOKED"
-    CARD_EXPIRED = "CARD_EXPIRED"
-    UNAUTHORIZED_FLOOR = "UNAUTHORIZED_FLOOR"
-    E5_B1_FORBIDDEN = "E5_B1_FORBIDDEN"
-    ONE_TAP_LIMIT_EXCEEDED = "ONE_TAP_LIMIT_EXCEEDED"
-    TOKEN_WINDOW_EXPIRED = "TOKEN_WINDOW_EXPIRED"
-    NO_ACTIVE_CREDENTIAL = "NO_ACTIVE_CREDENTIAL"
-    DB_FAIL_CLOSED = "DB_FAIL_CLOSED"
-    MALFORMED_MSG_REJECTED = "MALFORMED_MSG_REJECTED"
-    UNAUTHORIZED_CMD_REJECTED = "UNAUTHORIZED_CMD_REJECTED"
-    COMMAND_CONFLICT_REJECTED = "COMMAND_CONFLICT_REJECTED"
-    CONFIRMATION_REQUIRED = "CONFIRMATION_REQUIRED"
-    PEER_ADMIN_REQUIRED = "PEER_ADMIN_REQUIRED"
-    INVALID_STATE_TRANSITION = "INVALID_STATE_TRANSITION"
-    CREDENTIAL_ALREADY_EXISTS = "CREDENTIAL_ALREADY_EXISTS"
-    REPLACEMENT_ID_IN_USE = "REPLACEMENT_ID_IN_USE"
-    DASHBOARD_ACCESS_DENIED = "DASHBOARD_ACCESS_DENIED"
-    SESSION_INVALID = "SESSION_INVALID"
-    SESSION_EXPIRED = "SESSION_EXPIRED"
-    UNAUTHORIZED_ROLE = "UNAUTHORIZED_ROLE"
-
-
-class AlertSeverity(StrEnum):
-    LOW = "LOW"
-    MEDIUM = "MEDIUM"
-    HIGH = "HIGH"
-    CRITICAL = "CRITICAL"
-
-
-class AlertType(StrEnum):
-    REPEATED_FAILURES = "REPEATED_FAILURES"
-    CLONED_CREDENTIAL = "CLONED_CREDENTIAL"
-    CARD_SCANNING = "CARD_SCANNING"
-    LOST_CARD_USAGE = "LOST_CARD_USAGE"
-    REVOKED_CARD_USAGE = "REVOKED_CARD_USAGE"
-    DOOR_OBSTRUCTION = "DOOR_OBSTRUCTION"
-
-
-class AlertStatus(StrEnum):
-    OPEN = "OPEN"
-    ACKNOWLEDGED = "ACKNOWLEDGED"
-    RESOLVED = "RESOLVED"
-
-
-class AuditActionType(StrEnum):
-    ADMIN_LOGIN = "ADMIN_LOGIN"
-    ADMIN_LOGOUT = "ADMIN_LOGOUT"
-    ACCESS_DENIAL = "ACCESS_DENIAL"
-    ONE_TAP_VIOLATION = "ONE_TAP_VIOLATION"
-    CREDENTIAL_ISSUED = "CREDENTIAL_ISSUED"
-    CREDENTIAL_SUSPENDED = "CREDENTIAL_SUSPENDED"
-    CREDENTIAL_REINSTATED = "CREDENTIAL_REINSTATED"
-    CREDENTIAL_REVOKED = "CREDENTIAL_REVOKED"
-    CREDENTIAL_REPLACED = "CREDENTIAL_REPLACED"
-    VISITOR_PASS_ISSUED = "VISITOR_PASS_ISSUED"
-    VISITOR_PASS_EXPIRED = "VISITOR_PASS_EXPIRED"
-    POLICY_CHANGED = "POLICY_CHANGED"
-    CALL_CANCELLED_BY_ADMIN = "CALL_CANCELLED_BY_ADMIN"
-    E5_SERVICE_RUN_START = "E5_SERVICE_RUN_START"
-    E5_SERVICE_RUN_END = "E5_SERVICE_RUN_END"
-    EMERGENCY_OVERRIDE = "EMERGENCY_OVERRIDE"
-    RESCUE_CAR_DISPATCHED = "RESCUE_CAR_DISPATCHED"
-    RESCUE_CAR_BOARDED = "RESCUE_CAR_BOARDED"
-    RESCUE_CAR_RELEASED = "RESCUE_CAR_RELEASED"
-    INCIDENT_RESOLVED = "INCIDENT_RESOLVED"
-    FALSE_ALARM_CLOSED = "FALSE_ALARM_CLOSED"
-    MAINTENANCE_ENTER = "MAINTENANCE_ENTER"
-    RETURN_TO_SERVICE = "RETURN_TO_SERVICE"
-    MALFORMED_MSG_REJECTED = "MALFORMED_MSG_REJECTED"
-    COMMAND_CONFLICT_REJECTED = "COMMAND_CONFLICT_REJECTED"
-    UNAUTHORIZED_CMD_REJECTED = "UNAUTHORIZED_CMD_REJECTED"
-    INTEGRITY_CHECK_RUN = "INTEGRITY_CHECK_RUN"
-    REPORT_EXPORTED = "REPORT_EXPORTED"
-    SYSTEM_STARTUP = "SYSTEM_STARTUP"
-    SYSTEM_SHUTDOWN = "SYSTEM_SHUTDOWN"
-    DATA_BACKUP_CREATED = "DATA_BACKUP_CREATED"
-    DATA_RESTORE_COMPLETED = "DATA_RESTORE_COMPLETED"
-
-
-@dataclass
-class IntegrityCheckResult:
-    passed: bool
-    total_records_inspected: int
-    mismatch_index: Optional[int] = None
-    reason: Optional[str] = None
 
 
 class Logging:
@@ -263,7 +176,7 @@ class Logging:
             INSERT INTO access_authorization_events (
                 event_id,
                 timestamp,
-                credential_id,
+                credential_id, 
                 elevator_id,
                 origin_floor,
                 destination_floor,
@@ -333,6 +246,72 @@ class Logging:
                 normalized_ts,
             )
         return alert_id
+
+    @staticmethod
+    async def record_security_incident(
+        *,
+        timestamp: datetime,
+        credential_id: Optional[str],
+        actor_role: UserRole | str,
+        target_id: str,
+        action_type: AuditActionType | str,
+        event_payload: dict[str, Any],
+        elevator_id: Optional[str] = None,
+        origin_floor: int = 1,
+        destination_floor: int = 1,
+        outcome: AuthorizationOutcome | str = AuthorizationOutcome.DENIED,
+        denial_reason: Optional[DenialReason | str] = None,
+        alert_triggered: bool = False,
+        alert_severity: Optional[AlertSeverity | str] = None,
+        alert_type: Optional[AlertType | str] = None,
+        alert_details: Optional[str] = None,
+        primary_car_id: Optional[str] = None,
+        secondary_car_id: Optional[str] = None,
+        db_pool: type[DbConnectionPool] = DbConnectionPool,
+    ) -> None:
+        """
+        Record a denial/security incident sequentially across `security_alerts`
+        (when `alert_type` is set), `access_authorization_events` (when
+        `elevator_id` is set), and `audit_log_chain`.
+        """
+        if alert_type is not None:
+            if alert_severity is None or alert_details is None:
+                raise ValueError(
+                    "alert_severity and alert_details are required when alert_type is set."
+                )
+            await Logging.create_security_alert(
+                severity=alert_severity,
+                alert_type=alert_type,
+                credential_id=credential_id,
+                primary_car_id=primary_car_id,
+                secondary_car_id=secondary_car_id,
+                details=alert_details,
+                created_at=timestamp,
+                db_pool=db_pool,
+            )
+
+        if elevator_id is not None:
+            await Logging.log_authorization_event(
+                timestamp=timestamp,
+                credential_id=credential_id,
+                elevator_id=elevator_id,
+                origin_floor=origin_floor,
+                destination_floor=destination_floor,
+                outcome=outcome,
+                denial_reason=denial_reason,
+                alert_triggered=alert_triggered or (alert_type is not None),
+                db_pool=db_pool,
+            )
+
+        await Logging.write_audit(
+            timestamp=timestamp,
+            actor_id=credential_id or UserRole.SYSTEM,
+            actor_role=actor_role,
+            action_type=action_type,
+            target_id=target_id,
+            event_payload=event_payload,
+            db_pool=db_pool,
+        )
 
     @staticmethod
     async def update_security_alert_status(

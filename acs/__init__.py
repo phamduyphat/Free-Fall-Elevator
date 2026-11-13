@@ -1,40 +1,42 @@
-from acs.accesscontrol import (
-    AccessControl,
-    AuthorizationResult,
-    CardSwipePayload,
-    CarDestinationRequestPayload,
-    CredentialAction,
-    CredentialManagementPayload,
-    CredentialStatus,
-    CredentialType,
-    DashboardOperationPayload,
-    DashboardOperationType,
-    E5ServiceRunPayload,
-    ElevatorId,
-    EmergencyOverridePayload,
-    EmergencyOverrideType,
-    MaintenanceOperationPayload,
-    MaintenanceOperationType,
-    RescueCarDispatchPayload,
-    ReturnToServicePayload,
-    RevokeAndReissuePayload,
-    SuspensionReason,
-    UserRole,
-)
-from acs.logs import (
+from acs.cab_accesscontrol import CabAccessControl
+from acs.dashboard_accesscontrol import DashboardAccessControl
+from acs.enums import (
     AlertSeverity,
     AlertStatus,
     AlertType,
     AuditActionType,
     AuthorizationOutcome,
+    CredentialAction,
+    CredentialStatus,
+    CredentialType,
+    DashboardOperationType,
     DenialReason,
+    ElevatorId,
+    EmergencyOverrideType,
+    MaintenanceOperationType,
+    SuspensionReason,
+    UserRole,
+)
+from acs.logs import Logging
+from acs.payloads import (
+    AuthorizationResult,
+    CardSwipePayload,
+    CarDestinationRequestPayload,
+    CredentialManagementPayload,
+    DashboardOperationPayload,
+    E5ServiceRunPayload,
+    EmergencyOverridePayload,
     IntegrityCheckResult,
-    Logging,
+    MaintenanceOperationPayload,
+    RescueCarDispatchPayload,
+    ReturnToServicePayload,
+    RevokeAndReissuePayload,
 )
 
 
 class ACS:
-    """Namespace facade exposing `ACS.AccessControl` and `ACS.Logging`."""
+    """Namespace facade exposing `ACS.CabAccessControl`, `ACS.DashboardAccessControl`, and `ACS.Logging`."""
 
-    AccessControl = AccessControl
+    CabAccessControl = CabAccessControl
+    DashboardAccessControl = DashboardAccessControl
     Logging = Logging
