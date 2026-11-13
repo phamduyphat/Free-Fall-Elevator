@@ -1,0 +1,87 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[codz]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py.cover
+.hypothesis/
+.pytest_cache/
+cover/
+
+# Environments & secrets
+.env
+.env.*
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Type checkers & linters
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pyre/
+.pytype/
+.ruff_cache/
+
+# Databases & local data
+*.db
+*.sqlite
+*.sqlite3
+
+
+# IDEs & OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+__pycache__
+__pycache__/*/**
+acs/__pycache__/__init__.cpython-314.pyc
+acs/__pycache__/accesscontrol.cpython-314.pyc
+acs/__pycache__/logs.cpython-314.pyc
+__pycache__/main.cpython-314.pyc
+__pycache__/db.cpython-314.pyc

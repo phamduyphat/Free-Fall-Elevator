@@ -1,2 +1,0 @@
-"""SREMS test suite."""
-
