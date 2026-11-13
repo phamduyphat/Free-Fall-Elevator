@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import StrEnum
@@ -450,6 +451,43 @@ class AccessControl:
             message=message,
             credential_id=actor_id,
         )
+
+    @staticmethod
+    async def _authorize_credential_role(
+        conn: asyncpg.Connection,
+        credential_id: str,
+        ts: datetime,
+        *,
+        role_check: Callable[[str], bool],
+        required_roles: list[str],
+        inactive_msg: str,
+        unauth_msg: str,
+        target_id: str,
+        operation: str,
+        extra_payload: Optional[dict[str, Any]] = None,
+        db_pool: type[DbConnectionPool] = DbConnectionPool,
+    ) -> tuple[Optional[dict[str, Any]], Optional[AuthorizationResult]]:
+        record = await AccessControl._fetch_and_refresh_credential(
+            conn, credential_id, ts, db_pool=db_pool
+        )
+        denial = AccessControl._check_active_credential(record, credential_id, inactive_msg)
+        if denial:
+            return None, denial
+        assert record is not None
+        role = record["user_role"]
+        if not role_check(role):
+            return None, await AccessControl._reject_unauthorized_role(
+                timestamp=ts,
+                actor_id=credential_id,
+                actor_role=role,
+                target_id=target_id,
+                operation=operation,
+                required_roles=required_roles,
+                message=unauth_msg.format(role=role),
+                extra_payload=extra_payload,
+                db_pool=db_pool,
+            )
+        return record, None
 
     @staticmethod
     async def _reject_malformed_msg(
@@ -1548,29 +1586,22 @@ class AccessControl:
                         db_pool=db_pool,
                     )
 
-                record = await AccessControl._fetch_and_refresh_credential(
-                    conn, payload.credential_id, ts, db_pool
-                )
-                denial = AccessControl._check_active_credential(
-                    record,
+                record, denial = await AccessControl._authorize_credential_role(
+                    conn,
                     payload.credential_id,
-                    "Active technician or admin credential required.",
+                    ts,
+                    role_check=UserRole.can_perform_maintenance,
+                    required_roles=[UserRole.TECHNICIAN.value, UserRole.ADMIN.value],
+                    inactive_msg="Active technician or admin credential required.",
+                    unauth_msg=f"Role '{{role}}' cannot execute maintenance operation '{payload.operation_type}'.",
+                    target_id=str(payload.elevator_id),
+                    operation=str(payload.operation_type),
+                    db_pool=db_pool,
                 )
                 if denial:
                     return denial
                 assert record is not None
                 role = record["user_role"]
-                if not UserRole.can_perform_maintenance(role):
-                    return await AccessControl._reject_unauthorized_role(
-                        timestamp=ts,
-                        actor_id=payload.credential_id,
-                        actor_role=role,
-                        target_id=str(payload.elevator_id),
-                        operation=str(payload.operation_type),
-                        required_roles=[UserRole.TECHNICIAN.value, UserRole.ADMIN.value],
-                        message=f"Role '{role}' cannot execute maintenance operation '{payload.operation_type}'.",
-                        db_pool=db_pool,
-                    )
 
                 await Logging.write_audit(
                     timestamp=ts,
@@ -1618,29 +1649,22 @@ class AccessControl:
                         db_pool=db_pool,
                     )
 
-                record = await AccessControl._fetch_and_refresh_credential(
-                    conn, payload.credential_id, ts, db_pool
-                )
-                denial = AccessControl._check_active_credential(
-                    record,
+                record, denial = await AccessControl._authorize_credential_role(
+                    conn,
                     payload.credential_id,
-                    "Active technician or admin credential required.",
+                    ts,
+                    role_check=UserRole.can_perform_maintenance,
+                    required_roles=[UserRole.TECHNICIAN.value, UserRole.ADMIN.value],
+                    inactive_msg="Active technician or admin credential required.",
+                    unauth_msg="Role '{role}' is not authorized to return car to service.",
+                    target_id=str(payload.elevator_id),
+                    operation=AuditActionType.RETURN_TO_SERVICE.value,
+                    db_pool=db_pool,
                 )
                 if denial:
                     return denial
                 assert record is not None
                 role = record["user_role"]
-                if not UserRole.can_perform_maintenance(role):
-                    return await AccessControl._reject_unauthorized_role(
-                        timestamp=ts,
-                        actor_id=payload.credential_id,
-                        actor_role=role,
-                        target_id=str(payload.elevator_id),
-                        operation=AuditActionType.RETURN_TO_SERVICE.value,
-                        required_roles=[UserRole.TECHNICIAN.value, UserRole.ADMIN.value],
-                        message=f"Role '{role}' is not authorized to return car to service.",
-                        db_pool=db_pool,
-                    )
 
                 if not payload.technician_confirmation:
                     return AuthorizationResult.deny(
@@ -1691,28 +1715,23 @@ class AccessControl:
                         db_pool=db_pool,
                     )
 
-                record = await AccessControl._fetch_and_refresh_credential(
-                    conn, payload.credential_id, ts, db_pool
-                )
-                denial = AccessControl._check_active_credential(
-                    record, payload.credential_id, "Active Admin credential required."
+                target_entity = str(payload.target_car_id or payload.incident_id or UserRole.SYSTEM)
+                record, denial = await AccessControl._authorize_credential_role(
+                    conn,
+                    payload.credential_id,
+                    ts,
+                    role_check=UserRole.is_admin,
+                    required_roles=[UserRole.ADMIN.value],
+                    inactive_msg="Active Admin credential required.",
+                    unauth_msg=f"Role '{{role}}' cannot execute emergency override '{payload.override_type}'.",
+                    target_id=target_entity,
+                    operation=str(payload.override_type),
+                    db_pool=db_pool,
                 )
                 if denial:
                     return denial
                 assert record is not None
                 role = record["user_role"]
-                target_entity = str(payload.target_car_id or payload.incident_id or UserRole.SYSTEM)
-                if not UserRole.is_admin(role):
-                    return await AccessControl._reject_unauthorized_role(
-                        timestamp=ts,
-                        actor_id=payload.credential_id,
-                        actor_role=role,
-                        target_id=target_entity,
-                        operation=str(payload.override_type),
-                        required_roles=[UserRole.ADMIN.value],
-                        message=f"Role '{role}' cannot execute emergency override '{payload.override_type}'.",
-                        db_pool=db_pool,
-                    )
 
                 audit_action = (
                     AuditActionType.INCIDENT_RESOLVED
@@ -1760,28 +1779,23 @@ class AccessControl:
         ts = Logging.normalize_timestamp(payload.timestamp)
         try:
             async with db_pool.transaction() as conn:
-                record = await AccessControl._fetch_and_refresh_credential(
-                    conn, payload.credential_id, ts, db_pool
-                )
-                denial = AccessControl._check_active_credential(
-                    record, payload.credential_id, "Active Admin credential required."
+                record, denial = await AccessControl._authorize_credential_role(
+                    conn,
+                    payload.credential_id,
+                    ts,
+                    role_check=UserRole.is_admin,
+                    required_roles=[UserRole.ADMIN.value],
+                    inactive_msg="Active Admin credential required.",
+                    unauth_msg="Role '{role}' is not authorized to dispatch a rescue car.",
+                    target_id=str(payload.rescue_car_id),
+                    operation=AuditActionType.RESCUE_CAR_DISPATCHED.value,
+                    extra_payload={"incident_id": payload.incident_id},
+                    db_pool=db_pool,
                 )
                 if denial:
                     return denial
                 assert record is not None
                 role = record["user_role"]
-                if not UserRole.is_admin(role):
-                    return await AccessControl._reject_unauthorized_role(
-                        timestamp=ts,
-                        actor_id=payload.credential_id,
-                        actor_role=role,
-                        target_id=str(payload.rescue_car_id),
-                        operation=AuditActionType.RESCUE_CAR_DISPATCHED.value,
-                        required_roles=[UserRole.ADMIN.value],
-                        message=f"Role '{role}' is not authorized to dispatch a rescue car.",
-                        extra_payload={"incident_id": payload.incident_id},
-                        db_pool=db_pool,
-                    )
 
                 if not ElevatorId.is_residential(payload.rescue_car_id):
                     await Logging.write_audit(
@@ -2104,31 +2118,22 @@ class AccessControl:
         ts = Logging.normalize_timestamp(payload.timestamp)
         try:
             async with db_pool.transaction() as conn:
-                admin_record = await AccessControl._fetch_and_refresh_credential(
-                    conn, payload.admin_credential_id, ts, db_pool=db_pool
-                )
-                denial = AccessControl._check_active_credential(
-                    admin_record,
+                admin_record, denial = await AccessControl._authorize_credential_role(
+                    conn,
                     payload.admin_credential_id,
-                    "Active Admin credential required.",
+                    ts,
+                    role_check=UserRole.is_admin,
+                    required_roles=[UserRole.ADMIN.value],
+                    inactive_msg="Active Admin credential required.",
+                    unauth_msg="Role '{role}' is not authorized to manage credentials.",
+                    target_id=payload.target_credential_id or payload.target_user_id or "UNKNOWN",
+                    operation=str(payload.action),
+                    db_pool=db_pool,
                 )
                 if denial:
                     return denial
                 assert admin_record is not None
                 admin_role, admin_user_id = admin_record["user_role"], admin_record["user_id"]
-                if not UserRole.is_admin(admin_role):
-                    return await AccessControl._reject_unauthorized_role(
-                        timestamp=ts,
-                        actor_id=payload.admin_credential_id,
-                        actor_role=admin_role,
-                        target_id=payload.target_credential_id
-                        or payload.target_user_id
-                        or "UNKNOWN",
-                        operation=str(payload.action),
-                        required_roles=[UserRole.ADMIN.value],
-                        message=f"Role '{admin_role}' is not authorized to manage credentials.",
-                        db_pool=db_pool,
-                    )
 
                 if payload.action in (CredentialAction.ISSUE, CredentialAction.ISSUE_VISITOR_PASS):
                     return await AccessControl._issue_credential(
@@ -2182,29 +2187,22 @@ class AccessControl:
         ts = Logging.normalize_timestamp(payload.timestamp)
         try:
             async with db_pool.transaction() as conn:
-                admin_record = await AccessControl._fetch_and_refresh_credential(
-                    conn, payload.admin_credential_id, ts, db_pool=db_pool
-                )
-                denial = AccessControl._check_active_credential(
-                    admin_record,
+                admin_record, denial = await AccessControl._authorize_credential_role(
+                    conn,
                     payload.admin_credential_id,
-                    "Active Admin credential required to replace a lost card.",
+                    ts,
+                    role_check=UserRole.is_admin,
+                    required_roles=[UserRole.ADMIN.value],
+                    inactive_msg="Active Admin credential required to replace a lost card.",
+                    unauth_msg="Role '{role}' is not authorized to replace lost credentials.",
+                    target_id=payload.lost_credential_id,
+                    operation=AuditActionType.CREDENTIAL_REPLACED.value,
+                    db_pool=db_pool,
                 )
                 if denial:
                     return denial
                 assert admin_record is not None
                 admin_role, admin_user_id = admin_record["user_role"], admin_record["user_id"]
-                if not UserRole.is_admin(admin_role):
-                    return await AccessControl._reject_unauthorized_role(
-                        timestamp=ts,
-                        actor_id=payload.admin_credential_id,
-                        actor_role=admin_role,
-                        target_id=payload.lost_credential_id,
-                        operation=AuditActionType.CREDENTIAL_REPLACED.value,
-                        required_roles=[UserRole.ADMIN.value],
-                        message=f"Role '{admin_role}' is not authorized to replace lost credentials.",
-                        db_pool=db_pool,
-                    )
 
                 lost_record = await AccessControl._fetch_and_refresh_credential(
                     conn, payload.lost_credential_id, ts, db_pool=db_pool
@@ -2316,39 +2314,22 @@ class AccessControl:
         ts = Logging.normalize_timestamp(timestamp or datetime.now())
         try:
             async with db_pool.acquire() as conn:
-                admin_record = await AccessControl._fetch_and_refresh_credential(
-                    conn, admin_credential_id, ts, db_pool=db_pool
-                )
-                denial = AccessControl._check_active_credential(
-                    admin_record,
+                admin_record, denial = await AccessControl._authorize_credential_role(
+                    conn,
                     admin_credential_id,
-                    "Active Admin credential required for audit integrity check.",
+                    ts,
+                    role_check=UserRole.is_admin,
+                    required_roles=[UserRole.ADMIN.value],
+                    inactive_msg="Active Admin credential required for audit integrity check.",
+                    unauth_msg="Role '{role}' cannot run audit integrity check.",
+                    target_id="audit_log_chain",
+                    operation=AuditActionType.INTEGRITY_CHECK_RUN.value,
+                    db_pool=db_pool,
                 )
                 if denial:
                     return denial, None
                 assert admin_record is not None
                 role = admin_record["user_role"]
-                if not UserRole.is_admin(role):
-                    await Logging.write_audit(
-                        timestamp=ts,
-                        actor_id=admin_credential_id,
-                        actor_role=role,
-                        action_type=AuditActionType.UNAUTHORIZED_CMD_REJECTED,
-                        target_id="audit_log_chain",
-                        event_payload={
-                            "attempted_operation": AuditActionType.INTEGRITY_CHECK_RUN.value,
-                            "missing_required_role": [UserRole.ADMIN.value],
-                        },
-                        db_pool=db_pool,
-                    )
-                    return (
-                        AuthorizationResult.deny(
-                            DenialReason.UNAUTHORIZED_CMD_REJECTED,
-                            message=f"Role '{role}' cannot run audit integrity check.",
-                            credential_id=admin_credential_id,
-                        ),
-                        None,
-                    )
 
             check_result = await Logging.verify_audit_chain(
                 admin_credential_id=admin_credential_id,
