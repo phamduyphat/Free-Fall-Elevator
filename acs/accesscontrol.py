@@ -119,6 +119,39 @@ class CredentialAction(StrEnum):
     ISSUE_VISITOR_PASS = "ISSUE_VISITOR_PASS"
 
 
+class DashboardOperationType(StrEnum):
+    VIEW_FLEET_STATUS = "VIEW_FLEET_STATUS"
+    VIEW_DIAGNOSTICS = "VIEW_DIAGNOSTICS"
+    MAINTENANCE_CONTROL = "MAINTENANCE_CONTROL"
+    MANAGE_CREDENTIALS = "MANAGE_CREDENTIALS"
+    EMERGENCY_OVERRIDE = "EMERGENCY_OVERRIDE"
+    VIEW_AUDIT_LOGS = "VIEW_AUDIT_LOGS"
+    RUN_AUDIT_INTEGRITY = "RUN_AUDIT_INTEGRITY"
+    EXPORT_ANALYTICS_REPORTS = "EXPORT_ANALYTICS_REPORTS"
+
+    @classmethod
+    def has_value(cls, value: Optional[str]) -> bool:
+        return value in cls._value2member_map_
+
+
+DASHBOARD_PERMISSIONS: dict[str, dict[DashboardOperationType, bool]] = {
+    UserRole.ADMIN: {op: True for op in DashboardOperationType},
+    UserRole.TECHNICIAN: {
+        DashboardOperationType.VIEW_FLEET_STATUS: True,
+        DashboardOperationType.VIEW_DIAGNOSTICS: True,
+        DashboardOperationType.MAINTENANCE_CONTROL: True,
+        DashboardOperationType.MANAGE_CREDENTIALS: False,
+        DashboardOperationType.EMERGENCY_OVERRIDE: False,
+        DashboardOperationType.VIEW_AUDIT_LOGS: False,
+        DashboardOperationType.RUN_AUDIT_INTEGRITY: False,
+        DashboardOperationType.EXPORT_ANALYTICS_REPORTS: False,
+    },
+    UserRole.RESIDENT: {op: False for op in DashboardOperationType},
+    UserRole.VISITOR: {op: False for op in DashboardOperationType},
+    UserRole.BUILDING_SERVICE: {op: False for op in DashboardOperationType},
+}
+
+
 ROLE_TO_CREDENTIAL_TYPE: dict[UserRole, CredentialType] = {
     UserRole.RESIDENT: CredentialType.RESIDENT,
     UserRole.VISITOR: CredentialType.VISITOR,
@@ -188,12 +221,23 @@ class AuthorizationResult:
 
 @dataclass
 class CardSwipePayload:
-    """4.1 Credential Presentation on In-Cabin Reader (`UI-8`)."""
+    """4.1 & 7.2 Credential Presentation on In-Cabin Reader (`UI-8`) or Dashboard (`UI-3, UI-10`)."""
 
-    elevator_id: ElevatorId | str
-    credential_id: str
+    elevator_id: Optional[ElevatorId | str] = None
+    credential_id: str = ""
     timestamp: datetime = field(default_factory=datetime.now)
     origin_floor: int = 1
+    is_dashboard_access: bool = False
+
+
+@dataclass
+class DashboardOperationPayload:
+    """7.5 Privileged Dashboard Operation Validation Contract (`SEC-2.13, SEC-2.15, OR-19`)."""
+
+    session_token: str
+    op_type: DashboardOperationType | str
+    timestamp: datetime = field(default_factory=datetime.now)
+    details: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -306,9 +350,11 @@ class AccessControl:
     SCANNING_UNIQUE_CARDS_THRESHOLD: int = 11
     LOST_CARD_REVIEW_WINDOW_SECONDS: int = 72 * 3600  # 72 hours
     VISITOR_PASS_DEFAULT_DURATION_SECONDS: int = 4 * 3600  # 4 hours
+    DASHBOARD_SESSION_TIMEOUT_SECONDS: int = 15 * 60  # 15 minutes (`OR-19, SEC-2.15`)
 
-    # Section 6: Operational In-Memory State
+    # Section 6 & 7: Operational In-Memory State
     active_car_sessions: dict[str, dict[str, Any]] = {}
+    active_dashboard_sessions: dict[str, dict[str, Any]] = {}
     recent_presentations_window: list[dict[str, Any]] = []
     failed_attempts_counter: dict[str, list[datetime]] = {}
     unregistered_scan_counter: list[tuple[str, datetime]] = []
@@ -317,6 +363,7 @@ class AccessControl:
     def reset_in_memory_state() -> None:
         """Clear all in-memory session tokens and anomaly detection windows."""
         AccessControl.active_car_sessions.clear()
+        AccessControl.active_dashboard_sessions.clear()
         AccessControl.recent_presentations_window.clear()
         AccessControl.failed_attempts_counter.clear()
         AccessControl.unregistered_scan_counter.clear()
@@ -787,40 +834,43 @@ class AccessControl:
         ts: datetime,
         db_pool: type[DbConnectionPool],
     ) -> AuthorizationResult:
+        target_label = "DASHBOARD" if payload.is_dashboard_access else str(payload.elevator_id)
         repeat_alert = await AccessControl._record_failed_attempt(
             credential_id=payload.credential_id,
-            car_id=str(payload.elevator_id),
+            car_id=target_label,
             timestamp=ts,
             reason=DenialReason.UNREGISTERED_CARD,
             db_pool=db_pool,
         )
         scan_alert = await AccessControl._record_unregistered_scan(
             credential_id=payload.credential_id,
-            car_id=str(payload.elevator_id),
+            car_id=target_label,
             timestamp=ts,
             db_pool=db_pool,
         )
         alert_fired = repeat_alert or scan_alert
 
-        await Logging.log_authorization_event(
-            timestamp=ts,
-            credential_id=payload.credential_id,
-            elevator_id=str(payload.elevator_id),
-            origin_floor=payload.origin_floor,
-            destination_floor=payload.origin_floor,
-            outcome=AuthorizationOutcome.DENIED,
-            denial_reason=DenialReason.UNREGISTERED_CARD,
-            alert_triggered=alert_fired,
-            db_pool=db_pool,
-        )
+        if not payload.is_dashboard_access:
+            await Logging.log_authorization_event(
+                timestamp=ts,
+                credential_id=payload.credential_id,
+                elevator_id=str(payload.elevator_id),
+                origin_floor=payload.origin_floor,
+                destination_floor=payload.origin_floor,
+                outcome=AuthorizationOutcome.DENIED,
+                denial_reason=DenialReason.UNREGISTERED_CARD,
+                alert_triggered=alert_fired,
+                db_pool=db_pool,
+            )
         await Logging.write_audit(
             timestamp=ts,
             actor_id=payload.credential_id,
             actor_role=UserRole.SYSTEM,
             action_type=AuditActionType.ACCESS_DENIAL,
-            target_id=str(payload.elevator_id),
+            target_id=target_label,
             event_payload={
-                "elevator_id": str(payload.elevator_id),
+                "elevator_id": payload.elevator_id,
+                "is_dashboard_access": payload.is_dashboard_access,
                 "origin_floor": payload.origin_floor,
                 "denial_reason": DenialReason.UNREGISTERED_CARD.value,
             },
@@ -843,6 +893,8 @@ class AccessControl:
         status = record["status"]
         user_role = record["user_role"]
         alert_fired = False
+        car_id_or_none = None if payload.is_dashboard_access else str(payload.elevator_id)
+        target_label = "DASHBOARD" if payload.is_dashboard_access else str(payload.elevator_id)
 
         if status == CredentialStatus.SUSPENDED:
             denial_reason = DenialReason.CARD_SUSPENDED
@@ -855,10 +907,10 @@ class AccessControl:
                 severity=AlertSeverity.HIGH,
                 alert_type=alert_type,
                 credential_id=payload.credential_id,
-                primary_car_id=str(payload.elevator_id),
+                primary_car_id=car_id_or_none,
                 details=(
                     f"Suspended credential '{payload.credential_id}' "
-                    f"(reason: {record.get('suspension_reason')}) tapped in {payload.elevator_id}."
+                    f"(reason: {record.get('suspension_reason')}) tapped at {target_label}."
                 ),
                 created_at=ts,
                 db_pool=db_pool,
@@ -870,8 +922,8 @@ class AccessControl:
                 severity=AlertSeverity.HIGH,
                 alert_type=AlertType.REVOKED_CARD_USAGE,
                 credential_id=payload.credential_id,
-                primary_car_id=str(payload.elevator_id),
-                details=f"Revoked credential '{payload.credential_id}' tapped in {payload.elevator_id}.",
+                primary_car_id=car_id_or_none,
+                details=f"Revoked credential '{payload.credential_id}' tapped at {target_label}.",
                 created_at=ts,
                 db_pool=db_pool,
             )
@@ -881,32 +933,34 @@ class AccessControl:
 
         repeat_alert = await AccessControl._record_failed_attempt(
             credential_id=payload.credential_id,
-            car_id=str(payload.elevator_id),
+            car_id=target_label,
             timestamp=ts,
             reason=denial_reason,
             db_pool=db_pool,
         )
         alert_fired = alert_fired or repeat_alert
 
-        await Logging.log_authorization_event(
-            timestamp=ts,
-            credential_id=payload.credential_id,
-            elevator_id=str(payload.elevator_id),
-            origin_floor=payload.origin_floor,
-            destination_floor=payload.origin_floor,
-            outcome=AuthorizationOutcome.DENIED,
-            denial_reason=denial_reason,
-            alert_triggered=alert_fired,
-            db_pool=db_pool,
-        )
+        if not payload.is_dashboard_access:
+            await Logging.log_authorization_event(
+                timestamp=ts,
+                credential_id=payload.credential_id,
+                elevator_id=str(payload.elevator_id),
+                origin_floor=payload.origin_floor,
+                destination_floor=payload.origin_floor,
+                outcome=AuthorizationOutcome.DENIED,
+                denial_reason=denial_reason,
+                alert_triggered=alert_fired,
+                db_pool=db_pool,
+            )
         await Logging.write_audit(
             timestamp=ts,
             actor_id=payload.credential_id,
             actor_role=user_role,
             action_type=AuditActionType.ACCESS_DENIAL,
-            target_id=str(payload.elevator_id),
+            target_id=target_label,
             event_payload={
-                "elevator_id": str(payload.elevator_id),
+                "elevator_id": payload.elevator_id,
+                "is_dashboard_access": payload.is_dashboard_access,
                 "origin_floor": payload.origin_floor,
                 "denial_reason": denial_reason.value,
             },
@@ -925,7 +979,7 @@ class AccessControl:
         db_pool: type[DbConnectionPool] = DbConnectionPool,
     ) -> AuthorizationResult:
         ts = Logging.normalize_timestamp(payload.timestamp)
-        if not ElevatorId.has_value(payload.elevator_id):
+        if not payload.is_dashboard_access and not ElevatorId.has_value(payload.elevator_id):
             return await AccessControl._reject_malformed_msg(
                 timestamp=ts,
                 target_id=str(payload.elevator_id),
@@ -943,33 +997,34 @@ class AccessControl:
         try:
             async with db_pool.transaction() as conn:
                 # Step 1: Cloned Card Check (< 10s across different cars, SEC-2.18)
-                clone_window = timedelta(seconds=AccessControl.CLONE_DETECTION_WINDOW_SECONDS)
-                AccessControl.recent_presentations_window = [
-                    e
-                    for e in AccessControl.recent_presentations_window
-                    if (ts - e["timestamp"]) < clone_window
-                ]
-                conflicting = next(
-                    (
+                if not payload.is_dashboard_access:
+                    clone_window = timedelta(seconds=AccessControl.CLONE_DETECTION_WINDOW_SECONDS)
+                    AccessControl.recent_presentations_window = [
                         e
                         for e in AccessControl.recent_presentations_window
-                        if e["credential_id"] == payload.credential_id
-                        and e["car_id"] != payload.elevator_id
-                        and timedelta(0) <= (ts - e["timestamp"]) < clone_window
-                    ),
-                    None,
-                )
-                AccessControl.recent_presentations_window.append(
-                    {
-                        "credential_id": payload.credential_id,
-                        "car_id": str(payload.elevator_id),
-                        "timestamp": ts,
-                    }
-                )
-                if conflicting is not None:
-                    return await AccessControl._handle_cloned_swipe(
-                        conn, payload, conflicting["car_id"], ts, db_pool
+                        if (ts - e["timestamp"]) < clone_window
+                    ]
+                    conflicting = next(
+                        (
+                            e
+                            for e in AccessControl.recent_presentations_window
+                            if e["credential_id"] == payload.credential_id
+                            and e["car_id"] != payload.elevator_id
+                            and timedelta(0) <= (ts - e["timestamp"]) < clone_window
+                        ),
+                        None,
                     )
+                    AccessControl.recent_presentations_window.append(
+                        {
+                            "credential_id": payload.credential_id,
+                            "car_id": str(payload.elevator_id),
+                            "timestamp": ts,
+                        }
+                    )
+                    if conflicting is not None:
+                        return await AccessControl._handle_cloned_swipe(
+                            conn, payload, conflicting["car_id"], ts, db_pool
+                        )
 
                 # Step 2: Credential Registration & Status Lookup (SEC-2.16, SEC-2.19)
                 record = await AccessControl._fetch_and_refresh_credential(
@@ -985,8 +1040,66 @@ class AccessControl:
                 ):
                     return await AccessControl._handle_inactive_swipe(record, payload, ts, db_pool)
 
-                # Step 3 & 4: Role & Floor Extraction + Per-Car Session Token (SEC-2.21)
                 user_role = record["user_role"]
+
+                # Step 3A: Dashboard Session Login Branch (§7.2 & §7.3)
+                if payload.is_dashboard_access:
+                    if user_role not in (UserRole.ADMIN, UserRole.TECHNICIAN):
+                        await Logging.write_audit(
+                            timestamp=ts,
+                            actor_id=payload.credential_id,
+                            actor_role=user_role,
+                            action_type=AuditActionType.ACCESS_DENIAL,
+                            target_id="DASHBOARD",
+                            event_payload={
+                                "denial_reason": DenialReason.DASHBOARD_ACCESS_DENIED.value,
+                                "role": user_role,
+                                "is_dashboard_access": True,
+                            },
+                            db_pool=db_pool,
+                        )
+                        return AuthorizationResult.deny(
+                            DenialReason.DASHBOARD_ACCESS_DENIED,
+                            message=f"Role '{user_role}' is not authorized for dashboard access.",
+                            credential_id=payload.credential_id,
+                        )
+
+                    session_token = str(uuid.uuid4())
+                    expires_at = ts + timedelta(seconds=AccessControl.DASHBOARD_SESSION_TIMEOUT_SECONDS)
+                    AccessControl.active_dashboard_sessions[session_token] = {
+                        "session_token": session_token,
+                        "credential_id": payload.credential_id,
+                        "user_id": record["user_id"],
+                        "role": user_role,
+                        "created_at": ts,
+                        "last_active_at": ts,
+                        "expires_at": expires_at,
+                    }
+                    await Logging.write_audit(
+                        timestamp=ts,
+                        actor_id=payload.credential_id,
+                        actor_role=user_role,
+                        action_type=AuditActionType.ADMIN_LOGIN,
+                        target_id="DASHBOARD",
+                        event_payload={
+                            "session_token": session_token,
+                            "credential_id": payload.credential_id,
+                            "role": user_role,
+                        },
+                        db_pool=db_pool,
+                    )
+                    return AuthorizationResult.allow(
+                        message="Dashboard session established.",
+                        session_token=session_token,
+                        credential_id=payload.credential_id,
+                        details={
+                            "user_id": record["user_id"],
+                            "role": user_role,
+                            "expires_at": expires_at,
+                        },
+                    )
+
+                # Step 3B & 4: In-Cabin Role & Floor Extraction + Per-Car Session Token (SEC-2.21)
                 allowed_floors = AccessControl._parse_allowed_floors(
                     record["allowed_floors"],
                     role=user_role,
@@ -2211,3 +2324,144 @@ class AccessControl:
             )
         except Exception:
             return AccessControl._fail_closed(admin_credential_id), None
+
+    # -------------------------------------------------------------------------
+    # 4.7 Dashboard Session Lifecycle & Sliding TTL (`SEC-2.13, SEC-2.15, OR-19`)
+    # -------------------------------------------------------------------------
+
+    @staticmethod
+    async def validate_dashboard_operation(
+        payload: DashboardOperationPayload,
+        db_pool: type[DbConnectionPool] = DbConnectionPool,
+    ) -> AuthorizationResult:
+        """
+        Validate an active 15-minute dashboard session with JIT lazy eviction,
+        sliding TTL renewal, and role entitlement checks (§7.4 - §7.6).
+        """
+        ts = Logging.normalize_timestamp(payload.timestamp)
+
+        if not DashboardOperationType.has_value(payload.op_type):
+            return await AccessControl._reject_malformed_msg(
+                timestamp=ts,
+                target_id="DASHBOARD",
+                source="DashboardOperationPayload",
+                payload_details={"op_type": str(payload.op_type), "violation": "UNKNOWN_DASHBOARD_OP"},
+                message=f"Unknown dashboard operation '{payload.op_type}'.",
+                db_pool=db_pool,
+            )
+
+        # 1. Session Existence Check
+        session = AccessControl.active_dashboard_sessions.get(payload.session_token)
+        if not session:
+            return AuthorizationResult.deny(
+                DenialReason.SESSION_INVALID,
+                message="No active dashboard session found.",
+            )
+
+        # 2. Virtual Clock Inactivity Expiration Check + JIT Lazy Eviction (`OR-19, SEC-2.15`)
+        if ts > session["expires_at"]:
+            del AccessControl.active_dashboard_sessions[payload.session_token]
+            try:
+                await Logging.write_audit(
+                    timestamp=ts,
+                    actor_id=session["credential_id"],
+                    actor_role=session["role"],
+                    action_type=AuditActionType.ADMIN_LOGOUT,
+                    target_id="DASHBOARD",
+                    event_payload={
+                        "reason": "TIMEOUT",
+                        "session_token": payload.session_token,
+                    },
+                    db_pool=db_pool,
+                )
+            except Exception:
+                pass
+            return AuthorizationResult.deny(
+                DenialReason.SESSION_EXPIRED,
+                message="Dashboard session timed out after 15 minutes of inactivity.",
+                credential_id=session["credential_id"],
+            )
+
+        # 3. Reset Sliding Inactivity Timeout (Hold & Extend TTL)
+        session["expires_at"] = ts + timedelta(seconds=AccessControl.DASHBOARD_SESSION_TIMEOUT_SECONDS)
+        session["last_active_at"] = ts
+
+        # 4. Role Entitlement Verification (§7.4 Permission Matrix)
+        user_role = session["role"]
+        op_enum = DashboardOperationType(payload.op_type)
+        if not DASHBOARD_PERMISSIONS.get(user_role, {}).get(op_enum, False):
+            try:
+                await Logging.write_audit(
+                    timestamp=ts,
+                    actor_id=session["credential_id"],
+                    actor_role=user_role,
+                    action_type=AuditActionType.UNAUTHORIZED_CMD_REJECTED,
+                    target_id="DASHBOARD",
+                    event_payload={
+                        "attempted_operation": op_enum.value,
+                        "role": user_role,
+                        "reason": "MISSING_REQUIRED_ROLE",
+                        "session_token": payload.session_token,
+                    },
+                    db_pool=db_pool,
+                )
+            except Exception:
+                return AccessControl._fail_closed(session["credential_id"])
+            return AuthorizationResult.deny(
+                DenialReason.UNAUTHORIZED_ROLE,
+                message=f"Role '{user_role}' is not authorized to execute '{op_enum.value}'.",
+                credential_id=session["credential_id"],
+            )
+
+        # 5. Authorization Granted
+        return AuthorizationResult.allow(
+            message="Authorized.",
+            session_token=payload.session_token,
+            credential_id=session["credential_id"],
+            details={
+                "role": user_role,
+                "user_id": session["user_id"],
+                "op_type": op_enum.value,
+                "expires_at": session["expires_at"],
+            },
+        )
+
+    @staticmethod
+    async def logout_dashboard_session(
+        session_token: str,
+        timestamp: Optional[datetime] = None,
+        db_pool: type[DbConnectionPool] = DbConnectionPool,
+    ) -> AuthorizationResult:
+        """
+        Explicitly terminate an active dashboard session and emit `ADMIN_LOGOUT`
+        with `reason = 'MANUAL'` (§7.6).
+        """
+        ts = Logging.normalize_timestamp(timestamp or datetime.now())
+        session = AccessControl.active_dashboard_sessions.pop(session_token, None)
+        if session is None:
+            return AuthorizationResult.deny(
+                DenialReason.SESSION_INVALID,
+                message="No active dashboard session found.",
+            )
+
+        try:
+            await Logging.write_audit(
+                timestamp=ts,
+                actor_id=session["credential_id"],
+                actor_role=session["role"],
+                action_type=AuditActionType.ADMIN_LOGOUT,
+                target_id="DASHBOARD",
+                event_payload={
+                    "reason": "MANUAL",
+                    "session_token": session_token,
+                },
+                db_pool=db_pool,
+            )
+        except Exception:
+            return AccessControl._fail_closed(session["credential_id"])
+
+        return AuthorizationResult.allow(
+            message="Dashboard session logged out.",
+            credential_id=session["credential_id"],
+            details={"reason": "MANUAL", "session_token": session_token},
+        )

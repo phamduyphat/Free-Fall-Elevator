@@ -7,6 +7,8 @@ from acs.accesscontrol import (
     CredentialManagementPayload,
     CredentialStatus,
     CredentialType,
+    DashboardOperationPayload,
+    DashboardOperationType,
     E5ServiceRunPayload,
     ElevatorId,
     EmergencyOverridePayload,

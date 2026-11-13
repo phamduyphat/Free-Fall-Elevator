@@ -397,3 +397,154 @@ For real-time lock-step tick performance, `ACS.AccessControl` maintains the foll
    Map: `credential_id -> [list of failed timestamps in last 60s]`. Alert fires when `len >= 3`.
 4. **Unregistered Scan Counter (`SEC-2.19`):**  
    Sliding 5-minute set of unique unknown card IDs. Alert fires when `unique_ids.size >= 11`.
+
+---
+
+## 7. Amendment: Card-Based Dashboard Session Lifecycle & Sliding TTL Management (`SEC-2.13, SEC-2.15, OR-19`)
+
+### 7.1 Motivation & Architectural Scope
+While §3.1 and §6 specify short-lived in-cabin presentation tokens (`active_car_sessions`, 5s for residents, 30s for staff) for one-tap destination selection inside an elevator cab, administrative and technician interfaces (`UI-3, UI-4, UI-10`) require persistent authenticated dashboard sessions.
+
+Per **`OR-19`** and **`SEC-2.15`**, dashboard sessions are subject to a **15-minute inactivity timeout**. To preserve authentication consistency across SREMS without introducing secondary authentication mechanisms (e.g., passwords or biometric systems, which are out of scope per SRS §2.5), **dashboard authentication remains strictly card-based**.
+
+### 7.2 Card Swipe Payload Extension (`CardSwipePayload`)
+The in-memory credential presentation contract (`CardSwipePayload`, §4.1) is augmented with an explicit destination context flag:
+
+```python
+@dataclass(frozen=True)
+class CardSwipePayload:
+    credential_id: str                          # Unique presented card identifier
+    timestamp: datetime                         # Virtual simulation clock timestamp (T_sim)
+    elevator_id: str | None = None              # 'E1'-'E5' for cab readers; None for dashboard
+    is_dashboard_access: bool = False           # Flag: True for dashboard login, False for in-cabin
+```
+
+#### Entitlement & Validation Rules:
+1. **Dashboard Role Entitlement (`SEC-2.13, UI-10`):**
+   When `is_dashboard_access == True`, `ACS.AccessControl` verifies role permissions:
+   * **`ADMIN`:** Permitted full access (Fleet monitoring, credential management, emergency overrides, analytics export, audit integrity check).
+   * **`TECHNICIAN`:** Permitted diagnostic access (`UI-4, MNT-4.2, MNT-4.5`: Fleet diagnosis, maintenance mode entry/exit, return to service).
+   * **`RESIDENT`, `VISITOR`, `BUILDING_SERVICE`:** Denied immediately with reason `DASHBOARD_ACCESS_DENIED`. Emits `ACCESS_DENIAL` audit record (`SEC-2.6`).
+2. **Credential State Check (`SEC-2.16`):**
+   The presented card must be `ACTIVE`. Any card in `SUSPENDED`, `REVOKED`, or `EXPIRED` state is rejected and logged.
+
+### 7.3 Dashboard Session Creation & Timeout Constant
+* **Virtual Inactivity Timeout Constant (`OR-19`):**
+  $$\text{DASHBOARD\_SESSION\_TIMEOUT\_SECONDS} = 15 \times 60 = 900\text{ seconds (15 virtual minutes)}$$
+* **Session Instantiation (`ACS.AccessControl`):**
+  Upon successful validation, a session record is generated and stored in the in-memory map `active_dashboard_sessions`:
+  ```python
+  session_token = str(uuid4())
+  expires_at = current_virtual_timestamp + timedelta(seconds=DASHBOARD_SESSION_TIMEOUT_SECONDS)
+
+  active_dashboard_sessions[session_token] = {
+      "session_token": session_token,
+      "credential_id": credential_id,
+      "user_id": user_id,
+      "role": role,
+      "created_at": current_virtual_timestamp,
+      "last_active_at": current_virtual_timestamp,
+      "expires_at": expires_at
+  }
+  ```
+* **Audit Logging:** Emits an `ADMIN_LOGIN` event to `audit_log_chain` recording `session_token`, `credential_id`, and `role`.
+
+### 7.4 Dashboard Operation Types & Role Entitlement Matrix (`SEC-2.13`)
+Privileged dashboard operations are categorized via a dedicated enum mirroring the system permissions defined in §1 Table 2:
+
+```python
+class DashboardOperationType(str, Enum):
+    VIEW_FLEET_STATUS        = "VIEW_FLEET_STATUS"        # Real-time positions, directions, states (UI-10)
+    VIEW_DIAGNOSTICS         = "VIEW_DIAGNOSTICS"         # Fault codes, stale state, call history (UI-4, MNT-4.5)
+    MAINTENANCE_CONTROL      = "MAINTENANCE_CONTROL"      # Enter maintenance mode, return to service (MNT-4.3, MNT-4.6)
+    MANAGE_CREDENTIALS       = "MANAGE_CREDENTIALS"       # Issue, suspend, reinstate, revoke cards (SEC-2.16, SEC-2.17)
+    EMERGENCY_OVERRIDE       = "EMERGENCY_OVERRIDE"       # Manual door override, recall, rescue car (EMR-3.8, EMR-3.12)
+    VIEW_AUDIT_LOGS          = "VIEW_AUDIT_LOGS"          # Search security incidents & audit ledger (SEC-2.14, ANA-5.7)
+    RUN_AUDIT_INTEGRITY      = "RUN_AUDIT_INTEGRITY"      # Cryptographic SHA-256 chain verification (ANA-5.8, VT-10)
+    EXPORT_ANALYTICS_REPORTS = "EXPORT_ANALYTICS_REPORTS" # Performance KPI export CSV/JSON (ANA-5.9, BEN-4)
+```
+
+The table below defines the exact authorization mapping for dashboard operations by role:
+
+| `DashboardOperationType` | Governing SRS Mandates | `TECHNICIAN` | `ADMIN` | Non-Dashboard Roles (`RESIDENT`, `VISITOR`, `BUILDING_SERVICE`) |
+| :--- | :--- | :---: | :---: | :---: |
+| `VIEW_FLEET_STATUS` | `UI-10, PERF-2` | **ALLOWED** | **ALLOWED** | DENIED (`DASHBOARD_ACCESS_DENIED`) |
+| `VIEW_DIAGNOSTICS` | `UI-4, MNT-4.2, MNT-4.5` | **ALLOWED** | **ALLOWED** | DENIED (`DASHBOARD_ACCESS_DENIED`) |
+| `MAINTENANCE_CONTROL` | `MNT-4.3, MNT-4.6, VT-09` | **ALLOWED** | **ALLOWED** | DENIED (`DASHBOARD_ACCESS_DENIED`) |
+| `MANAGE_CREDENTIALS` | `SEC-2.16, SEC-2.17, VT-17` | DENIED | **ALLOWED** | DENIED (`DASHBOARD_ACCESS_DENIED`) |
+| `EMERGENCY_OVERRIDE` | `EMR-3.8, EMR-3.12, VT-13` | DENIED | **ALLOWED** | DENIED (`DASHBOARD_ACCESS_DENIED`) |
+| `VIEW_AUDIT_LOGS` | `SEC-2.14, ANA-5.7, VT-29` | DENIED | **ALLOWED** | DENIED (`DASHBOARD_ACCESS_DENIED`) |
+| `RUN_AUDIT_INTEGRITY` | `ANA-5.8, VT-10` | DENIED | **ALLOWED** | DENIED (`DASHBOARD_ACCESS_DENIED`) |
+| `EXPORT_ANALYTICS_REPORTS` | `ANA-5.9, BEN-4, VT-29` | DENIED | **ALLOWED** | DENIED (`DASHBOARD_ACCESS_DENIED`) |
+
+### 7.5 `DashboardOperationPayload` & `validate_dashboard_operation` Contract
+Akin to in-cabin payloads in §4, all dashboard interactions pass through a standardized validation contract:
+
+```python
+@dataclass(frozen=True)
+class DashboardOperationPayload:
+    session_token: str                          # Active 15-minute dashboard session UUID
+    op_type: DashboardOperationType             # Targeted dashboard operation enum
+    timestamp: datetime                         # Virtual simulation clock timestamp (T_sim)
+    details: dict = field(default_factory=dict) # Operation arguments (e.g. car_id, target_credential_id)
+```
+
+#### Validation & Sliding TTL Logic (`validate_dashboard_operation`):
+```python
+def validate_dashboard_operation(payload: DashboardOperationPayload) -> AuthorizationResult:
+    # 1. Session Existence Check
+    session = active_dashboard_sessions.get(payload.session_token)
+    if not session:
+        return AuthorizationResult(
+            allowed=False, 
+            error_code="SESSION_INVALID", 
+            message="No active dashboard session found"
+        )
+
+    # 2. Virtual Clock Inactivity Expiration Check (OR-19, SEC-2.15)
+    if payload.timestamp > session["expires_at"]:
+        del active_dashboard_sessions[payload.session_token]
+        ACS.Logging.record_audit_event(
+            action_type="ADMIN_LOGOUT",
+            actor_id=session["credential_id"],
+            payload={"reason": "TIMEOUT", "session_token": payload.session_token}
+        )
+        return AuthorizationResult(
+            allowed=False, 
+            error_code="SESSION_EXPIRED", 
+            message="Dashboard session timed out after 15 minutes of inactivity"
+        )
+
+    # 3. Reset Sliding Inactivity Timeout (Hold & Extend TTL)
+    session["expires_at"] = payload.timestamp + timedelta(seconds=DASHBOARD_SESSION_TIMEOUT_SECONDS)
+    session["last_active_at"] = payload.timestamp
+
+    # 4. Role Entitlement Verification (§7.4 Permission Matrix)
+    user_role = session["role"]
+    if not DASHBOARD_PERMISSIONS[user_role].get(payload.op_type, False):
+        ACS.Logging.record_audit_event(
+            action_type="UNAUTHORIZED_CMD_REJECTED",
+            actor_id=session["credential_id"],
+            payload={
+                "attempted_operation": payload.op_type.value,
+                "role": user_role,
+                "reason": "MISSING_REQUIRED_ROLE"
+            }
+        )
+        return AuthorizationResult(
+            allowed=False, 
+            error_code="UNAUTHORIZED_ROLE", 
+            message=f"Role '{user_role}' is not authorized to execute '{payload.op_type.value}'"
+        )
+
+    # 5. Authorization Granted
+    return AuthorizationResult(allowed=True, error_code=None, message="Authorized")
+```
+
+### 7.6 JIT Eviction vs. Key Rescanning Optimization
+* **Performance Rationale:**
+  Elevator simulations operate on rapid, high-frequency execution cycles (e.g., 1 Hz to 1,000 Hz in headless benchmark runs). Running a recurring background loop to scan and garbage-collect expired session keys on every tick would introduce unnecessary CPU overhead and lock contention.
+* **Just-In-Time (JIT) Lazy Eviction:**
+  Expired session keys are evaluated and evicted **strictly on-demand** inside `validate_dashboard_operation`. If an abandoned session is never accessed again, it remains dormant with zero compute penalty until explicitly cleared on shutdown or test reset.
+* **Manual Logout:**
+  An explicit dashboard logout request immediately purges `session_token` from `active_dashboard_sessions` and logs an `ADMIN_LOGOUT` event with `reason = "MANUAL"`.
