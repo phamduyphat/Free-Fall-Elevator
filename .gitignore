@@ -5,6 +5,7 @@ __pycache__/
 
 # C extensions
 *.so
+*.pyc
 
 # Distribution / packaging
 .Python
@@ -77,3 +78,4 @@ dmypy.json
 .idea/
 .DS_Store
 Thumbs.db
+__pycache__

@@ -225,13 +225,17 @@ CREATE TABLE IF NOT EXISTS hall_calls (
     wait_time_seconds    DOUBLE PRECISION NULL,
     reassignments_count  INT              NOT NULL DEFAULT 0,
     no_boarding          BOOLEAN          NOT NULL DEFAULT FALSE,
-    cancellation_reason  VARCHAR(50)      NULL
+    cancellation_reason  VARCHAR(50)      NULL,
+    traffic_profile      VARCHAR(20)      NULL CHECK (
+        traffic_profile IS NULL OR traffic_profile IN ('PEAK', 'OFF_PEAK', 'NORMAL', 'STRESS')
+    )
 );
 
 CREATE INDEX IF NOT EXISTS idx_hall_calls_status ON hall_calls (status);
 CREATE INDEX IF NOT EXISTS idx_hall_calls_created_at ON hall_calls (created_at);
 CREATE INDEX IF NOT EXISTS idx_hall_calls_assigned_elevator ON hall_calls (assigned_elevator_id);
 CREATE INDEX IF NOT EXISTS idx_hall_calls_origin_floor ON hall_calls (origin_floor);
+CREATE INDEX IF NOT EXISTS idx_hall_calls_traffic_profile ON hall_calls (traffic_profile);
 
 -- 4.3 `car_calls` (In-Cabin Destination Request Lifecycle - DAT-1, ANA-5.1, FR-1.8, FR-1.9, FR-1.12)
 CREATE TABLE IF NOT EXISTS car_calls (

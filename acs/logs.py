@@ -87,6 +87,11 @@ class AuditActionType(StrEnum):
     COMMAND_CONFLICT_REJECTED = "COMMAND_CONFLICT_REJECTED"
     UNAUTHORIZED_CMD_REJECTED = "UNAUTHORIZED_CMD_REJECTED"
     INTEGRITY_CHECK_RUN = "INTEGRITY_CHECK_RUN"
+    REPORT_EXPORTED = "REPORT_EXPORTED"
+    SYSTEM_STARTUP = "SYSTEM_STARTUP"
+    SYSTEM_SHUTDOWN = "SYSTEM_SHUTDOWN"
+    DATA_BACKUP_CREATED = "DATA_BACKUP_CREATED"
+    DATA_RESTORE_COMPLETED = "DATA_RESTORE_COMPLETED"
 
 
 @dataclass
@@ -612,3 +617,49 @@ class Logging:
                         pass
                 result.append(item)
             return result
+
+    @staticmethod
+    async def search_incidents(
+        *,
+        status: Optional[str] = None,
+        emergency_type: Optional[str] = None,
+        elevator_id: Optional[str] = None,
+        start_time: Optional[datetime] = None,
+        end_time: Optional[datetime] = None,
+        limit: int = 100,
+        db_pool: type[DbConnectionPool] = DbConnectionPool,
+    ) -> list[dict[str, Any]]:
+        """Query `incidents` with optional filters (`ANA-5.7, SEC-2.14, EMR-3.4`)."""
+        clauses: list[str] = []
+        params: list[Any] = []
+
+        if status is not None:
+            params.append(str(status))
+            clauses.append(f"status = ${len(params)}")
+        if emergency_type is not None:
+            params.append(str(emergency_type))
+            clauses.append(f"emergency_type = ${len(params)}")
+        if elevator_id is not None:
+            params.append(str(elevator_id))
+            clauses.append(f"elevator_id = ${len(params)}")
+        if start_time is not None:
+            params.append(Logging.normalize_timestamp(start_time))
+            clauses.append(f"created_at >= ${len(params)}")
+        if end_time is not None:
+            params.append(Logging.normalize_timestamp(end_time))
+            clauses.append(f"created_at <= ${len(params)}")
+
+        where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        params.append(limit)
+        query = f"""
+            SELECT *
+            FROM incidents
+            {where_sql}
+            ORDER BY created_at DESC
+            LIMIT ${len(params)}
+        """
+        async with db_pool.acquire() as conn:
+            rows = await conn.fetch(query, *params)
+            return [dict(row) for row in rows]
+
+    search_audit_records = search_audit_logs
