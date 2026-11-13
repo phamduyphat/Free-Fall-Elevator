@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections.abc import Callable
 from datetime import datetime, timedelta
 import json
 from typing import Any, Optional
@@ -46,7 +45,7 @@ def parse_allowed_floors(
     role: str,
     assigned_floor: Optional[int] = None,
 ) -> list[int]:
-    if UserRole.is_admin(role):
+    if role == UserRole.ADMIN:
         return list(ALL_BUILDING_FLOORS)
 
     floors: list[int] = []
@@ -73,21 +72,6 @@ def fail_closed(credential_id: Optional[str] = None) -> AuthorizationResult:
         message="Database error: fail-closed policy enforced.",
         credential_id=credential_id,
     )
-
-
-def check_active_credential(
-    record: Optional[dict[str, Any]],
-    credential_id: str,
-    message: str = "Active credential required.",
-) -> Optional[AuthorizationResult]:
-    if record is None or record["status"] != CredentialStatus.ACTIVE:
-        reason = (
-            DenialReason.UNREGISTERED_CARD
-            if record is None
-            else DenialReason(f"CARD_{record['status']}")
-        )
-        return AuthorizationResult.deny(reason, message=message, credential_id=credential_id)
-    return None
 
 
 async def reject_unauthorized_role(
@@ -129,7 +113,6 @@ async def authorize_credential_role(
     credential_id: str,
     ts: datetime,
     *,
-    role_check: Callable[[str], bool],
     required_roles: list[str],
     inactive_msg: str,
     unauth_msg: str,
@@ -141,12 +124,18 @@ async def authorize_credential_role(
     record = await fetch_and_refresh_credential(
         conn, credential_id, ts, db_pool=db_pool
     )
-    denial = check_active_credential(record, credential_id, inactive_msg)
-    if denial:
-        return None, denial
-    assert record is not None
+    if record is None or record["status"] != CredentialStatus.ACTIVE:
+        reason = (
+            DenialReason.UNREGISTERED_CARD
+            if record is None
+            else DenialReason(f"CARD_{record['status']}")
+        )
+        return None, AuthorizationResult.deny(
+            reason, message=inactive_msg, credential_id=credential_id
+        )
+
     role = record["user_role"]
-    if not role_check(role):
+    if role not in required_roles:
         return None, await reject_unauthorized_role(
             timestamp=ts,
             actor_id=credential_id,
@@ -255,113 +244,91 @@ async def record_unregistered_scan(
 
 
 async def apply_credential_transitions(
-    target: dict[str, Any] | list[dict[str, Any]] | list[Any],
+    rec: dict[str, Any],
     current_time: datetime,
     conn: asyncpg.Connection,
     db_pool: type[DbConnectionPool] = DbConnectionPool,
-    *,
-    is_bulk: Optional[bool] = None,
-) -> Any:
+) -> dict[str, Any]:
     """
-    Unified state transition engine for both single-card and bulk operations.
+    On-demand JIT state transition engine for a single credential record:
     - 4h visitor pass expiration (SEC-2.22) -> transitions ACTIVE to EXPIRED
     - 72h lost-card review window (SEC-2.17) -> transitions SUSPENDED to REVOKED
-    When is_bulk is True (or inferred from a list target):
-        Returns dict: {"expired_credentials": [...], "revoked_credentials": [...]}
-    When is_bulk is False (or inferred from a dict target):
-        Mutates record in-place and returns the updated record dict.
     """
-    items: list[dict[str, Any]] = [
-        dict(r) if not isinstance(r, dict) else r
-        for r in (target if isinstance(target, list) else [target])
-    ]
-    bulk_mode = is_bulk if is_bulk is not None else isinstance(target, list)
-    expired_ids: list[str] = []
-    revoked_ids: list[str] = []
+    cid = rec["credential_id"]
+    status = rec["status"]
     review_window = timedelta(seconds=LOST_CARD_REVIEW_WINDOW_SECONDS)
 
-    for rec in items:
-        cid = rec["credential_id"]
-        status = rec["status"]
+    # 1. Visitor Pass / Time-Limited Credential Expiration (SEC-2.22, VT-31)
+    if status == CredentialStatus.ACTIVE and rec.get("expires_at") is not None:
+        expires_at_dt = Logging.normalize_timestamp(rec["expires_at"])
+        created_at_dt = Logging.normalize_timestamp(rec["created_at"])
+        if current_time >= expires_at_dt:
+            await conn.execute(
+                "UPDATE credentials SET status = $2, updated_at = $3 WHERE credential_id = $1",
+                cid,
+                CredentialStatus.EXPIRED.value,
+                current_time,
+            )
+            rec["status"] = CredentialStatus.EXPIRED.value
+            rec["updated_at"] = current_time
+            await Logging.write_audit(
+                timestamp=current_time,
+                actor_id=UserRole.SYSTEM,
+                actor_role=UserRole.SYSTEM,
+                action_type=AuditActionType.VISITOR_PASS_EXPIRED,
+                target_id=cid,
+                event_payload={
+                    "credential_id": cid,
+                    "expires_at": Logging.format_timestamp(expires_at_dt),
+                    "total_valid_duration_seconds": (
+                        expires_at_dt - created_at_dt
+                    ).total_seconds(),
+                    "final_status": CredentialStatus.EXPIRED.value,
+                },
+                db_pool=db_pool,
+            )
 
-        # 1. Visitor Pass / Time-Limited Credential Expiration (SEC-2.22, VT-31)
-        if status == CredentialStatus.ACTIVE and rec.get("expires_at") is not None:
-            expires_at_dt = Logging.normalize_timestamp(rec["expires_at"])
-            created_at_dt = Logging.normalize_timestamp(rec["created_at"])
-            if current_time >= expires_at_dt:
-                await conn.execute(
-                    "UPDATE credentials SET status = $2, updated_at = $3 WHERE credential_id = $1",
-                    cid,
-                    CredentialStatus.EXPIRED.value,
-                    current_time,
-                )
-                rec["status"] = CredentialStatus.EXPIRED.value
-                rec["updated_at"] = current_time
-                expired_ids.append(cid)
-                await Logging.write_audit(
-                    timestamp=current_time,
-                    actor_id=UserRole.SYSTEM,
-                    actor_role=UserRole.SYSTEM,
-                    action_type=AuditActionType.VISITOR_PASS_EXPIRED,
-                    target_id=cid,
-                    event_payload={
-                        "credential_id": cid,
-                        "expires_at": Logging.format_timestamp(expires_at_dt),
-                        "total_valid_duration_seconds": (
-                            expires_at_dt - created_at_dt
-                        ).total_seconds(),
-                        "final_status": CredentialStatus.EXPIRED.value,
-                    },
-                    db_pool=db_pool,
-                )
+    # 2. 72-Hour Lost Card Review Window Auto-Revocation (SEC-2.17)
+    elif (
+        status == CredentialStatus.SUSPENDED
+        and rec.get("suspension_reason") == SuspensionReason.LOST
+        and rec.get("suspension_start") is not None
+    ):
+        suspension_start_dt = Logging.normalize_timestamp(rec["suspension_start"])
+        if (current_time - suspension_start_dt) >= review_window:
+            await conn.execute(
+                """
+                UPDATE credentials
+                SET status = $2,
+                    revocation_reason = 'WINDOW_EXPIRED',
+                    revoked_at = $3,
+                    updated_at = $3
+                WHERE credential_id = $1
+                """,
+                cid,
+                CredentialStatus.REVOKED.value,
+                current_time,
+            )
+            rec["status"] = CredentialStatus.REVOKED.value
+            rec["revocation_reason"] = "WINDOW_EXPIRED"
+            rec["revoked_at"] = current_time
+            rec["updated_at"] = current_time
+            await Logging.write_audit(
+                timestamp=current_time,
+                actor_id=UserRole.SYSTEM,
+                actor_role=UserRole.SYSTEM,
+                action_type=AuditActionType.CREDENTIAL_REVOKED,
+                target_id=cid,
+                event_payload={
+                    "credential_id": cid,
+                    "trigger": "WINDOW_EXPIRED",
+                    "suspension_start": Logging.format_timestamp(suspension_start_dt),
+                    "revoked_at": Logging.format_timestamp(current_time),
+                },
+                db_pool=db_pool,
+            )
 
-        # 2. 72-Hour Lost Card Review Window Auto-Revocation (SEC-2.17)
-        elif (
-            status == CredentialStatus.SUSPENDED
-            and rec.get("suspension_reason") == SuspensionReason.LOST
-            and rec.get("suspension_start") is not None
-        ):
-            suspension_start_dt = Logging.normalize_timestamp(rec["suspension_start"])
-            if (current_time - suspension_start_dt) >= review_window:
-                await conn.execute(
-                    """
-                    UPDATE credentials
-                    SET status = $2,
-                        revocation_reason = 'WINDOW_EXPIRED',
-                        revoked_at = $3,
-                        updated_at = $3
-                    WHERE credential_id = $1
-                    """,
-                    cid,
-                    CredentialStatus.REVOKED.value,
-                    current_time,
-                )
-                rec["status"] = CredentialStatus.REVOKED.value
-                rec["revocation_reason"] = "WINDOW_EXPIRED"
-                rec["revoked_at"] = current_time
-                rec["updated_at"] = current_time
-                revoked_ids.append(cid)
-                await Logging.write_audit(
-                    timestamp=current_time,
-                    actor_id=UserRole.SYSTEM,
-                    actor_role=UserRole.SYSTEM,
-                    action_type=AuditActionType.CREDENTIAL_REVOKED,
-                    target_id=cid,
-                    event_payload={
-                        "credential_id": cid,
-                        "trigger": "WINDOW_EXPIRED",
-                        "suspension_start": Logging.format_timestamp(suspension_start_dt),
-                        "revoked_at": Logging.format_timestamp(current_time),
-                    },
-                    db_pool=db_pool,
-                )
-
-    if bulk_mode:
-        return {
-            "expired_credentials": expired_ids,
-            "revoked_credentials": revoked_ids,
-        }
-    return items[0]
+    return rec
 
 
 async def fetch_and_refresh_credential(
@@ -386,97 +353,62 @@ async def fetch_and_refresh_credential(
     )
     if row is None:
         return None
-    res = await apply_credential_transitions(
-        dict(row), current_time, conn, db_pool, is_bulk=False
-    )
-    return res
+    return await apply_credential_transitions(dict(row), current_time, conn, db_pool)
 
 
-async def handle_unregistered_swipe(
+async def verify_swipe_credential(
+    conn: asyncpg.Connection,
     payload: CardSwipePayload,
     ts: datetime,
     db_pool: type[DbConnectionPool],
-) -> AuthorizationResult:
+) -> tuple[Optional[dict[str, Any]], Optional[AuthorizationResult]]:
+    """Fetch, refresh, and verify active credential status for card swipes."""
+    record = await fetch_and_refresh_credential(
+        conn, payload.credential_id, ts, db_pool
+    )
+    if record is not None and record["status"] == CredentialStatus.ACTIVE:
+        return record, None
+
     target_label = "DASHBOARD" if payload.is_dashboard_access else str(payload.elevator_id)
-    repeat_alert = await record_failed_attempt(
-        credential_id=payload.credential_id,
-        car_id=target_label,
-        timestamp=ts,
-        reason=DenialReason.UNREGISTERED_CARD,
-        db_pool=db_pool,
-    )
-    scan_alert = await record_unregistered_scan(
-        credential_id=payload.credential_id,
-        car_id=target_label,
-        timestamp=ts,
-        db_pool=db_pool,
-    )
-    alert_fired = repeat_alert or scan_alert
-
-    await Logging.record_security_incident(
-        timestamp=ts,
-        credential_id=payload.credential_id,
-        actor_role=UserRole.SYSTEM,
-        target_id=target_label,
-        action_type=AuditActionType.ACCESS_DENIAL,
-        event_payload={
-            "elevator_id": payload.elevator_id,
-            "is_dashboard_access": payload.is_dashboard_access,
-            "origin_floor": payload.origin_floor,
-            "denial_reason": DenialReason.UNREGISTERED_CARD.value,
-        },
-        elevator_id=None if payload.is_dashboard_access else str(payload.elevator_id),
-        origin_floor=payload.origin_floor,
-        destination_floor=payload.origin_floor,
-        denial_reason=DenialReason.UNREGISTERED_CARD,
-        alert_triggered=alert_fired,
-        db_pool=db_pool,
-    )
-    return AuthorizationResult.deny(
-        DenialReason.UNREGISTERED_CARD,
-        message="Unregistered credential presented.",
-        credential_id=payload.credential_id,
-        alert_triggered=alert_fired,
-    )
-
-
-async def handle_inactive_swipe(
-    record: dict[str, Any],
-    payload: CardSwipePayload,
-    ts: datetime,
-    db_pool: type[DbConnectionPool],
-) -> AuthorizationResult:
-    status = record["status"]
-    user_role = record["user_role"]
-    alert_fired = False
     car_id_or_none = None if payload.is_dashboard_access else str(payload.elevator_id)
-    target_label = "DASHBOARD" if payload.is_dashboard_access else str(payload.elevator_id)
-
     alert_type: Optional[AlertType] = None
     alert_severity: Optional[AlertSeverity] = None
     alert_details: Optional[str] = None
+    scan_alert = False
 
-    if status == CredentialStatus.SUSPENDED:
-        denial_reason = DenialReason.CARD_SUSPENDED
-        alert_severity = AlertSeverity.HIGH
-        alert_type = (
-            AlertType.CLONED_CREDENTIAL
-            if record.get("suspension_reason") == SuspensionReason.CLONE_SUSPECTED
-            else AlertType.LOST_CARD_USAGE
+    if record is None:
+        denial_reason = DenialReason.UNREGISTERED_CARD
+        actor_role = UserRole.SYSTEM
+        message = "Unregistered credential presented."
+        scan_alert = await record_unregistered_scan(
+            credential_id=payload.credential_id,
+            car_id=target_label,
+            timestamp=ts,
+            db_pool=db_pool,
         )
-        alert_details = (
-            f"Suspended credential '{payload.credential_id}' "
-            f"(reason: {record.get('suspension_reason')}) tapped at {target_label}."
-        )
-        alert_fired = True
-    elif status == CredentialStatus.REVOKED:
-        denial_reason = DenialReason.CARD_REVOKED
-        alert_severity = AlertSeverity.HIGH
-        alert_type = AlertType.REVOKED_CARD_USAGE
-        alert_details = f"Revoked credential '{payload.credential_id}' tapped at {target_label}."
-        alert_fired = True
     else:
-        denial_reason = DenialReason.CARD_EXPIRED
+        status = record["status"]
+        actor_role = record["user_role"]
+        message = f"Credential is {status}."
+        if status == CredentialStatus.SUSPENDED:
+            denial_reason = DenialReason.CARD_SUSPENDED
+            alert_severity = AlertSeverity.HIGH
+            alert_type = (
+                AlertType.CLONED_CREDENTIAL
+                if record.get("suspension_reason") == SuspensionReason.CLONE_SUSPECTED
+                else AlertType.LOST_CARD_USAGE
+            )
+            alert_details = (
+                f"Suspended credential '{payload.credential_id}' "
+                f"(reason: {record.get('suspension_reason')}) tapped at {target_label}."
+            )
+        elif status == CredentialStatus.REVOKED:
+            denial_reason = DenialReason.CARD_REVOKED
+            alert_severity = AlertSeverity.HIGH
+            alert_type = AlertType.REVOKED_CARD_USAGE
+            alert_details = f"Revoked credential '{payload.credential_id}' tapped at {target_label}."
+        else:
+            denial_reason = DenialReason.CARD_EXPIRED
 
     repeat_alert = await record_failed_attempt(
         credential_id=payload.credential_id,
@@ -485,12 +417,12 @@ async def handle_inactive_swipe(
         reason=denial_reason,
         db_pool=db_pool,
     )
-    alert_fired = alert_fired or repeat_alert
+    alert_fired = repeat_alert or scan_alert or (alert_type is not None)
 
     await Logging.record_security_incident(
         timestamp=ts,
         credential_id=payload.credential_id,
-        actor_role=user_role,
+        actor_role=actor_role,
         target_id=target_label,
         action_type=AuditActionType.ACCESS_DENIAL,
         event_payload={
@@ -510,33 +442,9 @@ async def handle_inactive_swipe(
         primary_car_id=car_id_or_none,
         db_pool=db_pool,
     )
-    return AuthorizationResult.deny(
+    return None, AuthorizationResult.deny(
         denial_reason,
-        message=f"Credential is {status}.",
+        message=message,
         credential_id=payload.credential_id,
         alert_triggered=alert_fired,
     )
-
-
-async def verify_swipe_credential(
-    conn: asyncpg.Connection,
-    payload: CardSwipePayload,
-    ts: datetime,
-    db_pool: type[DbConnectionPool],
-) -> tuple[Optional[dict[str, Any]], Optional[AuthorizationResult]]:
-    """Fetch, refresh, and verify active credential status for card swipes."""
-    record = await fetch_and_refresh_credential(
-        conn, payload.credential_id, ts, db_pool
-    )
-    if record is None:
-        return None, await handle_unregistered_swipe(payload, ts, db_pool)
-
-    if record["status"] in (
-        CredentialStatus.SUSPENDED,
-        CredentialStatus.REVOKED,
-        CredentialStatus.EXPIRED,
-    ):
-        return None, await handle_inactive_swipe(record, payload, ts, db_pool)
-
-    return record, None
-

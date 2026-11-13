@@ -1,4 +1,5 @@
 from acs.cab_accesscontrol import CabAccessControl
+from acs.credential_accesscontrol import CredentialAccessControl
 from acs.dashboard_accesscontrol import DashboardAccessControl
 from acs.enums import (
     AlertSeverity,
@@ -17,6 +18,7 @@ from acs.enums import (
     SuspensionReason,
     UserRole,
 )
+from acs.fleet_accesscontrol import FleetAccessControl
 from acs.logs import Logging
 from acs.payloads import (
     AuthorizationResult,
@@ -35,8 +37,10 @@ from acs.payloads import (
 
 
 class ACS:
-    """Namespace facade exposing `ACS.CabAccessControl`, `ACS.DashboardAccessControl`, and `ACS.Logging`."""
+    """Namespace facade exposing `CabAccessControl`, `DashboardAccessControl`, `CredentialAccessControl`, `FleetAccessControl`, and `Logging`."""
 
     CabAccessControl = CabAccessControl
+    CredentialAccessControl = CredentialAccessControl
     DashboardAccessControl = DashboardAccessControl
+    FleetAccessControl = FleetAccessControl
     Logging = Logging

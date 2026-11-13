@@ -29,20 +29,8 @@ class UserRole(StrEnum):
     SYSTEM = "SYSTEM"
 
     @classmethod
-    def can_initiate_service_run(cls, role: str) -> bool:
-        return role in (cls.BUILDING_SERVICE, cls.TECHNICIAN, cls.ADMIN)
-
-    @classmethod
     def can_request_e5_freight(cls, role: str) -> bool:
         return role in (cls.RESIDENT, cls.BUILDING_SERVICE, cls.TECHNICIAN, cls.ADMIN)
-
-    @classmethod
-    def can_perform_maintenance(cls, role: str) -> bool:
-        return role in (cls.TECHNICIAN, cls.ADMIN)
-
-    @classmethod
-    def is_admin(cls, role: str) -> bool:
-        return role == cls.ADMIN
 
 
 class CredentialType(StrEnum):

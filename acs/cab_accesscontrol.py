@@ -14,12 +14,10 @@ from acs.enums import (
     CredentialStatus,
     DenialReason,
     ElevatorId,
-    MaintenanceOperationType,
     SuspensionReason,
     UserRole,
 )
 from acs.helpers import (
-    authorize_credential_role,
     fail_closed,
     parse_allowed_floors,
     record_failed_attempt,
@@ -34,8 +32,6 @@ from acs.payloads import (
     CarDestinationRequestPayload,
     CardSwipePayload,
     E5ServiceRunPayload,
-    MaintenanceOperationPayload,
-    ReturnToServicePayload,
 )
 from db import DbConnectionPool
 
@@ -44,9 +40,9 @@ class CabAccessControl:
     """
     ACS.CabAccessControl submodule (`acs/cab_accesscontrol.py`).
     Validates authentication and role/floor authorization for in-cabin elevator
-    operations (card swipes, destination selection, E5 freight runs, and cab
-    maintenance/return-to-service), manages single-use per-car presentation tokens,
-    and detects cloned credentials across elevator cars.
+    operations (card swipes, destination selection, and E5 freight runs),
+    manages single-use per-car presentation tokens, and detects cloned
+    credentials across elevator cars.
     """
 
     RESIDENT_VISITOR_WINDOW_SECONDS: int = 5
@@ -102,22 +98,19 @@ class CabAccessControl:
             CabAccessControl.active_car_sessions.pop(prior_car, None)
         CabAccessControl.active_car_sessions.pop(str(payload.elevator_id), None)
 
-        cred_row = await conn.fetchrow(
-            "SELECT credential_id FROM credentials WHERE credential_id = $1",
+        updated_id = await conn.fetchval(
+            """
+            UPDATE credentials
+            SET status = $2, suspension_reason = $3, suspension_start = $4, updated_at = $4
+            WHERE credential_id = $1
+            RETURNING credential_id
+            """,
             payload.credential_id,
+            CredentialStatus.SUSPENDED.value,
+            SuspensionReason.CLONE_SUSPECTED.value,
+            ts,
         )
-        if cred_row is not None:
-            await conn.execute(
-                """
-                UPDATE credentials
-                SET status = $2, suspension_reason = $3, suspension_start = $4, updated_at = $4
-                WHERE credential_id = $1
-                """,
-                payload.credential_id,
-                CredentialStatus.SUSPENDED.value,
-                SuspensionReason.CLONE_SUSPECTED.value,
-                ts,
-            )
+        if updated_id is not None:
             await Logging.write_audit(
                 timestamp=ts,
                 actor_id=UserRole.SYSTEM,
@@ -163,70 +156,11 @@ class CabAccessControl:
         return True
 
     @staticmethod
-    async def _validate_cabin_swipe(
-        conn: asyncpg.Connection,
-        payload: CardSwipePayload,
-        ts: datetime,
-        db_pool: type[DbConnectionPool],
-    ) -> AuthorizationResult:
-        """Handle in-cabin card swipe, clone detection, and per-car token issuance."""
-        if await CabAccessControl._handle_if_cloned_swipe(conn, payload, ts, db_pool):
-            return AuthorizationResult.deny(
-                DenialReason.CARD_SUSPENDED,
-                message=f"Cloned credential detected on {payload.elevator_id}; card suspended.",
-                credential_id=payload.credential_id,
-                alert_triggered=True,
-                details={
-                    "suspension_reason": SuspensionReason.CLONE_SUSPECTED.value,
-                },
-            )
-
-        record, denial = await verify_swipe_credential(conn, payload, ts, db_pool)
-        if denial is not None:
-            return denial
-        assert record is not None
-
-        user_role = record["user_role"]
-        allowed_floors = parse_allowed_floors(
-            record["allowed_floors"],
-            role=user_role,
-            assigned_floor=record.get("assigned_floor"),
-        )
-        timeout_sec = (
-            CabAccessControl.STAFF_TECH_WINDOW_SECONDS
-            if user_role in (UserRole.BUILDING_SERVICE, UserRole.TECHNICIAN)
-            else CabAccessControl.RESIDENT_VISITOR_WINDOW_SECONDS
-        )
-        token = str(uuid.uuid4())
-        expires_at = ts + timedelta(seconds=timeout_sec)
-        CabAccessControl.active_car_sessions[str(payload.elevator_id)] = {
-            "session_token": token,
-            "credential_id": payload.credential_id,
-            "user_id": record["user_id"],
-            "role": user_role,
-            "allowed_floors": allowed_floors,
-            "granted_at": ts,
-            "expires_at": expires_at,
-            "consumed": False,
-        }
-        return AuthorizationResult.allow(
-            message="Card verified; destination selection window active.",
-            session_token=token,
-            credential_id=payload.credential_id,
-            details={
-                "elevator_id": str(payload.elevator_id),
-                "role": user_role,
-                "allowed_floors": allowed_floors,
-                "expires_at": expires_at,
-            },
-        )
-
-    @staticmethod
     async def validate_card_swipe(
         payload: CardSwipePayload,
         db_pool: type[DbConnectionPool] = DbConnectionPool,
     ) -> AuthorizationResult:
-        """Validate an in-cabin card swipe on an elevator reader."""
+        """Validate an in-cabin card swipe, detect cloning, and issue a per-car token."""
         ts = Logging.normalize_timestamp(payload.timestamp)
 
         if payload.is_dashboard_access or not ElevatorId.has_value(payload.elevator_id):
@@ -247,8 +181,55 @@ class CabAccessControl:
 
         try:
             async with db_pool.transaction() as conn:
-                return await CabAccessControl._validate_cabin_swipe(
-                    conn, payload, ts, db_pool
+                if await CabAccessControl._handle_if_cloned_swipe(conn, payload, ts, db_pool):
+                    return AuthorizationResult.deny(
+                        DenialReason.CARD_SUSPENDED,
+                        message=f"Cloned credential detected on {payload.elevator_id}; card suspended.",
+                        credential_id=payload.credential_id,
+                        alert_triggered=True,
+                        details={
+                            "suspension_reason": SuspensionReason.CLONE_SUSPECTED.value,
+                        },
+                    )
+
+                record, denial = await verify_swipe_credential(conn, payload, ts, db_pool)
+                if denial is not None:
+                    return denial
+                assert record is not None
+
+                user_role = record["user_role"]
+                allowed_floors = parse_allowed_floors(
+                    record["allowed_floors"],
+                    role=user_role,
+                    assigned_floor=record.get("assigned_floor"),
+                )
+                timeout_sec = (
+                    CabAccessControl.STAFF_TECH_WINDOW_SECONDS
+                    if user_role in (UserRole.BUILDING_SERVICE, UserRole.TECHNICIAN)
+                    else CabAccessControl.RESIDENT_VISITOR_WINDOW_SECONDS
+                )
+                token = str(uuid.uuid4())
+                expires_at = ts + timedelta(seconds=timeout_sec)
+                CabAccessControl.active_car_sessions[str(payload.elevator_id)] = {
+                    "session_token": token,
+                    "credential_id": payload.credential_id,
+                    "user_id": record["user_id"],
+                    "role": user_role,
+                    "allowed_floors": allowed_floors,
+                    "granted_at": ts,
+                    "expires_at": expires_at,
+                    "consumed": False,
+                }
+                return AuthorizationResult.allow(
+                    message="Card verified; destination selection window active.",
+                    session_token=token,
+                    credential_id=payload.credential_id,
+                    details={
+                        "elevator_id": str(payload.elevator_id),
+                        "role": user_role,
+                        "allowed_floors": allowed_floors,
+                        "expires_at": expires_at,
+                    },
                 )
         except Exception:
             return fail_closed(payload.credential_id)
@@ -310,6 +291,42 @@ class CabAccessControl:
         )
 
     @staticmethod
+    def _check_car_session(
+        elevator_id: str,
+        ts: datetime,
+    ) -> tuple[
+        Optional[dict[str, Any]],
+        Optional[tuple[DenialReason, str, AuditActionType, Optional[float]]],
+    ]:
+        """
+        Verify an active, unconsumed, unexpired in-cabin session for `elevator_id`.
+        Returns `(session, None)` on success, or `(session_or_none, (reason, message, action_type, token_age))` on failure.
+        """
+        session = CabAccessControl.active_car_sessions.get(elevator_id)
+        if session is None:
+            return None, (
+                DenialReason.NO_ACTIVE_CREDENTIAL,
+                f"No active credential session in {elevator_id}.",
+                AuditActionType.ACCESS_DENIAL,
+                None,
+            )
+        if session.get("consumed", False):
+            return session, (
+                DenialReason.ONE_TAP_LIMIT_EXCEEDED,
+                "Single-use tap token already consumed; please re-tap credential.",
+                AuditActionType.ONE_TAP_VIOLATION,
+                (ts - session["granted_at"]).total_seconds(),
+            )
+        if ts > session["expires_at"]:
+            return session, (
+                DenialReason.TOKEN_WINDOW_EXPIRED,
+                "Credential selection window expired; please re-tap credential.",
+                AuditActionType.ACCESS_DENIAL,
+                None,
+            )
+        return session, None
+
+    @staticmethod
     async def validate_car_destination(
         payload: CarDestinationRequestPayload,
         db_pool: type[DbConnectionPool] = DbConnectionPool,
@@ -336,12 +353,10 @@ class CabAccessControl:
                 if payload.requested_floor == -1:
                     if payload.elevator_id == ElevatorId.E5:
                         session = CabAccessControl.active_car_sessions.get(ElevatorId.E5.value)
-                        cred_id = session["credential_id"] if session else None
-                        actor_role = session["role"] if session else UserRole.SYSTEM
                         return await CabAccessControl._deny_destination_selection(
                             payload=payload,
-                            cred_id=cred_id,
-                            role=actor_role,
+                            cred_id=session["credential_id"] if session else None,
+                            role=session["role"] if session else UserRole.SYSTEM,
                             reason=DenialReason.E5_B1_FORBIDDEN,
                             message="Freight elevator E5 does not serve Basement 1 (B1).",
                             action_type=AuditActionType.ACCESS_DENIAL,
@@ -369,47 +384,25 @@ class CabAccessControl:
                         },
                     )
 
-                session = CabAccessControl.active_car_sessions.get(str(payload.elevator_id))
-                if session is None:
+                session, session_err = CabAccessControl._check_car_session(
+                    str(payload.elevator_id), ts
+                )
+                if session_err is not None:
+                    reason, msg, action_type, token_age = session_err
                     return await CabAccessControl._deny_destination_selection(
                         payload=payload,
-                        cred_id=None,
-                        role=UserRole.SYSTEM,
-                        reason=DenialReason.NO_ACTIVE_CREDENTIAL,
-                        message="No active credential session in this elevator.",
-                        action_type=AuditActionType.ACCESS_DENIAL,
-                        record_failure=False,
+                        cred_id=session["credential_id"] if session else None,
+                        role=session["role"] if session else UserRole.SYSTEM,
+                        reason=reason,
+                        message=msg,
+                        action_type=action_type,
+                        token_age_seconds=token_age,
+                        record_failure=(session is not None),
                         ts=ts,
                         db_pool=db_pool,
                     )
-
+                assert session is not None
                 cred_id, role = session["credential_id"], session["role"]
-                if session.get("consumed", False):
-                    return await CabAccessControl._deny_destination_selection(
-                        payload=payload,
-                        cred_id=cred_id,
-                        role=role,
-                        reason=DenialReason.ONE_TAP_LIMIT_EXCEEDED,
-                        message="Single-use tap token already consumed; please re-tap credential.",
-                        action_type=AuditActionType.ONE_TAP_VIOLATION,
-                        token_age_seconds=(ts - session["granted_at"]).total_seconds(),
-                        record_failure=True,
-                        ts=ts,
-                        db_pool=db_pool,
-                    )
-
-                if ts > session["expires_at"]:
-                    return await CabAccessControl._deny_destination_selection(
-                        payload=payload,
-                        cred_id=cred_id,
-                        role=role,
-                        reason=DenialReason.TOKEN_WINDOW_EXPIRED,
-                        message="Credential selection window expired; please re-tap credential.",
-                        action_type=AuditActionType.ACCESS_DENIAL,
-                        record_failure=True,
-                        ts=ts,
-                        db_pool=db_pool,
-                    )
 
                 e5_forbidden = (
                     payload.elevator_id == ElevatorId.E5
@@ -493,53 +486,43 @@ class CabAccessControl:
                         message="E5 service run requires elevator_id='E5' and destination_floor in 1..30.",
                     )
 
-                session = CabAccessControl.active_car_sessions.get(ElevatorId.E5.value)
-                if session is None:
-                    return AuthorizationResult.deny(
-                        DenialReason.NO_ACTIVE_CREDENTIAL,
-                        message="No active credential session in E5.",
-                    )
+                session, session_err = CabAccessControl._check_car_session(
+                    ElevatorId.E5.value, ts
+                )
+                if session_err is not None:
+                    reason, msg, action_type, token_age = session_err
+                    cred_id = session["credential_id"] if session else None
+                    if action_type == AuditActionType.ONE_TAP_VIOLATION and session:
+                        await Logging.write_audit(
+                            timestamp=ts,
+                            actor_id=cred_id or UserRole.SYSTEM,
+                            actor_role=session["role"],
+                            action_type=AuditActionType.ONE_TAP_VIOLATION,
+                            target_id=ElevatorId.E5,
+                            event_payload={
+                                "elevator_id": ElevatorId.E5.value,
+                                "denied_floor": payload.destination_floor,
+                                "token_age_seconds": token_age,
+                            },
+                            db_pool=db_pool,
+                        )
+                    return AuthorizationResult.deny(reason, message=msg, credential_id=cred_id)
 
+                assert session is not None
                 cred_id, role = session["credential_id"], session["role"]
-                if session.get("consumed", False):
-                    await Logging.write_audit(
-                        timestamp=ts,
-                        actor_id=cred_id,
-                        actor_role=role,
-                        action_type=AuditActionType.ONE_TAP_VIOLATION,
-                        target_id=ElevatorId.E5,
-                        event_payload={
-                            "elevator_id": ElevatorId.E5.value,
-                            "denied_floor": payload.destination_floor,
-                            "token_age_seconds": (ts - session["granted_at"]).total_seconds(),
-                        },
-                        db_pool=db_pool,
-                    )
-                    return AuthorizationResult.deny(
-                        DenialReason.ONE_TAP_LIMIT_EXCEEDED,
-                        message="Session token already consumed.",
-                        credential_id=cred_id,
-                    )
-
-                if ts > session["expires_at"]:
-                    return AuthorizationResult.deny(
-                        DenialReason.TOKEN_WINDOW_EXPIRED,
-                        message="Session token expired.",
-                        credential_id=cred_id,
-                    )
-
-                if not UserRole.can_initiate_service_run(role):
+                required_roles = [
+                    UserRole.BUILDING_SERVICE.value,
+                    UserRole.TECHNICIAN.value,
+                    UserRole.ADMIN.value,
+                ]
+                if role not in required_roles:
                     return await reject_unauthorized_role(
                         timestamp=ts,
                         actor_id=cred_id,
                         actor_role=role,
                         target_id=ElevatorId.E5.value,
                         operation=AuditActionType.E5_SERVICE_RUN_START.value,
-                        required_roles=[
-                            UserRole.BUILDING_SERVICE.value,
-                            UserRole.TECHNICIAN.value,
-                            UserRole.ADMIN.value,
-                        ],
+                        required_roles=required_roles,
                         message=f"Role '{role}' is not authorized to initiate an E5 service run.",
                         extra_payload={
                             "destination_floor": payload.destination_floor,
@@ -574,132 +557,3 @@ class CabAccessControl:
                 )
         except Exception:
             return fail_closed()
-
-    @staticmethod
-    async def validate_maintenance_operation(
-        payload: MaintenanceOperationPayload,
-        db_pool: type[DbConnectionPool] = DbConnectionPool,
-    ) -> AuthorizationResult:
-        ts = Logging.normalize_timestamp(payload.timestamp)
-        try:
-            async with db_pool.transaction() as conn:
-                if not ElevatorId.has_value(
-                    payload.elevator_id
-                ) or not MaintenanceOperationType.has_value(payload.operation_type):
-                    return await reject_malformed_msg(
-                        timestamp=ts,
-                        target_id=str(payload.elevator_id),
-                        source="MaintenanceOperationPayload",
-                        payload_details={
-                            "elevator_id": str(payload.elevator_id),
-                            "operation_type": str(payload.operation_type),
-                        },
-                        message="Invalid elevator_id or operation_type.",
-                        credential_id=payload.credential_id,
-                        db_pool=db_pool,
-                    )
-
-                record, denial = await authorize_credential_role(
-                    conn,
-                    payload.credential_id,
-                    ts,
-                    role_check=UserRole.can_perform_maintenance,
-                    required_roles=[UserRole.TECHNICIAN.value, UserRole.ADMIN.value],
-                    inactive_msg="Active technician or admin credential required.",
-                    unauth_msg=f"Role '{{role}}' cannot execute maintenance operation '{payload.operation_type}'.",
-                    target_id=str(payload.elevator_id),
-                    operation=str(payload.operation_type),
-                    db_pool=db_pool,
-                )
-                if denial:
-                    return denial
-                assert record is not None
-                role = record["user_role"]
-
-                await Logging.write_audit(
-                    timestamp=ts,
-                    actor_id=payload.credential_id,
-                    actor_role=role,
-                    action_type=AuditActionType.MAINTENANCE_ENTER,
-                    target_id=str(payload.elevator_id),
-                    event_payload={
-                        "elevator_id": str(payload.elevator_id),
-                        "operation_type": str(payload.operation_type),
-                    },
-                    db_pool=db_pool,
-                )
-                return AuthorizationResult.allow(
-                    message=f"Maintenance operation '{payload.operation_type}' authorized for {payload.elevator_id}.",
-                    credential_id=payload.credential_id,
-                    details={
-                        "elevator_id": str(payload.elevator_id),
-                        "operation_type": str(payload.operation_type),
-                        "role": role,
-                    },
-                )
-        except Exception:
-            return fail_closed(payload.credential_id)
-
-    @staticmethod
-    async def validate_return_to_service(
-        payload: ReturnToServicePayload,
-        db_pool: type[DbConnectionPool] = DbConnectionPool,
-    ) -> AuthorizationResult:
-        ts = Logging.normalize_timestamp(payload.timestamp)
-        try:
-            async with db_pool.transaction() as conn:
-                if not ElevatorId.has_value(payload.elevator_id):
-                    return await reject_malformed_msg(
-                        timestamp=ts,
-                        target_id=str(payload.elevator_id),
-                        source="ReturnToServicePayload",
-                        payload_details={"elevator_id": str(payload.elevator_id)},
-                        message="Invalid elevator_id.",
-                        credential_id=payload.credential_id,
-                        db_pool=db_pool,
-                    )
-
-                record, denial = await authorize_credential_role(
-                    conn,
-                    payload.credential_id,
-                    ts,
-                    role_check=UserRole.can_perform_maintenance,
-                    required_roles=[UserRole.TECHNICIAN.value, UserRole.ADMIN.value],
-                    inactive_msg="Active technician or admin credential required.",
-                    unauth_msg="Role '{role}' is not authorized to return car to service.",
-                    target_id=str(payload.elevator_id),
-                    operation=AuditActionType.RETURN_TO_SERVICE.value,
-                    db_pool=db_pool,
-                )
-                if denial:
-                    return denial
-                assert record is not None
-                role = record["user_role"]
-
-                if not payload.technician_confirmation:
-                    return AuthorizationResult.deny(
-                        DenialReason.CONFIRMATION_REQUIRED,
-                        message="Technician safety confirmation is required to return elevator to service.",
-                        credential_id=payload.credential_id,
-                    )
-
-                await Logging.write_audit(
-                    timestamp=ts,
-                    actor_id=payload.credential_id,
-                    actor_role=role,
-                    action_type=AuditActionType.RETURN_TO_SERVICE,
-                    target_id=str(payload.elevator_id),
-                    event_payload={
-                        "elevator_id": str(payload.elevator_id),
-                        "technician_confirmation": payload.technician_confirmation,
-                    },
-                    db_pool=db_pool,
-                )
-                return AuthorizationResult.allow(
-                    message=f"Return to service authorized for {payload.elevator_id}.",
-                    credential_id=payload.credential_id,
-                    details={"elevator_id": str(payload.elevator_id), "role": role},
-                )
-        except Exception:
-            return fail_closed(payload.credential_id)
-
