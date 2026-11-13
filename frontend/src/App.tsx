@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 
-type View = "overview" | "elevators" | "credentials" | "security" | "analytics" | "audit";
+type View = "overview" | "simulation" | "elevators" | "credentials" | "security" | "analytics" | "audit";
 type ElevatorStatus = {
   elevator_id: string;
   state: "UNKNOWN";
@@ -14,6 +14,7 @@ type FleetResponse = { elevators: ElevatorStatus[]; source: string };
 
 const navigation: { id: View; label: string; icon: string }[] = [
   { id: "overview", label: "Overview", icon: "O" },
+  { id: "simulation", label: "Live simulation", icon: "S" },
   { id: "elevators", label: "Elevators", icon: "E" },
   { id: "credentials", label: "Credentials", icon: "C" },
   { id: "security", label: "Security alerts", icon: "!" },
@@ -63,6 +64,64 @@ function Elevators({ fleet }: { fleet: FleetResponse | null }) {
   return <><PageHeader eyebrow="Fleet management" title="Elevators" detail="Monitor current position, availability, and maintenance state." action={<button className="button secondary" disabled>Refresh telemetry</button>} /><FleetCards fleet={fleet} /><section className="section panel"><div className="section-heading"><div><p className="eyebrow">Coverage</p><h2>Service matrix</h2></div></div><div className="matrix">{["Car", "Residential", "Freight", "Maintenance"].map((heading) => <strong key={heading}>{heading}</strong>)}{["E1", "E2", "E3", "E4", "E5"].flatMap((id) => [<span key={`${id}-id`}>{id}</span>, <span className="matrix-value" key={`${id}-r`}>—</span>, <span className="matrix-value" key={`${id}-f`}>—</span>, <span className="matrix-value" key={`${id}-m`}>—</span>])}</div></section></>;
 }
 
+type SimCar = { id: string; floor: number; direction: "UP" | "DOWN"; passengers: number; destination: number };
+
+const SIM_FLOORS = Array.from({ length: 11 }, (_, index) => index);
+const SIM_START: SimCar[] = [
+  { id: "E1", floor: 2, direction: "UP", passengers: 3, destination: 8 },
+  { id: "E2", floor: 7, direction: "DOWN", passengers: 1, destination: 1 },
+  { id: "E3", floor: 4, direction: "UP", passengers: 5, destination: 10 },
+  { id: "E4", floor: 9, direction: "DOWN", passengers: 0, destination: 3 },
+  { id: "E5", floor: 1, direction: "UP", passengers: 2, destination: 6 },
+];
+
+function Simulation() {
+  const [cars, setCars] = useState<SimCar[]>(SIM_START);
+  const [running, setRunning] = useState(true);
+
+  useEffect(() => {
+    if (!running) return;
+    const timer = window.setInterval(() => {
+      setCars((current) => current.map((car) => {
+        const nextFloor = car.floor + (car.direction === "UP" ? 1 : -1);
+        if (nextFloor >= 10 || nextFloor <= 0 || nextFloor === car.destination) {
+          const nextDirection = car.direction === "UP" ? "DOWN" : "UP";
+          return {
+            ...car,
+            floor: Math.max(0, Math.min(10, nextFloor)),
+            direction: nextDirection,
+            destination: nextDirection === "UP" ? 10 : 0,
+            passengers: nextFloor === car.destination ? (car.passengers + 2) % 7 : car.passengers,
+          };
+        }
+        return { ...car, floor: nextFloor };
+      }));
+    }, 1400);
+    return () => window.clearInterval(timer);
+  }, [running]);
+
+  return <section className="simulation-page">
+    <PageHeader eyebrow="Demonstration mode" title="Elevator simulation" detail="A local visual model of elevator movement and passenger load." action={<button className="button primary" onClick={() => setRunning((value) => !value)}>{running ? "Pause simulation" : "Resume simulation"}</button>} />
+    <div className="simulation-notice"><strong>Demo simulation</strong><span>Positions and passengers are generated locally. They are not live building telemetry.</span></div>
+    <div className="simulation-layout">
+      <div className="shaft-panel">
+        <div className="shaft-labels">{[...SIM_FLOORS].reverse().map((floor) => <span key={floor}>{floor === 0 ? "B1" : floor}</span>)}</div>
+        <div className="shaft-grid">{[...SIM_FLOORS].reverse().map((floor) => <div className="floor-line" key={floor}><span>{floor === 0 ? "Basement" : `Floor ${floor}`}</span></div>)}
+          {cars.map((car) => <div className="sim-car" key={car.id} style={{ bottom: `${(car.floor / 10) * 100}%`, left: `${(Number(car.id.slice(1)) - 1) * 20 + 1}%` }} title={`${car.id}: floor ${car.floor}`}>
+            <div className="sim-car-header"><strong>{car.id}</strong><span>{car.direction === "UP" ? "^" : "v"}</span></div>
+            <div className="passenger-cabin">{Array.from({ length: car.passengers }, (_, index) => <span className="passenger" key={index}>{index % 2 === 0 ? "●" : "○"}</span>)}</div>
+            <small>{car.floor === 0 ? "B1" : `F${car.floor}`}</small>
+          </div>)}
+        </div>
+      </div>
+      <div className="simulation-side">
+        <div className="panel"><div className="section-heading"><div><p className="eyebrow">Live cars</p><h2>Passenger load</h2></div></div><div className="sim-car-list">{cars.map((car) => <div className="sim-car-row" key={car.id}><span className="elevator-id">{car.id}</span><span className="sim-direction">{car.direction === "UP" ? "^ Up" : "v Down"}</span><strong>{car.floor === 0 ? "B1" : `Floor ${car.floor}`}</strong><span>{car.passengers} {car.passengers === 1 ? "passenger" : "passengers"}</span><span className="weight">{car.passengers * 75} kg</span></div>)}</div></div>
+        <div className="panel simulation-legend"><p className="eyebrow">Rendering legend</p><div><span className="legend-car" /> Elevator car</div><div><span className="legend-passenger">●</span> Passenger</div><div><span className="legend-line" /> Floor level</div><p className="muted dark">Estimated passenger weight uses 75 kg per passenger.</p></div>
+      </div>
+    </div>
+  </section>;
+}
+
 function Credentials() {
   return <><PageHeader eyebrow="Access control" title="Credentials" detail="Manage cardholders, access scopes, and credential lifecycle." action={<button className="button primary" disabled>Issue credential</button>} /><div className="toolbar"><input aria-label="Search credentials" placeholder="Search by name or credential ID" disabled /><select aria-label="Credential status" disabled><option>All statuses</option></select></div><section className="panel"><div className="table-heading"><strong>Cardholders</strong><span>0 records</span></div><EmptyState title="Credential records are not connected" detail="The API will populate this table from the credentials and users tables." /></section></>;
 }
@@ -94,7 +153,7 @@ function App() {
     return () => { activeRequest = false; };
   }, []);
 
-  const page = view === "overview" ? <Overview fleet={fleet} /> : view === "elevators" ? <Elevators fleet={fleet} /> : view === "credentials" ? <Credentials /> : view === "security" ? <Security /> : view === "analytics" ? <Analytics /> : <Audit />;
+  const page = view === "overview" ? <Overview fleet={fleet} /> : view === "simulation" ? <Simulation /> : view === "elevators" ? <Elevators fleet={fleet} /> : view === "credentials" ? <Credentials /> : view === "security" ? <Security /> : view === "analytics" ? <Analytics /> : <Audit />;
   return <div className="app-shell">
     <aside className="sidebar"><div className="brand"><span className="brand-mark">S</span><div><strong>SREMS</strong><span>Operations</span></div></div><nav aria-label="Primary navigation">{navigation.map((item) => <button className={`nav-item ${item.id === view ? "active" : ""}`} key={item.id} onClick={() => setView(item.id)}><span className="nav-icon">{item.icon}</span>{item.label}</button>)}</nav><div className="sidebar-footer"><span className="status-dot" /> API connected</div></aside>
     <main className="content"><header className="topbar"><div><p className="eyebrow">Building operations</p><div className="breadcrumb">SREMS / {active.label}</div></div><div className="operator"><span className="avatar">A</span><span><strong>Administrator</strong><small>ADMIN</small></span></div></header>{error && <div className="error-banner" role="alert">{error}</div>}<div className="page-content">{page}</div></main>
