@@ -89,6 +89,7 @@ class DashboardOperationType(StrEnum):
     EMERGENCY_OVERRIDE = "EMERGENCY_OVERRIDE"
     VIEW_AUDIT_LOGS = "VIEW_AUDIT_LOGS"
     RUN_AUDIT_INTEGRITY = "RUN_AUDIT_INTEGRITY"
+    VIEW_ANALYTICS = "VIEW_ANALYTICS"
     EXPORT_ANALYTICS_REPORTS = "EXPORT_ANALYTICS_REPORTS"
 
     @classmethod
@@ -106,6 +107,7 @@ DASHBOARD_PERMISSIONS: dict[str, dict[DashboardOperationType, bool]] = {
         DashboardOperationType.EMERGENCY_OVERRIDE: False,
         DashboardOperationType.VIEW_AUDIT_LOGS: False,
         DashboardOperationType.RUN_AUDIT_INTEGRITY: False,
+        DashboardOperationType.VIEW_ANALYTICS: False,
         DashboardOperationType.EXPORT_ANALYTICS_REPORTS: False,
     },
     UserRole.RESIDENT: {op: False for op in DashboardOperationType},
