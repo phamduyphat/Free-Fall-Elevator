@@ -6,7 +6,7 @@ import threading
 import time
 
 from acs.enums import DenialReason
-from main import app
+from api import app
 from simulation.clock import (
     DEFAULT_BASE_TIME,
     DEFAULT_SIM_SECONDS_PER_TICK,

@@ -1,6 +1,11 @@
 # SREMS HTTP API Documentation (Modes 2 & 5)
 
-Base router mounted at `/api/v1` (`main.py` -> `api/routes.py`). Interactive OpenAPI/Swagger docs are served at `/docs`.
+> For PostgreSQL database setup, see README.md
+
+> To run the webserver: 
+> `python main.py` or `uvicorn api:app --reload`
+
+Base router mounted at `/api/v1` (`api/__init__.py` -> `api/routes.py`). Interactive OpenAPI/Swagger docs are served at `/docs`.
 
 ---
 

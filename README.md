@@ -54,6 +54,10 @@ using the system outside a local development environment.
 Start the FastAPI application with:
 
 ```powershell
+python -m uvicorn api:app --reload
+```
+or via `main.py`:
+```powershell
 python main.py
 ```
 

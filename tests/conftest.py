@@ -10,8 +10,8 @@ import uuid
 
 from acs.cab_accesscontrol import CabAccessControl
 from acs.dashboard_accesscontrol import DashboardAccessControl
+from api import app
 from db import DbConnectionPool
-from main import app
 from simulation.clock import (
     DEFAULT_BASE_TIME,
     DEFAULT_SIM_SECONDS_PER_TICK,
