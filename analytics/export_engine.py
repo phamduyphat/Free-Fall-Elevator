@@ -1,31 +1,16 @@
 from __future__ import annotations
 
 import csv
-from dataclasses import asdict, dataclass
 from datetime import datetime
 import io
 import json
 from typing import Any, Literal, Optional
 
 from acs.logs import AuditActionType, Logging
-from analytics.metrics import Metrics, normalize_timestamp
+from analytics.helpers import normalize_timestamp
+from analytics.metrics import Metrics
+from analytics.reports import ExportPayload
 from db import DbConnectionPool
-
-
-@dataclass
-class ExportPayload:
-    """Standardized serialized report container (ANA-5.9, BEN-4, VT-29)."""
-
-    run_id: str
-    export_format: Literal["CSV", "JSON"]
-    generated_at: str
-    record_count: int
-    content: str
-    summary: dict[str, Any]
-    per_request_data: Optional[list[dict[str, Any]]] = None
-
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
 
 
 class ExportEngine:
