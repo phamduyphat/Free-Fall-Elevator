@@ -100,12 +100,21 @@ To verify benchmark traffic profile assumptions (`OR-10`) and validate passenger
   Independent of general resident traffic shares, the system reports the count and share of dedicated E5 service runs ($N_{\text{service\_runs}}$ where `elevator_id = 'E5' AND is_service_run = TRUE`) to isolate service/freight transport from normal passenger traffic.
 
 ### 3.5 Downtime & Availability Metrics (`ANA-5.5, AVL-1`)
-* **Car Downtime (`ANA-5.5`):** Cumulative time an elevator is out of ordinary service due to faults or maintenance:
+* **Car Downtime (`ANA-5.5`):** Cumulative time an elevator is out of ordinary service due to faults, maintenance, or emergency stops:
   $$\text{Downtime}_{\text{car}} = \sum (t_{\text{return\_to\_service}} - t_{\text{fault\_or\_maint\_start}})$$
-* **Ongoing Intervals (`ANA-5.5`):** Any downtime interval with `ended_at IS NULL` at query time is tagged as **ongoing**, with current downtime accumulated up to $T_{\text{current\_sim}}$.
+* **Ongoing Intervals (`ANA-5.5`):** Any downtime interval with `ended_at IS NULL` at query time is tagged as **ongoing**, with current downtime accumulated dynamically up to $T_{\text{report\_time}}$:
+  $$\text{Downtime}_{\text{ongoing}} = T_{\text{report\_time}} - t_{\text{fault\_or\_maint\_start}}$$
 * **SREMS Software System Availability (`AVL-1`):**
-  $$\text{Availability} = \frac{T_{\text{total\_calendar\_seconds}} - T_{\text{srems\_downtime}}}{T_{\text{total\_calendar\_seconds}}} \times 100\% \ge 99.5\%$$
-  * SREMS software downtime is tracked via `system_heartbeats` (sampled every 10 seconds) and process crash/restart audit logs (`SYSTEM_STARTUP`, `SYSTEM_SHUTDOWN`).
+  $$\text{Availability} = \frac{T_{\text{total\_window}} - T_{\text{unannounced\_downtime}} - T_{\text{announced\_maint}}}{T_{\text{total\_window}} - T_{\text{announced\_maint}}} \times 100\% \ge 99.5\%$$
+* **Stateless On-Demand DB Query Calculation (Preventing Information Drift):**
+  To prevent information drift and synchronization anomalies between in-memory accumulators and database storage across reboots, crashes, and multi-scenario runs, availability and downtime are **never cached as mutable running totals**. Instead, they are computed entirely on-demand via direct SQL queries over user-submitted time ranges (`start_time` to `end_time`):
+  1. **Query Heartbeat Stream:** Retrieve all records from `system_heartbeats` where `timestamp BETWEEN start_time AND end_time` ordered by `timestamp ASC`.
+  2. **Detect Interruption Gaps:** Iterate through ordered consecutive heartbeat samples $(t_i, t_{i+1})$. Any sample gap satisfying:
+     $$\Delta t = t_{i+1} - t_i > 10\text{ seconds}$$
+     indicates an offline period where SREMS failed to emit its mandatory 10-second heartbeat.
+  3. **Classify via Restart Log (`audit_log_chain`):** For each gap, query the audit ledger within $[t_i, t_{i+1}]$:
+     * **Announced Maintenance:** If preceded by a `SYSTEM_SHUTDOWN` event marked with `is_announced_maintenance = TRUE` (or `reason = 'ANNOUNCED_MAINTENANCE'`), the gap duration $(\Delta t - 10\text{s})$ is classified as an **announced maintenance window** and **excluded from downtime** per `AVL-1`.
+     * **Unannounced Downtime:** If no announced maintenance record exists (e.g. abrupt crash, freeze, OOM, or unannounced restart per `VT-26`), the gap duration $(\Delta t - 10\text{s})$ is classified as **unplanned software downtime** and charged against the 99.5% availability budget.
 
 ### 3.6 Security & Anomaly Summaries (`ANA-5.6`)
 Aggregates security counters across configurable time windows:
@@ -152,7 +161,7 @@ Provides pure on-demand SQL aggregation queries:
 * `get_utilization_kpis(start_time, end_time) -> dict[str, CarUtilizationReport]`:
   Executes indexed SQL queries over `trips` returning per-car `trip_count`, `motor_starts`, `floors_traversed`, estimated meters, and state hours.
 * `get_downtime_summary(start_time, end_time) -> DowntimeReport`:
-  Executes indexed SQL queries over `car_downtime_intervals` returning total downtime per car, list of ongoing downtime intervals, and system availability percentage (`AVL-1`).
+  Executes stateless indexed SQL queries over `car_downtime_intervals`, `system_heartbeats`, and `audit_log_chain` for user-specified range `[start_time, end_time]`. Computes total resolved/ongoing downtime per car (`ANA-5.5`), and evaluates heartbeat gaps and restart logs to return SREMS availability percentage and unplanned software downtime (`AVL-1, VT-26`).
 * `get_security_kpis(start_time, end_time) -> SecuritySummaryReport`:
   Summarizes denials, clone alerts, scanning brute-force triggers, and emergency incidents.
 
@@ -324,7 +333,7 @@ The existing 9-column schema in `design_decisions_ACS.md §5.5` is preserved int
 | **Mode 5 (Reporting)** | `REPORT_EXPORTED` | Admin exports performance/audit run report (`ANA-5.9, VT-29`) | Admin ID | Report type, date range, export format (`CSV` / `JSON`), row count |
 | **Mode 5 (Integrity)** | `INTEGRITY_CHECK_RUN` | Admin runs audit-integrity verification (`ANA-5.8, VT-10`) | Admin ID | Records verified, result (`PASS` / `FAIL`), first mismatched index |
 | **Availability (Host)** | `SYSTEM_STARTUP` | SREMS process initialization / boot (`AVL-1, MNT-4.11`) | `"SYSTEM"` | Startup timestamp, version, recovered state snapshot |
-| **Availability (Host)** | `SYSTEM_SHUTDOWN` | SREMS clean shutdown or graceful stop (`AVL-1, MNT-4.11`) | Admin / `"SYSTEM"` | Shutdown reason, final active requests count |
+| **Availability (Host)** | `SYSTEM_SHUTDOWN` | SREMS clean shutdown or graceful stop (`AVL-1, MNT-4.11`) | Admin / `"SYSTEM"` | Shutdown reason, `is_announced_maintenance` flag (`AVL-1`), final active requests count |
 | **Data Protection** | `DATA_BACKUP_CREATED` | Scheduled 24h backup snapshot completed (`DAT-3`) | `"SYSTEM"` | Backup archive path, records backed up, SHA-256 snapshot hash |
 | **Data Protection** | `DATA_RESTORE_COMPLETED`| Database restored from backup & chain verified (`DAT-3, VT-25`)| Admin ID | Restored backup timestamp, records restored, verification outcome |
 
