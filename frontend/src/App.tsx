@@ -64,33 +64,40 @@ function Elevators({ fleet }: { fleet: FleetResponse | null }) {
   return <><PageHeader eyebrow="Fleet management" title="Elevators" detail="Monitor current position, availability, and maintenance state." action={<button className="button secondary" disabled>Refresh telemetry</button>} /><FleetCards fleet={fleet} /><section className="section panel"><div className="section-heading"><div><p className="eyebrow">Coverage</p><h2>Service matrix</h2></div></div><div className="matrix">{["Car", "Residential", "Freight", "Maintenance"].map((heading) => <strong key={heading}>{heading}</strong>)}{["E1", "E2", "E3", "E4", "E5"].flatMap((id) => [<span key={`${id}-id`}>{id}</span>, <span className="matrix-value" key={`${id}-r`}>—</span>, <span className="matrix-value" key={`${id}-f`}>—</span>, <span className="matrix-value" key={`${id}-m`}>—</span>])}</div></section></>;
 }
 
-type SimCar = { id: string; floor: number; direction: "UP" | "DOWN"; passengers: number; destination: number };
+type SimCar = { id: string; floor: number; direction: "UP" | "DOWN"; passengers: number; destination: number; door: "OPEN" | "CLOSED"; emergency: boolean; maintenance: boolean };
 
-const SIM_FLOORS = Array.from({ length: 11 }, (_, index) => index);
+const SIM_FLOORS = Array.from({ length: 31 }, (_, index) => index);
 const SIM_START: SimCar[] = [
-  { id: "E1", floor: 2, direction: "UP", passengers: 3, destination: 8 },
-  { id: "E2", floor: 7, direction: "DOWN", passengers: 1, destination: 1 },
-  { id: "E3", floor: 4, direction: "UP", passengers: 5, destination: 10 },
-  { id: "E4", floor: 9, direction: "DOWN", passengers: 0, destination: 3 },
-  { id: "E5", floor: 1, direction: "UP", passengers: 2, destination: 6 },
+  { id: "E1", floor: 8, direction: "UP", passengers: 3, destination: 18, door: "CLOSED", emergency: false, maintenance: false },
+  { id: "E2", floor: 17, direction: "DOWN", passengers: 1, destination: 1, door: "CLOSED", emergency: false, maintenance: false },
+  { id: "E3", floor: 12, direction: "UP", passengers: 5, destination: 25, door: "CLOSED", emergency: false, maintenance: false },
+  { id: "E4", floor: 26, direction: "DOWN", passengers: 0, destination: 3, door: "CLOSED", emergency: false, maintenance: false },
+  { id: "E5", floor: 1, direction: "UP", passengers: 2, destination: 15, door: "CLOSED", emergency: false, maintenance: false },
 ];
 
 function Simulation() {
   const [cars, setCars] = useState<SimCar[]>(SIM_START);
   const [running, setRunning] = useState(true);
+  const [selectedId, setSelectedId] = useState("E1");
+  const [cardId, setCardId] = useState("ADMIN-CARD-0001");
+  const [announcement, setAnnouncement] = useState("Simulation ready. Select an elevator to operate its panel.");
+  const [hallFloor, setHallFloor] = useState("1");
+  const [hallRequest, setHallRequest] = useState<string | null>(null);
+  const selectedCar = cars.find((car) => car.id === selectedId) ?? cars[0];
 
   useEffect(() => {
     if (!running) return;
     const timer = window.setInterval(() => {
       setCars((current) => current.map((car) => {
+        if (car.emergency || car.maintenance || car.door === "OPEN") return car;
         const nextFloor = car.floor + (car.direction === "UP" ? 1 : -1);
-        if (nextFloor >= 10 || nextFloor <= 0 || nextFloor === car.destination) {
+        if (nextFloor >= 30 || nextFloor <= 0 || nextFloor === car.destination) {
           const nextDirection = car.direction === "UP" ? "DOWN" : "UP";
           return {
             ...car,
-            floor: Math.max(0, Math.min(10, nextFloor)),
+            floor: Math.max(0, Math.min(30, nextFloor)),
             direction: nextDirection,
-            destination: nextDirection === "UP" ? 10 : 0,
+            destination: nextDirection === "UP" ? 30 : 0,
             passengers: nextFloor === car.destination ? (car.passengers + 2) % 7 : car.passengers,
           };
         }
@@ -100,23 +107,41 @@ function Simulation() {
     return () => window.clearInterval(timer);
   }, [running]);
 
+  const updateSelected = (update: Partial<SimCar>, message: string) => {
+    setCars((current) => current.map((car) => car.id === selectedId ? { ...car, ...update } : car));
+    setAnnouncement(message);
+  };
+
+  const selectDestination = (floor: number) => {
+    if (selectedCar.maintenance || selectedCar.emergency) {
+      setAnnouncement(`${selectedId} is unavailable. Destination request rejected.`);
+      return;
+    }
+    updateSelected({ destination: floor, door: "CLOSED" }, `Destination ${floor === 0 ? "B1" : `floor ${floor}`} selected for ${selectedId}. Authorization granted.`);
+  };
+
+  const displayFloor = (floor: number) => floor === 0 ? "B1" : `F${floor}`;
+
   return <section className="simulation-page">
-    <PageHeader eyebrow="Demonstration mode" title="Elevator simulation" detail="A local visual model of elevator movement and passenger load." action={<button className="button primary" onClick={() => setRunning((value) => !value)}>{running ? "Pause simulation" : "Resume simulation"}</button>} />
-    <div className="simulation-notice"><strong>Demo simulation</strong><span>Positions and passengers are generated locally. They are not live building telemetry.</span></div>
+    <PageHeader eyebrow="Mode 1 · UI-1 to UI-10" title="Elevator operations" detail="Passenger controls, hall calls, fleet monitoring, and accessibility feedback." action={<button className="button primary" onClick={() => setRunning((value) => !value)}>{running ? "Pause simulation" : "Resume simulation"}</button>} />
+    <div className="simulation-notice"><strong>Demo simulation</strong><span>Positions and passengers are generated locally. They are not live building telemetry.</span><span className="srs-tag">SRS UI prototype</span></div>
+    <div className="simulation-toolbar"><label>Selected car<select value={selectedId} onChange={(event) => setSelectedId(event.target.value)}>{cars.map((car) => <option key={car.id}>{car.id}</option>)}</select></label><label>Card reader<input value={cardId} onChange={(event) => setCardId(event.target.value)} aria-label="Simulated card credential" /></label><span className="authorization-status">Authorization feedback: <strong>{cardId ? "Ready" : "Card required"}</strong></span></div>
     <div className="simulation-layout">
       <div className="shaft-panel">
         <div className="shaft-labels">{[...SIM_FLOORS].reverse().map((floor) => <span key={floor}>{floor === 0 ? "B1" : floor}</span>)}</div>
-        <div className="shaft-grid">{[...SIM_FLOORS].reverse().map((floor) => <div className="floor-line" key={floor}><span>{floor === 0 ? "Basement" : `Floor ${floor}`}</span></div>)}
-          {cars.map((car) => <div className="sim-car" key={car.id} style={{ bottom: `${(car.floor / 10) * 100}%`, left: `${(Number(car.id.slice(1)) - 1) * 20 + 1}%` }} title={`${car.id}: floor ${car.floor}`}>
-            <div className="sim-car-header"><strong>{car.id}</strong><span>{car.direction === "UP" ? "^" : "v"}</span></div>
+        <div className="shaft-grid">{[...SIM_FLOORS].reverse().map((floor) => <div className="floor-line" key={floor}><span>{floor === 0 ? "Basement 1" : `Floor ${floor}`}</span></div>)}
+          {cars.map((car) => <div className={`sim-car ${car.emergency ? "emergency-car" : ""} ${car.maintenance ? "maintenance-car" : ""}`} key={car.id} style={{ bottom: `${(car.floor / 30) * 100}%`, left: `${(Number(car.id.slice(1)) - 1) * 20 + 1}%` }} title={`${car.id}: floor ${displayFloor(car.floor)}`}>
+            <div className="sim-car-header"><strong>{car.id}</strong><span>{car.emergency ? "!" : car.direction === "UP" ? "^" : "v"}</span></div>
             <div className="passenger-cabin">{Array.from({ length: car.passengers }, (_, index) => <span className="passenger" key={index}>{index % 2 === 0 ? "●" : "○"}</span>)}</div>
-            <small>{car.floor === 0 ? "B1" : `F${car.floor}`}</small>
+            <small>{displayFloor(car.floor)}</small>
           </div>)}
         </div>
       </div>
       <div className="simulation-side">
-        <div className="panel"><div className="section-heading"><div><p className="eyebrow">Live cars</p><h2>Passenger load</h2></div></div><div className="sim-car-list">{cars.map((car) => <div className="sim-car-row" key={car.id}><span className="elevator-id">{car.id}</span><span className="sim-direction">{car.direction === "UP" ? "^ Up" : "v Down"}</span><strong>{car.floor === 0 ? "B1" : `Floor ${car.floor}`}</strong><span>{car.passengers} {car.passengers === 1 ? "passenger" : "passengers"}</span><span className="weight">{car.passengers * 75} kg</span></div>)}</div></div>
-        <div className="panel simulation-legend"><p className="eyebrow">Rendering legend</p><div><span className="legend-car" /> Elevator car</div><div><span className="legend-passenger">●</span> Passenger</div><div><span className="legend-line" /> Floor level</div><p className="muted dark">Estimated passenger weight uses 75 kg per passenger.</p></div>
+        <div className="panel"><div className="section-heading"><div><p className="eyebrow">UI-5 · UI-8</p><h2>{selectedId} operating panel</h2></div><span className={`state-pill ${selectedCar.emergency ? "danger" : selectedCar.maintenance ? "warn" : "ok"}`}>{selectedCar.emergency ? "Emergency" : selectedCar.maintenance ? "Maintenance" : "In service"}</span></div><div className="car-state-grid"><div><span>Floor</span><strong>{displayFloor(selectedCar.floor)}</strong></div><div><span>Direction</span><strong>{selectedCar.direction}</strong></div><div><span>Door</span><strong>{selectedCar.door}</strong></div><div><span>Load</span><strong>{selectedCar.passengers * 75} kg</strong></div></div><p className={`authorization-feedback ${selectedCar.emergency ? "danger-text" : ""}`} aria-live="polite">{announcement}</p><div className="control-row"><button className="button secondary" onClick={() => updateSelected({ door: "OPEN" }, `${selectedId} door-open command accepted.`)}>Door open</button><button className="button secondary" onClick={() => updateSelected({ door: "CLOSED" }, `${selectedId} door-close command accepted.`)}>Door close</button><button className="button emergency-button" onClick={() => updateSelected({ emergency: true }, `Emergency/help activated in ${selectedId}. Staff alert raised.`)}>Emergency / help</button><button className="button medical-button" onClick={() => setAnnouncement(`Medical assistance requested in ${selectedId}.`)}>Medical</button></div><div className="destination-panel"><strong>Destination keys</strong><div className="destination-keys"><button onClick={() => selectDestination(0)}>B1</button>{Array.from({ length: 30 }, (_, index) => index + 1).map((floor) => <button key={floor} onClick={() => selectDestination(floor)}>{floor}</button>)}</div></div></div>
+        <div className="panel"><div className="section-heading"><div><p className="eyebrow">UI-9 · FR-1.7</p><h2>Hall panel</h2></div></div><div className="hall-controls"><label>Call floor<select value={hallFloor} onChange={(event) => setHallFloor(event.target.value)}>{SIM_FLOORS.map((floor) => <option key={floor} value={floor}>{floor === 0 ? "B1" : `Floor ${floor}`}</option>)}</select></label><button className="button secondary" onClick={() => setHallRequest(`Up call from ${hallFloor === "0" ? "B1" : `floor ${hallFloor}`} assigned to E1.`)}>^ Up</button><button className="button secondary" onClick={() => setHallRequest(`Down call from ${hallFloor === "0" ? "B1" : `floor ${hallFloor}`} assigned to E2.`)}>v Down</button><button className="button secondary freight-button" onClick={() => setHallRequest(`Freight request from floor ${hallFloor} assigned to E5.`)}>E5 Freight</button></div>{hallRequest && <div className="request-feedback" aria-live="polite"><strong>Request status:</strong> {hallRequest} <span>Arrival announcement enabled.</span></div>}</div>
+        <div className="panel"><div className="section-heading"><div><p className="eyebrow">UI-3 · UI-4 · UI-10</p><h2>Fleet state and alerts</h2></div></div><div className="sim-car-list">{cars.map((car) => <div className="sim-car-row" key={car.id}><span className="elevator-id">{car.id}</span><span className="sim-direction">{car.emergency ? "! Emergency" : car.direction === "UP" ? "^ Up" : "v Down"}</span><strong>{displayFloor(car.floor)}</strong><span>{car.passengers} passengers · {car.door}</span><span className="weight">{car.maintenance ? "MNT" : `${car.passengers * 75} kg`}</span></div>)}</div></div>
+        <div className="panel simulation-legend"><p className="eyebrow">Accessibility and legend</p><div><span className="legend-car" /> Elevator car</div><div><span className="legend-passenger">●</span> Passenger</div><div><span className="legend-line" /> Floor level</div><p className="muted dark" aria-live="polite">{announcement}</p></div>
       </div>
     </div>
   </section>;
