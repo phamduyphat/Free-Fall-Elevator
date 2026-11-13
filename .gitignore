@@ -85,3 +85,8 @@ acs/__pycache__/accesscontrol.cpython-314.pyc
 acs/__pycache__/logs.cpython-314.pyc
 __pycache__/main.cpython-314.pyc
 __pycache__/db.cpython-314.pyc
+
+# React frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.env.local
