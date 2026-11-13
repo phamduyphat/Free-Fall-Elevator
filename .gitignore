@@ -79,6 +79,7 @@ dmypy.json
 .DS_Store
 Thumbs.db
 __pycache__
+__pycache__/*/**
 acs/__pycache__/__init__.cpython-314.pyc
 acs/__pycache__/accesscontrol.cpython-314.pyc
 acs/__pycache__/logs.cpython-314.pyc

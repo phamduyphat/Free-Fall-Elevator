@@ -736,13 +736,39 @@ class AccessControl:
     # 4.1 CardSwipePayload Validation (`SEC-2.16, SEC-2.17, SEC-2.18, SEC-2.19, SEC-2.21`)
     # -------------------------------------------------------------------------
     @staticmethod
-    async def _handle_cloned_swipe(
+    async def _handle_if_cloned_swipe(
         conn: asyncpg.Connection,
         payload: CardSwipePayload,
-        prior_car: str,
         ts: datetime,
         db_pool: type[DbConnectionPool],
-    ) -> AuthorizationResult:
+    ) -> bool:
+        clone_window = timedelta(seconds=AccessControl.CLONE_DETECTION_WINDOW_SECONDS)
+        AccessControl.recent_presentations_window = [
+            e
+            for e in AccessControl.recent_presentations_window
+            if (ts - e["timestamp"]) < clone_window
+        ]
+        conflicting = next(
+            (
+                e
+                for e in AccessControl.recent_presentations_window
+                if e["credential_id"] == payload.credential_id
+                and e["car_id"] != payload.elevator_id
+                and timedelta(0) <= (ts - e["timestamp"]) < clone_window
+            ),
+            None,
+        )
+        AccessControl.recent_presentations_window.append(
+            {
+                "credential_id": payload.credential_id,
+                "car_id": str(payload.elevator_id),
+                "timestamp": ts,
+            }
+        )
+        if conflicting is None:
+            return False
+
+        prior_car = conflicting["car_id"]
         prior_session = AccessControl.active_car_sessions.get(prior_car)
         if prior_session and prior_session.get("credential_id") == payload.credential_id:
             AccessControl.active_car_sessions.pop(prior_car, None)
@@ -817,16 +843,7 @@ class AccessControl:
             },
             db_pool=db_pool,
         )
-        return AuthorizationResult.deny(
-            DenialReason.CARD_SUSPENDED,
-            message=f"Cloned credential detected across {prior_car} and {payload.elevator_id}; card suspended.",
-            credential_id=payload.credential_id,
-            alert_triggered=True,
-            details={
-                "secondary_car_id": prior_car,
-                "suspension_reason": SuspensionReason.CLONE_SUSPECTED.value,
-            },
-        )
+        return True
 
     @staticmethod
     async def _handle_unregistered_swipe(
@@ -974,11 +991,171 @@ class AccessControl:
         )
 
     @staticmethod
+    async def _verify_swipe_credential(
+        conn: asyncpg.Connection,
+        payload: CardSwipePayload,
+        ts: datetime,
+        db_pool: type[DbConnectionPool],
+    ) -> tuple[Optional[dict[str, Any]], Optional[AuthorizationResult]]:
+        """Fetch, refresh, and verify active credential status for card swipes."""
+        record = await AccessControl._fetch_and_refresh_credential(
+            conn, payload.credential_id, ts, db_pool
+        )
+        if record is None:
+            return None, await AccessControl._handle_unregistered_swipe(payload, ts, db_pool)
+
+        if record["status"] in (
+            CredentialStatus.SUSPENDED,
+            CredentialStatus.REVOKED,
+            CredentialStatus.EXPIRED,
+        ):
+            return None, await AccessControl._handle_inactive_swipe(record, payload, ts, db_pool)
+
+        return record, None
+
+    @staticmethod
+    async def _validate_dashboard_swipe(
+        conn: asyncpg.Connection,
+        payload: CardSwipePayload,
+        ts: datetime,
+        db_pool: type[DbConnectionPool],
+    ) -> AuthorizationResult:
+        """Handle dashboard card-based login and 15-minute session creation (§7.2, §7.3)."""
+        record, denial = await AccessControl._verify_swipe_credential(
+            conn, payload, ts, db_pool
+        )
+        if denial is not None:
+            return denial
+        assert record is not None
+
+        user_role = record["user_role"]
+        if user_role not in (UserRole.ADMIN, UserRole.TECHNICIAN):
+            await Logging.write_audit(
+                timestamp=ts,
+                actor_id=payload.credential_id,
+                actor_role=user_role,
+                action_type=AuditActionType.ACCESS_DENIAL,
+                target_id="DASHBOARD",
+                event_payload={
+                    "denial_reason": DenialReason.DASHBOARD_ACCESS_DENIED.value,
+                    "role": user_role,
+                    "is_dashboard_access": True,
+                },
+                db_pool=db_pool,
+            )
+            return AuthorizationResult.deny(
+                DenialReason.DASHBOARD_ACCESS_DENIED,
+                message=f"Role '{user_role}' is not authorized for dashboard access.",
+                credential_id=payload.credential_id,
+            )
+
+        session_token = str(uuid.uuid4())
+        expires_at = ts + timedelta(seconds=AccessControl.DASHBOARD_SESSION_TIMEOUT_SECONDS)
+        AccessControl.active_dashboard_sessions[session_token] = {
+            "session_token": session_token,
+            "credential_id": payload.credential_id,
+            "user_id": record["user_id"],
+            "role": user_role,
+            "created_at": ts,
+            "last_active_at": ts,
+            "expires_at": expires_at,
+        }
+        await Logging.write_audit(
+            timestamp=ts,
+            actor_id=payload.credential_id,
+            actor_role=user_role,
+            action_type=AuditActionType.ADMIN_LOGIN,
+            target_id="DASHBOARD",
+            event_payload={
+                "session_token": session_token,
+                "credential_id": payload.credential_id,
+                "role": user_role,
+            },
+            db_pool=db_pool,
+        )
+        return AuthorizationResult.allow(
+            message="Dashboard session established.",
+            session_token=session_token,
+            credential_id=payload.credential_id,
+            details={
+                "user_id": record["user_id"],
+                "role": user_role,
+                "expires_at": expires_at,
+            },
+        )
+
+    @staticmethod
+    async def _validate_cabin_swipe(
+        conn: asyncpg.Connection,
+        payload: CardSwipePayload,
+        ts: datetime,
+        db_pool: type[DbConnectionPool],
+    ) -> AuthorizationResult:
+        """Handle in-cabin card swipe, clone detection, and per-car token issuance (§4.1)."""
+        # Step 1: Cloned Card Check (< 10s across different cars, SEC-2.18)
+        if await AccessControl._handle_if_cloned_swipe(conn, payload, ts, db_pool):
+            return AuthorizationResult.deny(
+                DenialReason.CARD_SUSPENDED,
+                message=f"Cloned credential detected on {payload.elevator_id}; card suspended.",
+                credential_id=payload.credential_id,
+                alert_triggered=True,
+                details={
+                    "suspension_reason": SuspensionReason.CLONE_SUSPECTED.value,
+                },
+            )
+
+        # Step 2: Credential Registration & Status Lookup (SEC-2.16, SEC-2.19)
+        record, denial = await AccessControl._verify_swipe_credential(
+            conn, payload, ts, db_pool
+        )
+        if denial is not None:
+            return denial
+        assert record is not None
+
+        # Step 3 & 4: Role & Floor Extraction + Per-Car Session Token (SEC-2.21)
+        user_role = record["user_role"]
+        allowed_floors = AccessControl._parse_allowed_floors(
+            record["allowed_floors"],
+            role=user_role,
+            assigned_floor=record.get("assigned_floor"),
+        )
+        timeout_sec = (
+            AccessControl.STAFF_TECH_WINDOW_SECONDS
+            if user_role in (UserRole.BUILDING_SERVICE, UserRole.TECHNICIAN)
+            else AccessControl.RESIDENT_VISITOR_WINDOW_SECONDS
+        )
+        token = str(uuid.uuid4())
+        expires_at = ts + timedelta(seconds=timeout_sec)
+        AccessControl.active_car_sessions[str(payload.elevator_id)] = {
+            "session_token": token,
+            "credential_id": payload.credential_id,
+            "user_id": record["user_id"],
+            "role": user_role,
+            "allowed_floors": allowed_floors,
+            "granted_at": ts,
+            "expires_at": expires_at,
+            "consumed": False,
+        }
+        return AuthorizationResult.allow(
+            message="Card verified; destination selection window active.",
+            session_token=token,
+            credential_id=payload.credential_id,
+            details={
+                "elevator_id": str(payload.elevator_id),
+                "role": user_role,
+                "allowed_floors": allowed_floors,
+                "expires_at": expires_at,
+            },
+        )
+
+    @staticmethod
     async def validate_card_swipe(
         payload: CardSwipePayload,
         db_pool: type[DbConnectionPool] = DbConnectionPool,
     ) -> AuthorizationResult:
         ts = Logging.normalize_timestamp(payload.timestamp)
+
+        # Case: Malformed payload
         if not payload.is_dashboard_access and not ElevatorId.has_value(payload.elevator_id):
             return await AccessControl._reject_malformed_msg(
                 timestamp=ts,
@@ -996,142 +1173,12 @@ class AccessControl:
 
         try:
             async with db_pool.transaction() as conn:
-                # Step 1: Cloned Card Check (< 10s across different cars, SEC-2.18)
-                if not payload.is_dashboard_access:
-                    clone_window = timedelta(seconds=AccessControl.CLONE_DETECTION_WINDOW_SECONDS)
-                    AccessControl.recent_presentations_window = [
-                        e
-                        for e in AccessControl.recent_presentations_window
-                        if (ts - e["timestamp"]) < clone_window
-                    ]
-                    conflicting = next(
-                        (
-                            e
-                            for e in AccessControl.recent_presentations_window
-                            if e["credential_id"] == payload.credential_id
-                            and e["car_id"] != payload.elevator_id
-                            and timedelta(0) <= (ts - e["timestamp"]) < clone_window
-                        ),
-                        None,
-                    )
-                    AccessControl.recent_presentations_window.append(
-                        {
-                            "credential_id": payload.credential_id,
-                            "car_id": str(payload.elevator_id),
-                            "timestamp": ts,
-                        }
-                    )
-                    if conflicting is not None:
-                        return await AccessControl._handle_cloned_swipe(
-                            conn, payload, conflicting["car_id"], ts, db_pool
-                        )
-
-                # Step 2: Credential Registration & Status Lookup (SEC-2.16, SEC-2.19)
-                record = await AccessControl._fetch_and_refresh_credential(
-                    conn, payload.credential_id, ts, db_pool
-                )
-                if record is None:
-                    return await AccessControl._handle_unregistered_swipe(payload, ts, db_pool)
-
-                if record["status"] in (
-                    CredentialStatus.SUSPENDED,
-                    CredentialStatus.REVOKED,
-                    CredentialStatus.EXPIRED,
-                ):
-                    return await AccessControl._handle_inactive_swipe(record, payload, ts, db_pool)
-
-                user_role = record["user_role"]
-
-                # Step 3A: Dashboard Session Login Branch (§7.2 & §7.3)
                 if payload.is_dashboard_access:
-                    if user_role not in (UserRole.ADMIN, UserRole.TECHNICIAN):
-                        await Logging.write_audit(
-                            timestamp=ts,
-                            actor_id=payload.credential_id,
-                            actor_role=user_role,
-                            action_type=AuditActionType.ACCESS_DENIAL,
-                            target_id="DASHBOARD",
-                            event_payload={
-                                "denial_reason": DenialReason.DASHBOARD_ACCESS_DENIED.value,
-                                "role": user_role,
-                                "is_dashboard_access": True,
-                            },
-                            db_pool=db_pool,
-                        )
-                        return AuthorizationResult.deny(
-                            DenialReason.DASHBOARD_ACCESS_DENIED,
-                            message=f"Role '{user_role}' is not authorized for dashboard access.",
-                            credential_id=payload.credential_id,
-                        )
-
-                    session_token = str(uuid.uuid4())
-                    expires_at = ts + timedelta(seconds=AccessControl.DASHBOARD_SESSION_TIMEOUT_SECONDS)
-                    AccessControl.active_dashboard_sessions[session_token] = {
-                        "session_token": session_token,
-                        "credential_id": payload.credential_id,
-                        "user_id": record["user_id"],
-                        "role": user_role,
-                        "created_at": ts,
-                        "last_active_at": ts,
-                        "expires_at": expires_at,
-                    }
-                    await Logging.write_audit(
-                        timestamp=ts,
-                        actor_id=payload.credential_id,
-                        actor_role=user_role,
-                        action_type=AuditActionType.ADMIN_LOGIN,
-                        target_id="DASHBOARD",
-                        event_payload={
-                            "session_token": session_token,
-                            "credential_id": payload.credential_id,
-                            "role": user_role,
-                        },
-                        db_pool=db_pool,
+                    return await AccessControl._validate_dashboard_swipe(
+                        conn, payload, ts, db_pool
                     )
-                    return AuthorizationResult.allow(
-                        message="Dashboard session established.",
-                        session_token=session_token,
-                        credential_id=payload.credential_id,
-                        details={
-                            "user_id": record["user_id"],
-                            "role": user_role,
-                            "expires_at": expires_at,
-                        },
-                    )
-
-                # Step 3B & 4: In-Cabin Role & Floor Extraction + Per-Car Session Token (SEC-2.21)
-                allowed_floors = AccessControl._parse_allowed_floors(
-                    record["allowed_floors"],
-                    role=user_role,
-                    assigned_floor=record.get("assigned_floor"),
-                )
-                timeout_sec = (
-                    AccessControl.STAFF_TECH_WINDOW_SECONDS
-                    if user_role in (UserRole.BUILDING_SERVICE, UserRole.TECHNICIAN)
-                    else AccessControl.RESIDENT_VISITOR_WINDOW_SECONDS
-                )
-                token = str(uuid.uuid4())
-                expires_at = ts + timedelta(seconds=timeout_sec)
-                AccessControl.active_car_sessions[str(payload.elevator_id)] = {
-                    "session_token": token,
-                    "credential_id": payload.credential_id,
-                    "user_id": record["user_id"],
-                    "role": user_role,
-                    "allowed_floors": allowed_floors,
-                    "granted_at": ts,
-                    "expires_at": expires_at,
-                    "consumed": False,
-                }
-                return AuthorizationResult.allow(
-                    message="Card verified; destination selection window active.",
-                    session_token=token,
-                    credential_id=payload.credential_id,
-                    details={
-                        "elevator_id": str(payload.elevator_id),
-                        "role": user_role,
-                        "allowed_floors": allowed_floors,
-                        "expires_at": expires_at,
-                    },
+                return await AccessControl._validate_cabin_swipe(
+                    conn, payload, ts, db_pool
                 )
         except Exception:
             return AccessControl._fail_closed(payload.credential_id)
