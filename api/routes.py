@@ -6,7 +6,7 @@ from pydantic import BaseModel
 
 from api.acs import router as acs_router
 from api.analytics import router as analytics_router
-from api.system import router as system_router
+from api.emulator.system import router as system_router
 
 router = APIRouter()
 
