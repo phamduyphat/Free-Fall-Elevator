@@ -5,7 +5,6 @@ __pycache__/
 
 # C extensions
 *.so
-*.pyc
 
 # Distribution / packaging
 .Python
@@ -73,9 +72,15 @@ dmypy.json
 *.sqlite
 *.sqlite3
 
+
 # IDEs & OS files
 .vscode/
 .idea/
 .DS_Store
 Thumbs.db
 __pycache__
+acs/__pycache__/__init__.cpython-314.pyc
+acs/__pycache__/accesscontrol.cpython-314.pyc
+acs/__pycache__/logs.cpython-314.pyc
+__pycache__/main.cpython-314.pyc
+__pycache__/db.cpython-314.pyc
