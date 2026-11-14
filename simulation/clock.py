@@ -107,9 +107,10 @@ class SimulationClock:
         """Run bulk credential transitions, then tick hooks, then advance virtual clock state."""
         with cls._lock:
             hook = cls._tick_hook
+            sim_dt = cls._sim_seconds_per_tick
             next_tick = cls._tick + 1
             next_time = cls._base_time + timedelta(
-                seconds=next_tick * cls._sim_seconds_per_tick
+                seconds=next_tick * sim_dt
             )
 
         if db_conn is None or db_conn.is_closed():
@@ -124,6 +125,10 @@ class SimulationClock:
 
         # NOTE: Subsequent actions in this tick MUST come after the bulk card state transition above
         # so that expired visitor passes and auto-revoked lost cards are reflected before any tick actions run.
+        from simulation.operational import operational_simulator
+
+        operational_simulator.step_from_clock(max(1, int(sim_dt)))
+
         if hook is not None:
             hook(next_time, next_tick)
 
@@ -243,6 +248,15 @@ class SimulationClock:
                 else None
             )
             cls.current_time = normalized_base
+
+        from simulation.operational import operational_simulator
+
+        with operational_simulator._lock:
+            operational_simulator.base_time = normalized_base
+            operational_simulator.sim_time_seconds = 0
+            operational_simulator.heartbeats = [
+                {"timestamp": normalized_base, "status": "UP"}
+            ]
 
         if start_loop:
             cls.start()

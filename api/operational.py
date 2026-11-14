@@ -20,6 +20,7 @@ class HallCallInput(BaseModel):
     origin_floor: int = Field(ge=-1, le=30)
     call_type: Literal["ORDINARY", "FREIGHT"] = "ORDINARY"
     direction: Literal["UP", "DOWN"] | None = None
+    traffic_profile: str | None = None
 
 
 class StubAdvanceInput(BaseModel):
@@ -39,6 +40,7 @@ async def submit_hall_call(body: HallCallInput) -> dict:
             origin_floor=body.origin_floor,
             direction=body.direction,
             call_type=body.call_type,
+            traffic_profile=getattr(body, "traffic_profile", None),
         )
         return {"request": request, "merged": merged, "source": "labelled-test-stub"}
     except OperationalError as exc:

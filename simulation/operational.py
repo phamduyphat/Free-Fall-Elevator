@@ -76,6 +76,7 @@ class HallRequest:
     boarding_evidence: bool | None = None
     boarding_deadline_tick: int | None = None
     no_boarding: bool = False
+    traffic_profile: str | None = None
     history: list[str] = field(default_factory=lambda: ["RECEIVED"])
 
     def transition(self, new_status: str) -> None:
@@ -92,6 +93,8 @@ class CarRequest:
     accepted_at: datetime
     status: str = "QUEUED"
     completed_at: datetime | None = None
+    origin_floor: int | None = None
+    is_service_run: bool = False
 
 
 @dataclass
@@ -127,17 +130,22 @@ class OperationalSimulator:
         self._auto_advance = auto_advance
         self.reset()
 
-    def reset(self) -> None:
+    def reset(self, *, base_time: datetime | None = None) -> None:
         with self._lock:
             self.cars: dict[str, Car] = {eid: Car(eid) for eid in self.ELEVATOR_IDS}
             self.hall_calls: dict[str, HallRequest] = {}
             self.car_calls: dict[str, CarRequest] = {}
             self.incidents: dict[str, Incident] = {}
             self.events: list[dict] = []
+            self.trips: list[dict] = []
+            self._active_leg: dict[str, tuple[int, datetime]] = {}
+            self.downtime_intervals: list[dict] = []
+            self.heartbeats: list[dict] = []
             self._emergency_triggers: dict[str, list[int]] = {}
             self.sim_tick = 0
-            self.base_time = datetime.now(timezone.utc)
+            self.base_time = base_time if base_time is not None else datetime.now(timezone.utc)
             self._wall_reference = time.monotonic()
+            self.heartbeats.append({"timestamp": self._now(), "status": "UP"})
 
     def _now(self) -> datetime:
         return self.base_time + timedelta(seconds=self.sim_tick)
@@ -215,7 +223,8 @@ class OperationalSimulator:
                 self._assign_request(request)
 
     def submit_hall_call(self, *, origin_floor: int, direction: HallDirection | None = None,
-                         call_type: CallType = "ORDINARY") -> tuple[dict, bool]:
+                         call_type: CallType = "ORDINARY",
+                         traffic_profile: str | None = None) -> tuple[dict, bool]:
         with self._lock:
             self._update_auto()
             if call_type not in ("ORDINARY", "FREIGHT"):
@@ -242,7 +251,14 @@ class OperationalSimulator:
                     and previous.call_type == call_type):
                     return self._serialize_request(previous), True
 
-            request = HallRequest(str(uuid4()), origin_floor, call_type, direction, self._now())
+            request = HallRequest(
+                str(uuid4()),
+                origin_floor,
+                call_type,
+                direction,
+                self._now(),
+                traffic_profile=traffic_profile,
+            )
             self.hall_calls[request.request_id] = request
             self._event("HALL_CALL", None, f"{call_type} hall call at {origin_floor}")
             request.transition("QUEUED")
@@ -258,7 +274,13 @@ class OperationalSimulator:
                 raise OperationalError("Invalid destination or E5-to-B1 is forbidden")
             if not self._eligible(car):
                 raise OperationalError("Elevator is unavailable for a destination request")
-            request = CarRequest(str(uuid4()), elevator_id, destination_floor, self._now())
+            request = CarRequest(
+                str(uuid4()),
+                elevator_id,
+                destination_floor,
+                self._now(),
+                origin_floor=car.current_floor,
+            )
             self.car_calls[request.request_id] = request
             self._event("CAR_CALL", elevator_id, f"Authorized destination {destination_floor}")
             car.stops.append(Stop(destination_floor, "CAR", request.request_id))
@@ -274,7 +296,14 @@ class OperationalSimulator:
             if not self._valid_floor("E5", destination_floor):
                 raise OperationalError("Invalid E5 service-run destination")
             car.availability = "OCCUPIED"
-            request = CarRequest(str(uuid4()), "E5", destination_floor, self._now())
+            request = CarRequest(
+                str(uuid4()),
+                "E5",
+                destination_floor,
+                self._now(),
+                origin_floor=car.current_floor,
+                is_service_run=True,
+            )
             self.car_calls[request.request_id] = request
             car.stops.append(Stop(destination_floor, "SERVICE", request.request_id))
             return asdict(request)
@@ -296,10 +325,19 @@ class OperationalSimulator:
                 request = self.car_calls[stop.request_id]
                 request.status = "BLOCKED/REQUIRES_RECONCILIATION"
         car.stops.clear()
+        self._active_leg.pop(car.elevator_id, None)
         car.medical_run = False
         car.rescue_active = False
         car.rescue_wait_remaining = 0
         car.direction = "IDLE"
+
+    def _close_open_downtime(self, elevator_id: str, now: datetime) -> None:
+        for interval in self.downtime_intervals:
+            if interval["elevator_id"] == elevator_id and interval["ended_at"] is None:
+                interval["ended_at"] = now
+                interval["duration_seconds"] = max(
+                    0.0, (now - interval["started_at"]).total_seconds()
+                )
 
     def isolate(self, elevator_id: str, availability: CarAvailability) -> None:
         """Trusted equipment-stub or authorized staff transition, not public passenger input."""
@@ -321,9 +359,38 @@ class OperationalSimulator:
                        and (i.elevator_id is None or i.elevator_id == elevator_id)
                        for i in self.incidents.values()):
                     raise OperationalError("Unresolved incident prevents return to service")
+            now = self._now()
             if availability != "IN_SERVICE":
                 self._release_car_hall_calls(car)
                 self._event("ISOLATION", elevator_id, availability)
+                if car.availability != availability:
+                    self._close_open_downtime(elevator_id, now)
+                    mapped_state = (
+                        "EMERGENCY"
+                        if availability == "EMERGENCY_UNAVAILABLE"
+                        else "FAULT"
+                        if availability in ("FAULT", "STALE")
+                        else "MAINTENANCE"
+                    )
+                    reason = (
+                        "COMMUNICATION_LOSS"
+                        if availability == "STALE"
+                        else (car.active_fault or availability)
+                    )
+                    self.downtime_intervals.append(
+                        {
+                            "interval_id": str(uuid4()),
+                            "elevator_id": elevator_id,
+                            "state": mapped_state,
+                            "reason": reason,
+                            "started_at": now,
+                            "ended_at": None,
+                            "duration_seconds": None,
+                            "technician_id": None,
+                        }
+                    )
+            else:
+                self._close_open_downtime(elevator_id, now)
             car.availability = availability
             if availability == "IN_SERVICE":
                 car.connected = True
@@ -359,13 +426,34 @@ class OperationalSimulator:
 
     def _serve_stop(self, car: Car) -> None:
         stop = car.stops.pop(0)
+        now = self._now()
+        orig_floor, dep_time = self._active_leg.pop(car.elevator_id, (car.current_floor, now))
+        traversed = abs(_position(stop.floor) - _position(orig_floor))
+        travel_sec = max(0.0, (now - dep_time).total_seconds())
+        if traversed > 0 or stop.kind in ("CAR", "SERVICE"):
+            self.trips.append(
+                {
+                    "trip_id": str(uuid4()),
+                    "elevator_id": car.elevator_id,
+                    "origin_floor": orig_floor,
+                    "destination_floor": stop.floor,
+                    "departure_time": dep_time,
+                    "arrival_time": now,
+                    "travel_time_seconds": travel_sec,
+                    "floors_traversed": traversed,
+                    "motor_starts": 1,
+                    "is_estimated": False,
+                    "is_service_run": stop.kind == "SERVICE",
+                    "traffic_profile": None,
+                }
+            )
         car.door_state = "OPEN"
         car.dwell_remaining = 2
         car.direction = "IDLE"
         if stop.kind == "HALL":
             request = self.hall_calls[stop.request_id]
             request.transition("ARRIVED")
-            request.arrived_at = self._now()
+            request.arrived_at = now
             request.wait_seconds = (request.arrived_at - request.accepted_at).total_seconds()
             request.boarding_deadline_tick = self.sim_tick + 30
             request.transition("COMPLETED")
@@ -382,13 +470,15 @@ class OperationalSimulator:
         else:
             request = self.car_calls[stop.request_id]
             request.status = "COMPLETED"
-            request.completed_at = self._now()
+            request.completed_at = now
             if stop.kind == "SERVICE":
                 car.availability = "IN_SERVICE"
 
     def _advance_locked(self, seconds: int) -> None:
         for _ in range(seconds):
             self.sim_tick += 1
+            if self.sim_tick % 10 == 0:
+                self.heartbeats.append({"timestamp": self._now(), "status": "UP"})
             self._escalate_incidents()
             self._detect_empty_calls()
             for car in self.cars.values():
@@ -417,6 +507,11 @@ class OperationalSimulator:
                 if car.obstruction_started is not None:
                     car.direction = "IDLE"  # synthetic interlock; never move with an active obstruction
                     continue
+                if car.elevator_id not in self._active_leg:
+                    self._active_leg[car.elevator_id] = (
+                        car.current_floor,
+                        self._now() - timedelta(seconds=1),
+                    )
                 target = _position(car.stops[0].floor)
                 current = _position(car.current_floor)
                 car.direction = "UP" if target > current else "DOWN" if target < current else "IDLE"
@@ -434,6 +529,42 @@ class OperationalSimulator:
                 if current == target:
                     self._serve_stop(car)
             self._reassign_pending()
+
+    def step_from_clock(self, seconds: int) -> None:
+        """Advance simulator from `SimulationClock` tick (fast-forwards when completely idle)."""
+        if seconds <= 0:
+            return
+        with self._lock:
+            is_idle = (
+                all(
+                    not c.stops
+                    and c.dwell_remaining == 0
+                    and c.obstruction_started is None
+                    and not c.rescue_active
+                    for c in self.cars.values()
+                )
+                and not any(
+                    i.status not in ("RESOLVED", "CLOSED") and not i.escalated
+                    for i in self.incidents.values()
+                )
+                and not any(
+                    r.status == "COMPLETED"
+                    and r.boarding_evidence is False
+                    and not r.no_boarding
+                    and r.boarding_deadline_tick is not None
+                    and self.sim_tick < r.boarding_deadline_tick
+                    for r in self.hall_calls.values()
+                )
+            )
+            if is_idle and seconds > 60:
+                self.sim_tick += seconds
+                for car in self.cars.values():
+                    if car.connected:
+                        car.last_seen_tick = self.sim_tick
+                self.heartbeats.append({"timestamp": self._now(), "status": "UP"})
+            else:
+                self._advance_locked(seconds)
+            self._wall_reference = time.monotonic()
 
     def advance(self, seconds: int = 1) -> dict:
         """Deterministic stepping for tests, without a hardware control command."""

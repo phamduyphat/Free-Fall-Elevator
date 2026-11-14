@@ -11,13 +11,14 @@ from analytics.reports import (
     WaitTimeReport,
 )
 from db import DbConnectionPool
+from simulation.operational import operational_simulator
 
 
 class TrafficMetrics:
     """
     Analytics.TrafficMetrics submodule (`analytics/traffic_metrics.py`).
     Computes passenger wait-time KPIs, cab travel-time KPIs, and directional
-    trip distribution shares.
+    trip distribution shares from `operational_simulator` in-memory state.
     """
 
     @staticmethod
@@ -28,36 +29,37 @@ class TrafficMetrics:
         db_pool: type[DbConnectionPool] = DbConnectionPool,
     ) -> WaitTimeReport:
         """
-        Compute wait-time KPIs from `hall_calls` over [start_time, end_time] (ANA-5.2, FR-1.18, PERF-9).
+        Compute wait-time KPIs from `operational_simulator.hall_calls` over [start_time, end_time] (ANA-5.2, FR-1.18, PERF-9).
         Excludes cancelled/failed/blocked calls from wait distributions and computes drop rate.
         """
         st = normalize_timestamp(start_time)
         et = normalize_timestamp(end_time)
+        prof_filter = str(traffic_profile) if traffic_profile is not None else None
 
-        query = """
-            SELECT
-                call_id,
-                status,
-                wait_time_seconds,
-                reassignments_count,
-                no_boarding,
-                traffic_profile
-            FROM hall_calls
-            WHERE created_at >= $1 AND created_at <= $2
-        """
-        params: list[Any] = [st, et]
-        if traffic_profile is not None:
-            params.append(str(traffic_profile))
-            query += f" AND (traffic_profile IS NULL OR traffic_profile = ${len(params)})"
-
-        async with db_pool.acquire() as conn:
-            rows = await conn.fetch(query, *params)
+        rows: list[dict[str, Any]] = []
+        with operational_simulator._lock:
+            for req in operational_simulator.hall_calls.values():
+                created_at = normalize_timestamp(req.accepted_at)
+                if not (st <= created_at <= et):
+                    continue
+                if prof_filter is not None and req.traffic_profile not in (None, prof_filter):
+                    continue
+                rows.append(
+                    {
+                        "call_id": req.request_id,
+                        "status": req.status,
+                        "wait_time_seconds": req.wait_seconds,
+                        "reassignments_count": req.reassignment_count,
+                        "no_boarding": req.no_boarding,
+                        "traffic_profile": req.traffic_profile,
+                    }
+                )
 
         total_calls = len(rows)
         if total_calls == 0:
             return WaitTimeReport()
 
-        completed_rows = [r for r in rows if r["status"] == "COMPLETED"]
+        completed_rows = [r for r in rows if r["status"] in ("COMPLETED", "BOARDED")]
         dropped_rows = [r for r in rows if r["status"] in ("CANCELLED", "FAILED", "BLOCKED")]
         reassigned_count = sum(1 for r in rows if (r.get("reassignments_count") or 0) > 0)
         no_boarding_count = sum(1 for r in rows if r.get("no_boarding"))
@@ -107,27 +109,21 @@ class TrafficMetrics:
         db_pool: type[DbConnectionPool] = DbConnectionPool,
     ) -> TravelTimeReport:
         """
-        Compute elevator physical travel-time KPIs from `trips` over [start_time, end_time] (ANA-5.3).
+        Compute elevator physical travel-time KPIs from `operational_simulator.trips` over [start_time, end_time] (ANA-5.3).
         Tracks locally estimated timestamps separately from hardware-verified legs.
         """
         st = normalize_timestamp(start_time)
         et = normalize_timestamp(end_time)
 
-        query = """
-            SELECT
-                travel_time_seconds,
-                is_estimated,
-                is_service_run
-            FROM trips
-            WHERE departure_time >= $1 AND departure_time <= $2
-        """
-        params: list[Any] = [st, et]
-        if elevator_id is not None:
-            params.append(elevator_id)
-            query += f" AND elevator_id = ${len(params)}"
-
-        async with db_pool.acquire() as conn:
-            rows = await conn.fetch(query, *params)
+        rows: list[dict[str, Any]] = []
+        with operational_simulator._lock:
+            for t in operational_simulator.trips:
+                dep = normalize_timestamp(t["departure_time"])
+                if not (st <= dep <= et):
+                    continue
+                if elevator_id is not None and t.get("elevator_id") != elevator_id:
+                    continue
+                rows.append(dict(t))
 
         total_trips = len(rows)
         if total_trips == 0:
@@ -170,26 +166,19 @@ class TrafficMetrics:
         """
         st = normalize_timestamp(start_time)
         et = normalize_timestamp(end_time)
+        prof_filter = str(traffic_profile) if traffic_profile is not None else None
 
-        query = """
-            SELECT
-                elevator_id,
-                origin_floor,
-                destination_floor,
-                is_service_run
-            FROM trips
-            WHERE departure_time >= $1 AND departure_time <= $2
-        """
-        params: list[Any] = [st, et]
-        if elevator_id is not None:
-            params.append(elevator_id)
-            query += f" AND elevator_id = ${len(params)}"
-        if traffic_profile is not None:
-            params.append(str(traffic_profile))
-            query += f" AND traffic_profile = ${len(params)}"
-
-        async with db_pool.acquire() as conn:
-            rows = await conn.fetch(query, *params)
+        rows: list[dict[str, Any]] = []
+        with operational_simulator._lock:
+            for t in operational_simulator.trips:
+                dep = normalize_timestamp(t["departure_time"])
+                if not (st <= dep <= et):
+                    continue
+                if elevator_id is not None and t.get("elevator_id") != elevator_id:
+                    continue
+                if prof_filter is not None and t.get("traffic_profile") not in (None, prof_filter):
+                    continue
+                rows.append(dict(t))
 
         up_count = 0
         down_non_b1_count = 0

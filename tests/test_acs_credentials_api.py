@@ -177,6 +177,30 @@ def test_manage_issue_and_issue_visitor_pass_actions() -> None:
             assert staff_row is not None
             assert staff_row["credential_type"] == CredentialType.STAFF
 
+            # 2b. Create user and list/search credentials via frontend endpoints
+            create_u_resp = await client.post(
+                "/api/v1/acs/credentials/users",
+                headers=bearer(admin_token),
+                json_body={
+                    "full_name": "Frontend Created Resident",
+                    "role": UserRole.RESIDENT.value,
+                    "apartment_unit": "18B",
+                    "assigned_floor": 18,
+                },
+            )
+            assert create_u_resp.status_code == 201
+            assert create_u_resp.json()["user"]["full_name"] == "Frontend Created Resident"
+
+            list_creds_resp = await client.get(
+                "/api/v1/acs/credentials",
+                headers=bearer(admin_token),
+                params={"search": "STAFF-AUTO-01", "status": "ACTIVE"},
+            )
+            assert list_creds_resp.status_code == 200
+            assert list_creds_resp.json()["count"] == 1
+            assert list_creds_resp.json()["items"][0]["card_id"] == "STAFF-AUTO-01"
+            assert len(list_creds_resp.json()["users"]) >= 2
+
             # 3. ISSUE error paths: missing target_credential_id -> 400; duplicate -> 409
             missing_id_resp = await client.post(
                 "/api/v1/acs/credentials/manage",

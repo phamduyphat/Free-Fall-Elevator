@@ -8,6 +8,7 @@ from analytics.enums import ELEVATOR_IDS
 from analytics.helpers import normalize_timestamp
 from analytics.reports import CarUtilizationReport, DowntimeReport
 from db import DbConnectionPool
+from simulation.operational import operational_simulator
 
 
 class FleetMetrics:
@@ -32,37 +33,21 @@ class FleetMetrics:
         et = normalize_timestamp(end_time)
         window_seconds = max(0.0, (et - st).total_seconds())
 
-        async with db_pool.acquire() as conn:
-            trip_rows = await conn.fetch(
-                """
-                SELECT
-                    elevator_id,
-                    travel_time_seconds,
-                    floors_traversed,
-                    motor_starts,
-                    is_service_run
-                FROM trips
-                WHERE departure_time >= $1 AND departure_time <= $2
-                """,
-                st,
-                et,
-            )
-
-            downtime_rows = await conn.fetch(
-                """
-                SELECT
-                    elevator_id,
-                    state,
-                    reason,
-                    started_at,
-                    ended_at,
-                    duration_seconds
-                FROM car_downtime_intervals
-                WHERE started_at <= $2 AND (ended_at IS NULL OR ended_at >= $1)
-                """,
-                st,
-                et,
-            )
+        trip_rows: list[dict[str, Any]] = []
+        downtime_rows: list[dict[str, Any]] = []
+        with operational_simulator._lock:
+            for t in operational_simulator.trips:
+                dep = normalize_timestamp(t["departure_time"])
+                if st <= dep <= et:
+                    trip_rows.append(dict(t))
+            for d in operational_simulator.downtime_intervals:
+                d_start = normalize_timestamp(d["started_at"])
+                d_end = normalize_timestamp(d["ended_at"]) if d.get("ended_at") is not None else None
+                if d_start <= et and (d_end is None or d_end >= st):
+                    row = dict(d)
+                    row["started_at"] = d_start
+                    row["ended_at"] = d_end
+                    downtime_rows.append(row)
 
         reports: dict[str, CarUtilizationReport] = {
             eid: CarUtilizationReport(elevator_id=eid) for eid in ELEVATOR_IDS
@@ -141,39 +126,26 @@ class FleetMetrics:
         rt = normalize_timestamp(report_time) if report_time is not None else et
         total_window_seconds = max(0.0, (et - st).total_seconds())
 
+        downtime_rows: list[dict[str, Any]] = []
+        heartbeat_rows: list[dict[str, Any]] = []
+        with operational_simulator._lock:
+            for d in operational_simulator.downtime_intervals:
+                d_start = normalize_timestamp(d["started_at"])
+                d_end = normalize_timestamp(d["ended_at"]) if d.get("ended_at") is not None else None
+                if d_start <= et and (d_end is None or d_end >= st):
+                    row = dict(d)
+                    row["started_at"] = d_start
+                    row["ended_at"] = d_end
+                    downtime_rows.append(row)
+            downtime_rows.sort(key=lambda r: r["started_at"])
+
+            for hb in operational_simulator.heartbeats:
+                hb_ts = normalize_timestamp(hb["timestamp"])
+                if st <= hb_ts <= et:
+                    heartbeat_rows.append({"timestamp": hb_ts, "status": hb.get("status", "UP")})
+            heartbeat_rows.sort(key=lambda r: r["timestamp"])
+
         async with db_pool.acquire() as conn:
-            downtime_rows = await conn.fetch(
-                """
-                SELECT
-                    interval_id,
-                    elevator_id,
-                    state,
-                    reason,
-                    started_at,
-                    ended_at,
-                    duration_seconds,
-                    technician_id
-                FROM car_downtime_intervals
-                WHERE started_at <= $2 AND (ended_at IS NULL OR ended_at >= $1)
-                ORDER BY started_at ASC
-                """,
-                st,
-                et,
-            )
-
-            heartbeat_rows = await conn.fetch(
-                """
-                SELECT
-                    timestamp,
-                    status
-                FROM system_heartbeats
-                WHERE timestamp >= $1 AND timestamp <= $2
-                ORDER BY timestamp ASC
-                """,
-                st,
-                et,
-            )
-
             shutdown_audit_rows = await conn.fetch(
                 """
                 SELECT

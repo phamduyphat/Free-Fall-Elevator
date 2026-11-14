@@ -24,7 +24,7 @@ h1, h2 { margin: 0; color: #172033; } h1 { font-size: 28px; } h2 { font-size: 20
 .section { margin-top: 38px; } .refresh-label { color: #7d899d; font-size: 12px; }
 .elevator-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 16px; margin-top: 18px; }
 .elevator-card, .summary-card { background: #fff; border: 1px solid #e6ebf2; border-radius: 12px; box-shadow: 0 5px 16px #2c416110; }
-.elevator-card { padding: 20px; } .elevator-id { font-weight: 800; font-size: 16px; } .badge { border-radius: 99px; padding: 5px 9px; font-size: 10px; font-weight: 700; } .unknown { color: #727d8d; background: #edf0f4; }
+.elevator-card { padding: 20px; } .elevator-id { font-weight: 800; font-size: 16px; } .badge { border-radius: 99px; padding: 5px 9px; font-size: 10px; font-weight: 700; } .badge.blue { color: #147aca; background: #dceeff; } .unknown { color: #727d8d; background: #edf0f4; }
 .floor-display { font-size: 42px; font-weight: 700; margin: 24px 0 16px; } .floor-display span { font-size: 11px; color: #7d899d; font-weight: 500; margin-left: 6px; }
 .card-details { display: flex; justify-content: space-between; border-top: 1px solid #edf0f4; padding-top: 14px; color: #7d899d; font-size: 12px; } .card-details strong { color: #354156; }
 .card-note { color: #8995a8; font-size: 11px; line-height: 1.5; min-height: 32px; margin-bottom: 0; }
@@ -40,7 +40,7 @@ h1, h2 { margin: 0; color: #172033; } h1 { font-size: 28px; } h2 { font-size: 20
 .button:disabled { cursor: not-allowed; opacity: .55; }
 .panel { background: #fff; border: 1px solid #e6ebf2; border-radius: 12px; box-shadow: 0 5px 16px #2c416110; padding: 22px; }
 .toolbar, .filter-bar { display: flex; align-items: center; gap: 12px; margin-bottom: 18px; }
-.toolbar input, .toolbar select, .filter-bar input, .filter-bar select { border: 1px solid #dfe6ef; border-radius: 8px; padding: 11px 12px; color: #7d899d; background: #fff; font: inherit; font-size: 12px; }
+.toolbar input, .toolbar select, .filter-bar input, .filter-bar select, .hall-controls input { border: 1px solid #dfe6ef; border-radius: 8px; padding: 11px 12px; color: #7d899d; background: #fff; font: inherit; font-size: 12px; text-transform: none; letter-spacing: normal; }
 .toolbar input { flex: 1; min-width: 240px; } .toolbar select { min-width: 150px; }
 .filter-bar label { color: #6f7c92; display: grid; gap: 7px; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .08em; }
 .filter-bar input, .filter-bar select { color: #354156; text-transform: none; letter-spacing: normal; font-size: 12px; }
@@ -87,3 +87,8 @@ h1, h2 { margin: 0; color: #172033; } h1 { font-size: 28px; } h2 { font-size: 20
 .login-field { display: flex; align-items: center; gap: 6px; font-size: 12px; }
 .login-field input { max-width: 180px; min-width: 130px; }
 .event-row { border-top: 1px solid #dfe3ea; padding: 8px; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; }
+.table-wrap { overflow-x: auto; }
+.operations-table { width: 100%; border-collapse: collapse; font-size: 12px; text-align: left; }
+.operations-table th { color: #7d899d; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .08em; padding: 12px 10px; border-bottom: 1px solid #edf0f4; }
+.operations-table td { padding: 12px 10px; border-bottom: 1px solid #edf0f4; color: #354156; vertical-align: middle; }
+.operations-table tbody tr:last-child td { border-bottom: 0; }

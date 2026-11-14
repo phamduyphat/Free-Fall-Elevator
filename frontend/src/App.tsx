@@ -97,7 +97,30 @@ function FleetCards({ fleet }: { fleet: FleetResponse | null }) {
   ))}</div>;
 }
 
-function Overview({ fleet, summary }: { fleet: FleetResponse | null; summary: Summary | null }) {
+function Overview({ fleet, summary, token }: { fleet: FleetResponse | null; summary: Summary | null; token: string }) {
+  const [events, setEvents] = useState<StubEvent[]>([]);
+  const [eventsError, setEventsError] = useState("");
+
+  const refreshEvents = useCallback(async () => {
+    if (!token) {
+      setEvents([]);
+      setEventsError("");
+      return;
+    }
+    try {
+      const data = await authorizedApi<{ items: StubEvent[] }>("/api/v1/operational/events", token);
+      setEvents([...(data.items ?? [])].reverse());
+      setEventsError("");
+    } catch (reason) {
+      setEvents([]);
+      setEventsError(reason instanceof Error ? reason.message : "Unable to load operational events");
+    }
+  }, [token]);
+
+  useEffect(() => {
+    void refreshEvents();
+  }, [refreshEvents, summary?.events_count]);
+
   return <>
     <section className="hero-card"><div><p className="eyebrow">Live operations</p><h2>Elevator fleet status</h2><p className="muted">Displaying a software-only test stub. This is not physical elevator telemetry.</p></div><div className="hero-metric"><strong>{fleet?.elevators.length ?? "—"}</strong><span>cars monitored</span></div></section>
     <section className="summary-grid">
@@ -106,7 +129,42 @@ function Overview({ fleet, summary }: { fleet: FleetResponse | null; summary: Su
       <article className="summary-card"><span className="summary-icon green">+</span><div><span>Availability</span><strong>{summary ? `${summary.fleet_available}/${summary.fleet_count}` : "—"}</strong><small>Available for dispatch</small></div></article>
     </section>
     <section className="section"><div className="section-heading"><div><p className="eyebrow">Fleet</p><h2>Elevator snapshot</h2></div><span className="refresh-label">Software test-stub snapshot</span></div><FleetCards fleet={fleet} /></section>
-    <section className="section panel"><div className="section-heading"><div><p className="eyebrow">Activity</p><h2>Recent operations</h2></div></div><EmptyState title="No operational events available" detail="Connect the dispatch and telemetry sources to see recent activity." /></section>
+    <section className="section panel">
+      <div className="section-heading" style={{ marginBottom: "14px" }}>
+        <div><p className="eyebrow">Activity</p><h2>Recent operations</h2></div>
+        {token && <button className="button secondary" onClick={() => { void refreshEvents(); }}>Refresh</button>}
+      </div>
+      {!token ? (
+        <EmptyState title="Dashboard sign-in required" detail="Sign in with an Admin credential in the header to view recent operational events." />
+      ) : eventsError ? (
+        <EmptyState title="Unable to load operational events" detail={eventsError} />
+      ) : events.length === 0 ? (
+        <EmptyState title="No operational events available" detail="Submit hall calls, destination requests, or simulator actions to see recent activity." />
+      ) : (
+        <div className="table-wrap">
+          <table className="operations-table">
+            <thead>
+              <tr>
+                <th>Timestamp</th>
+                <th>Event</th>
+                <th>Car / Scope</th>
+                <th>Details</th>
+              </tr>
+            </thead>
+            <tbody>
+              {events.map((event, idx) => (
+                <tr key={`${event.timestamp}-${event.event_type}-${idx}`}>
+                  <td>{event.timestamp}</td>
+                  <td><span className="badge blue">{event.event_type.replaceAll("_", " ")}</span></td>
+                  <td><strong>{event.elevator_id ?? "Building"}</strong></td>
+                  <td>{event.detail}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
   </>;
 }
 
@@ -233,8 +291,344 @@ function Simulation({ fleet, onFleetRefresh }: { fleet: FleetResponse | null; on
   </section>;
 }
 
-function Credentials() {
-  return <><PageHeader eyebrow="Access control" title="Credentials" detail="Manage cardholders, access scopes, and credential lifecycle." action={<button className="button primary" disabled>Issue credential</button>} /><div className="toolbar"><input aria-label="Search credentials" placeholder="Search by name or credential ID" disabled /><select aria-label="Credential status" disabled><option>All statuses</option></select></div><section className="panel"><div className="table-heading"><strong>Cardholders</strong><span>0 records</span></div><EmptyState title="Credential records are not connected" detail="The API will populate this table from the credentials and users tables." /></section></>;
+type CredentialRecord = {
+  card_id: string;
+  user_id: string;
+  full_name: string | null;
+  role: string | null;
+  apartment_unit: string | null;
+  assigned_floor: number | null;
+  status: string;
+  suspension_reason: string | null;
+  allowed_floors: number[];
+  is_visitor_pass: boolean;
+  host_user_id: string | null;
+  issued_at: string | null;
+  expires_at: string | null;
+};
+
+type UserRecord = {
+  user_id: string;
+  full_name: string;
+  role: string;
+  apartment_unit: string | null;
+  assigned_floor: number | null;
+};
+
+const ROLE_LABELS: Record<string, string> = {
+  RESIDENT: "Resident",
+  VISITOR: "Visitor",
+  BUILDING_SERVICE: "Building Service",
+  TECHNICIAN: "Technician",
+  SECURITY_OPERATOR: "Security Operator",
+  ADMIN: "Administrator",
+};
+
+const STATUS_LABELS: Record<string, string> = {
+  ACTIVE: "Active",
+  SUSPENDED: "Suspended",
+  REVOKED: "Revoked",
+  EXPIRED: "Expired",
+};
+
+const SUSPENSION_REASON_LABELS: Record<string, string> = {
+  LOST: "Lost Card",
+  CLONE_SUSPECTED: "Suspected Clone",
+  ADMIN_MANUAL: "Admin Action",
+};
+
+function formatRoleLabel(role: string | null | undefined): string {
+  if (!role) return "—";
+  return ROLE_LABELS[role] ?? role;
+}
+
+function formatStatusLabel(status: string | null | undefined): string {
+  if (!status) return "—";
+  return STATUS_LABELS[status] ?? status;
+}
+
+function formatSuspensionReason(reason: string | null | undefined): string {
+  if (!reason) return "";
+  return SUSPENSION_REASON_LABELS[reason] ?? reason;
+}
+
+function formatAllowedFloors(floors: number[] | null | undefined): string {
+  if (!floors || floors.length === 0) return "None";
+  const floorSet = new Set(floors);
+  if (SIM_FLOORS.every((f) => floorSet.has(f))) {
+    return "All floors";
+  }
+  return floors.map((f) => floorLabel(f)).join(", ");
+}
+
+function Credentials({ token, role }: { token: string; role: string }) {
+  const [records, setRecords] = useState<CredentialRecord[]>([]);
+  const [users, setUsers] = useState<UserRecord[]>([]);
+  const [search, setSearch] = useState("");
+  const [statusFilter, setStatusFilter] = useState("ALL");
+  const [busy, setBusy] = useState(false);
+  const [feedback, setFeedback] = useState("");
+  const [error, setError] = useState("");
+
+  // Create user state
+  const [newUserName, setNewUserName] = useState("");
+  const [newUserRole, setNewUserRole] = useState("RESIDENT");
+  const [newUserUnit, setNewUserUnit] = useState("10A");
+  const [newUserFloor, setNewUserFloor] = useState("10");
+
+  // Issue credential state
+  const [issueAction, setIssueAction] = useState<"ISSUE" | "ISSUE_VISITOR_PASS">("ISSUE");
+  const [issueUserId, setIssueUserId] = useState("");
+  const [issueCardId, setIssueCardId] = useState("RES-CARD-1001");
+  const [issueFloors, setIssueFloors] = useState("1,10");
+  const [visitorHostId, setVisitorHostId] = useState("");
+  const [visitorDurationHours, setVisitorDurationHours] = useState("24");
+
+  // Replace lost card state
+  const [lostCardId, setLostCardId] = useState("");
+  const [replacementCardId, setReplacementCardId] = useState("REPL-CARD-2001");
+
+  const refresh = useCallback(async () => {
+    if (!token) {
+      setRecords([]);
+      setUsers([]);
+      return;
+    }
+    try {
+      const qs = new URLSearchParams();
+      if (search.trim()) qs.set("search", search.trim());
+      if (statusFilter !== "ALL") qs.set("status", statusFilter);
+      const suffix = qs.toString() ? `?${qs.toString()}` : "";
+      const data = await authorizedApi<{ items: CredentialRecord[]; users: UserRecord[]; count: number }>(
+        `/api/v1/acs/credentials${suffix}`,
+        token
+      );
+      setRecords(data.items ?? []);
+      setUsers(data.users ?? []);
+      if (!issueUserId && data.users?.length) {
+        setIssueUserId(data.users[0].user_id);
+      }
+      setError("");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Failed to load credentials");
+    }
+  }, [token, search, statusFilter, issueUserId]);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  const runManageAction = async (
+    action: string,
+    targetCredentialId?: string,
+    targetUserId?: string,
+    payloadDetails: Record<string, unknown> = {}
+  ) => {
+    setBusy(true);
+    try {
+      const res = await authorizedApi<ApiResult>("/api/v1/acs/credentials/manage", token, {
+        action,
+        target_credential_id: targetCredentialId ?? null,
+        target_user_id: targetUserId ?? null,
+        payload_details: payloadDetails,
+      });
+      setFeedback(res.message ?? `${action} completed`);
+      setError("");
+      await refresh();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : `${action} failed`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleCreateUser = async () => {
+    if (!newUserName.trim()) return;
+    setBusy(true);
+    try {
+      const res = await authorizedApi<{ user: UserRecord }>("/api/v1/acs/credentials/users", token, {
+        full_name: newUserName.trim(),
+        role: newUserRole,
+        apartment_unit: newUserUnit.trim() || null,
+        assigned_floor: newUserFloor.trim() ? Number(newUserFloor) : null,
+      });
+      setFeedback(`User created: ${res.user.full_name} (${formatRoleLabel(res.user.role)})`);
+      setNewUserName("");
+      setIssueUserId(res.user.user_id);
+      setError("");
+      await refresh();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Failed to create user");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleIssueCredential = async () => {
+    if (!issueUserId || !issueCardId.trim()) return;
+    const parsedFloors = issueFloors
+      .split(",")
+      .map((s) => Number(s.trim()))
+      .filter((n) => !Number.isNaN(n));
+    const details: Record<string, unknown> = {
+      allowed_floors: parsedFloors,
+    };
+    if (issueAction === "ISSUE_VISITOR_PASS") {
+      details.host_user_id = visitorHostId || issueUserId;
+      details.duration_hours = Number(visitorDurationHours) || 24;
+      if (parsedFloors.length > 0) {
+        details.destination_floor = parsedFloors[parsedFloors.length - 1];
+      }
+    }
+    await runManageAction(issueAction, issueCardId.trim(), issueUserId, details);
+  };
+
+  const handleReplaceLost = async (cardToReplace?: string) => {
+    const targetLost = (cardToReplace ?? lostCardId).trim();
+    if (!targetLost || !replacementCardId.trim()) return;
+    setBusy(true);
+    try {
+      const res = await authorizedApi<ApiResult>("/api/v1/acs/credentials/replace-lost", token, {
+        lost_credential_id: targetLost,
+        replacement_credential_id: replacementCardId.trim(),
+        reason: "LOST_AND_REPLACED",
+      });
+      setFeedback(res.message ?? `Replaced ${targetLost} with ${replacementCardId.trim()}`);
+      setLostCardId("");
+      setError("");
+      await refresh();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Failed to replace lost card");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return <>
+    <PageHeader
+      eyebrow="Mode 2 · Access control (SEC-2.8 to SEC-2.12)"
+      title="Credentials"
+      detail="Manage cardholders, floor scopes, visitor passes, lost-card replacement, and credential lifecycle."
+      action={<button className="button secondary" disabled={!token || busy} onClick={() => { void refresh(); }}>Refresh credentials</button>}
+    />
+    {!token ? (
+      <EmptyState title="Dashboard sign-in required" detail="Sign in with an Admin or Security Operator card in the header to manage credentials." />
+    ) : (
+      <>
+        {feedback && <p className="authorization-feedback" aria-live="polite">{feedback}</p>}
+        {error && <p className="error-banner" role="alert">{error}</p>}
+
+        {(role === "ADMIN" || role === "SECURITY_OPERATOR") && (
+          <section className="panel section">
+            <div className="section-heading" style={{ marginBottom: "12px" }}><h2 style={{ fontSize: "13px" }}>Register user &amp; issue credential</h2></div>
+            <div className="hall-controls">
+              <label>Full name<input value={newUserName} onChange={(e) => setNewUserName(e.target.value)} placeholder="Jane Resident" /></label>
+              <label>Role<select value={newUserRole} onChange={(e) => setNewUserRole(e.target.value)}>
+                <option value="RESIDENT">Resident</option>
+                <option value="VISITOR">Visitor</option>
+                <option value="BUILDING_SERVICE">Building Service</option>
+                <option value="TECHNICIAN">Technician</option>
+                <option value="ADMIN">Administrator</option>
+              </select></label>
+              <label>Unit<input value={newUserUnit} onChange={(e) => setNewUserUnit(e.target.value)} placeholder="10A" /></label>
+              <label>Assigned floor<input type="number" min={-1} max={30} value={newUserFloor} onChange={(e) => setNewUserFloor(e.target.value)} /></label>
+              <button className="button secondary" disabled={busy || !newUserName.trim()} onClick={() => { void handleCreateUser(); }}>Create user</button>
+            </div>
+            <div className="hall-controls" style={{ marginTop: "0.75rem" }}>
+              <label>Credential type<select value={issueAction} onChange={(e) => setIssueAction(e.target.value as "ISSUE" | "ISSUE_VISITOR_PASS")}>
+                <option value="ISSUE">Standard Credential</option>
+                <option value="ISSUE_VISITOR_PASS">Visitor Pass</option>
+              </select></label>
+              <label>User<select value={issueUserId} onChange={(e) => setIssueUserId(e.target.value)}>
+                {users.map((u) => <option key={u.user_id} value={u.user_id}>{u.full_name} ({formatRoleLabel(u.role)}{u.assigned_floor != null ? ` · ${floorLabel(u.assigned_floor)}` : ""})</option>)}
+              </select></label>
+              <label>Card ID<input value={issueCardId} onChange={(e) => setIssueCardId(e.target.value)} /></label>
+              <label>Allowed floors (CSV)<input value={issueFloors} onChange={(e) => setIssueFloors(e.target.value)} placeholder="1,10" /></label>
+              {issueAction === "ISSUE_VISITOR_PASS" && (
+                <>
+                  <label>Host user<select value={visitorHostId} onChange={(e) => setVisitorHostId(e.target.value)}>
+                    <option value="">Same as selected user</option>
+                    {users.map((u) => <option key={u.user_id} value={u.user_id}>{u.full_name} ({formatRoleLabel(u.role)})</option>)}
+                  </select></label>
+                  <label>Hours<input type="number" min={1} max={168} value={visitorDurationHours} onChange={(e) => setVisitorDurationHours(e.target.value)} /></label>
+                </>
+              )}
+              <button className="button primary" disabled={busy || !issueUserId || !issueCardId.trim()} onClick={() => { void handleIssueCredential(); }}>Issue credential</button>
+            </div>
+          </section>
+        )}
+
+        {(role === "ADMIN" || role === "SECURITY_OPERATOR") && (
+          <section className="panel section">
+            <div className="section-heading" style={{ marginBottom: "12px" }}><h2 style={{ fontSize: "13px" }}>Lost-card replacement (SEC-2.10)</h2></div>
+            <div className="hall-controls">
+              <label>Lost card ID<input value={lostCardId} onChange={(e) => setLostCardId(e.target.value)} placeholder="CARD-LOST-01" /></label>
+              <label>Replacement card ID<input value={replacementCardId} onChange={(e) => setReplacementCardId(e.target.value)} placeholder="REPL-CARD-2001" /></label>
+              <button className="button secondary" disabled={busy || !lostCardId.trim() || !replacementCardId.trim()} onClick={() => { void handleReplaceLost(); }}>Revoke &amp; reissue</button>
+            </div>
+          </section>
+        )}
+
+        <div className="toolbar section">
+          <input
+            aria-label="Search credentials"
+            placeholder="Search by name, card ID, role, or unit"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+          />
+          <select aria-label="Credential status" value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
+            <option value="ALL">All statuses</option>
+            <option value="ACTIVE">Active</option>
+            <option value="SUSPENDED">Suspended</option>
+            <option value="REVOKED">Revoked</option>
+            <option value="EXPIRED">Expired</option>
+          </select>
+        </div>
+
+        <section className="panel section">
+          <div className="table-heading"><strong>Cardholders &amp; credentials</strong><span>{records.length} records</span></div>
+          {records.length === 0 ? (
+            <EmptyState title="No matching credentials found" detail="Create a user and issue a credential above, or adjust the search/status filter." />
+          ) : (
+            records.map((rec) => (
+              <article className="incident-card" key={rec.card_id}>
+                <div>
+                  <strong>{rec.card_id}</strong> · <span className={`badge ${rec.status === "ACTIVE" ? "blue" : "unknown"}`}>{formatStatusLabel(rec.status)}</span>
+                  {rec.suspension_reason ? ` (${formatSuspensionReason(rec.suspension_reason)})` : ""}
+                  {rec.is_visitor_pass ? " · Visitor Pass" : ""}
+                </div>
+                <p>
+                  Holder: <strong>{rec.full_name ?? "Unassigned"}</strong> ({formatRoleLabel(rec.role)})
+                  {rec.apartment_unit ? ` · Unit ${rec.apartment_unit}` : ""}
+                </p>
+                <small>
+                  Allowed floors: {formatAllowedFloors(rec.allowed_floors)}
+                  {rec.expires_at ? ` · Expires: ${rec.expires_at}` : ""}
+                </small>
+                <div className="incident-actions">
+                  {rec.status === "ACTIVE" && (
+                    <>
+                      <button className="button secondary" disabled={busy} onClick={() => { void runManageAction("SUSPEND", rec.card_id, rec.user_id, { suspension_reason: "LOST" }); }}>Report Lost (Suspend)</button>
+                      <button className="button secondary" disabled={busy} onClick={() => { void runManageAction("SUSPEND", rec.card_id, rec.user_id, { suspension_reason: "ADMIN_MANUAL" }); }}>Suspend (Admin)</button>
+                    </>
+                  )}
+                  {rec.status === "SUSPENDED" && (
+                    <button className="button secondary" disabled={busy} onClick={() => { void runManageAction("REINSTATE", rec.card_id, rec.user_id, {}); }}>Reinstate</button>
+                  )}
+                  {rec.status !== "REVOKED" && (
+                    <>
+                      <button className="button emergency-button" disabled={busy} onClick={() => { void runManageAction("REVOKE", rec.card_id, rec.user_id, { reason: "MANUAL_REVOKE" }); }}>Revoke</button>
+                      <button className="button secondary" disabled={busy} onClick={() => { setLostCardId(rec.card_id); }}>Select for lost replacement</button>
+                    </>
+                  )}
+                </div>
+              </article>
+            ))
+          )}
+        </section>
+      </>
+    )}
+  </>;
 }
 
 function Security({ token, role, refreshFleet }: { token: string; role: string; refreshFleet: () => Promise<void> }) {
@@ -247,7 +641,7 @@ function Security({ token, role, refreshFleet }: { token: string; role: string; 
   const refresh = useCallback(async () => {
     if (!token) { setIncidents([]); return; }
     try {
-      const result = await authorizedApi<{items: Incident[]}>("/api/v1/operational/incidents", token);
+      const result = await authorizedApi<{ items: Incident[] }>("/api/v1/operational/incidents", token);
       setIncidents(result.items);
       setError(null);
     } catch (reason) { setError(reason instanceof Error ? reason.message : "Failed to load incidents"); }
@@ -266,24 +660,24 @@ function Security({ token, role, refreshFleet }: { token: string; role: string; 
   return <><PageHeader eyebrow="Mode 3 · software test stub" title="Incidents and emergency response" detail="Actions require an ACS dashboard session. Simulation records are not the database audit log." action={<button className="button secondary" disabled={!token} onClick={() => { void refresh(); }}>Refresh incidents</button>} />
     {!token ? <EmptyState title="Dashboard sign-in required" detail="Present an Admin or Technician credential in the header to inspect and resolve simulated incidents." /> : <>
       {error && <p className="authorization-feedback" role="alert">{error}</p>}
-      {role === "ADMIN" && <section className="panel section"><div className="section-heading"><h2>Admin demo controls</h2></div><div className="hall-controls"><label>Telephone medical floor<input type="number" min={1} max={30} value={medicalFloor} onChange={(e) => setMedicalFloor(e.target.value)} /></label><button className="button secondary" disabled={busy} onClick={() => { void act("/api/v1/operational/incidents/phone-medical", {floor: Number(medicalFloor)}); }}>Record medical call</button><button className="button emergency-button" disabled={busy} onClick={() => { void act("/api/v1/operational/stub/building-event", {kind:"FIRE"}); }}>Inject fire (stub)</button></div></section>}
+      {role === "ADMIN" && <section className="panel section"><div className="section-heading"><h2>Admin demo controls</h2></div><div className="hall-controls"><label>Telephone medical floor<input type="number" min={1} max={30} value={medicalFloor} onChange={(e) => setMedicalFloor(e.target.value)} /></label><button className="button secondary" disabled={busy} onClick={() => { void act("/api/v1/operational/incidents/phone-medical", { floor: Number(medicalFloor) }); }}>Record medical call</button><button className="button emergency-button" disabled={busy} onClick={() => { void act("/api/v1/operational/stub/building-event", { kind: "FIRE" }); }}>Inject fire (stub)</button></div></section>}
       <section className="panel section"><div className="table-heading"><strong>Simulated incident queue</strong><span>{incidents.length} records</span></div>
-      {incidents.length === 0 ? <EmptyState title="No incidents in memory" detail="Use HELP or MEDICAL on the simulator screen, or an Admin test event." /> : incidents.map((incident) =>
-        <article className="incident-card" key={incident.incident_id}><div><strong>{incident.kind}</strong> · {incident.status} · {incident.severity}</div><p>{incident.details}</p><small>{incident.elevator_id ?? "Building"} · {floorLabel(incident.floor)} · {incident.incident_id}</small><div className="incident-actions">
-          {incident.status === "OPEN" && <button className="button secondary" disabled={busy} onClick={() => { void act("/api/v1/operational/incidents/action", {incident_id: incident.incident_id, action:"ACKNOWLEDGE"}); }}>Acknowledge</button>}
-          {(incident.status === "OPEN" || incident.status === "ACKNOWLEDGED") && <button className="button secondary" disabled={busy} onClick={() => { void act("/api/v1/operational/incidents/action", {incident_id: incident.incident_id, action:"RESOLVE", recovery_confirmed: true}); }}>Resolve (after checks)</button>}
-          {incident.status === "RESOLVED" && <button className="button secondary" disabled={busy} onClick={() => { void act("/api/v1/operational/incidents/action", {incident_id: incident.incident_id, action:"CLOSE"}); }}>Close</button>}
-          {role === "ADMIN" && incident.kind === "HELP" && incident.status !== "RESOLVED" && incident.status !== "CLOSED" && <button className="button secondary" disabled={busy} onClick={() => { void act("/api/v1/operational/incidents/confirm-stuck", {incident_id: incident.incident_id}); }}>Confirm stuck</button>}
-          {role === "ADMIN" && ["MEDICAL", "STUCK_CAR"].includes(incident.kind) && !incident.rescue_car_id && incident.status !== "CLOSED" && <button className="button secondary" disabled={busy} onClick={() => { void act("/api/v1/operational/incidents/rescue", {incident_id: incident.incident_id, confirmed_empty:true, wait_seconds:120}); }}>Send empty rescue car (confirm)</button>}
-          {role === "ADMIN" && incident.kind === "MEDICAL" && incident.rescue_car_id && <button className="button secondary" disabled={busy} onClick={() => { void act("/api/v1/operational/incidents/confirm-boarding", {incident_id: incident.incident_id}); }}>Confirm rescue boarding</button>}
-        </div></article>
-      )}</section>
+        {incidents.length === 0 ? <EmptyState title="No incidents in memory" detail="Use HELP or MEDICAL on the simulator screen, or an Admin test event." /> : incidents.map((incident) =>
+          <article className="incident-card" key={incident.incident_id}><div><strong>{incident.kind}</strong> · {incident.status} · {incident.severity}</div><p>{incident.details}</p><small>{incident.elevator_id ?? "Building"} · {floorLabel(incident.floor)} · {incident.incident_id}</small><div className="incident-actions">
+            {incident.status === "OPEN" && <button className="button secondary" disabled={busy} onClick={() => { void act("/api/v1/operational/incidents/action", { incident_id: incident.incident_id, action: "ACKNOWLEDGE" }); }}>Acknowledge</button>}
+            {(incident.status === "OPEN" || incident.status === "ACKNOWLEDGED") && <button className="button secondary" disabled={busy} onClick={() => { void act("/api/v1/operational/incidents/action", { incident_id: incident.incident_id, action: "RESOLVE", recovery_confirmed: true }); }}>Resolve (after checks)</button>}
+            {incident.status === "RESOLVED" && <button className="button secondary" disabled={busy} onClick={() => { void act("/api/v1/operational/incidents/action", { incident_id: incident.incident_id, action: "CLOSE" }); }}>Close</button>}
+            {role === "ADMIN" && incident.kind === "HELP" && incident.status !== "RESOLVED" && incident.status !== "CLOSED" && <button className="button secondary" disabled={busy} onClick={() => { void act("/api/v1/operational/incidents/confirm-stuck", { incident_id: incident.incident_id }); }}>Confirm stuck</button>}
+            {role === "ADMIN" && ["MEDICAL", "STUCK_CAR"].includes(incident.kind) && !incident.rescue_car_id && incident.status !== "CLOSED" && <button className="button secondary" disabled={busy} onClick={() => { void act("/api/v1/operational/incidents/rescue", { incident_id: incident.incident_id, confirmed_empty: true, wait_seconds: 120 }); }}>Send empty rescue car (confirm)</button>}
+            {role === "ADMIN" && incident.kind === "MEDICAL" && incident.rescue_car_id && <button className="button secondary" disabled={busy} onClick={() => { void act("/api/v1/operational/incidents/confirm-boarding", { incident_id: incident.incident_id }); }}>Confirm rescue boarding</button>}
+          </div></article>
+        )}</section>
     </>}
   </>;
 }
 
 function Analytics({ summary }: { summary: Summary | null }) {
-  const values: {title: string; value: string; unit: string}[] = [
+  const values: { title: string; value: string; unit: string }[] = [
     { title: "Mean hall wait", value: summary?.mean_wait_seconds == null ? "—" : summary.mean_wait_seconds.toFixed(1), unit: "seconds" },
     { title: "Median hall wait", value: summary?.median_wait_seconds == null ? "—" : summary.median_wait_seconds.toFixed(1), unit: "seconds" },
     { title: "P95 hall wait", value: summary?.p95_wait_seconds == null ? "—" : summary.p95_wait_seconds.toFixed(1), unit: "seconds" },
@@ -292,7 +686,7 @@ function Analytics({ summary }: { summary: Summary | null }) {
     { title: "Available cars", value: String(summary?.fleet_available ?? "—"), unit: "out of 5" },
   ];
   return <><PageHeader eyebrow="Mode 5 · test-stub aggregates" title="Analytics" detail="These measurements are derived from process-local hall calls. They are not the persisted PostgreSQL analytics and do not support traffic profiles." />
-    <div className="kpi-grid">{values.map(({title,value,unit}) => <article className="kpi-card" key={title}><span>{title}</span><strong>{value}</strong><small>{unit}</small></article>)}</div>
+    <div className="kpi-grid">{values.map(({ title, value, unit }) => <article className="kpi-card" key={title}><span>{title}</span><strong>{value}</strong><small>{unit}</small></article>)}</div>
     <section className="panel section"><h2>Measurement definition</h2><p>Hall wait time measures accepted hall call to car arrival. P95 uses the nearest-rank percentile. No values are shown when the stub has not completed a hall call. Restarting the API clears these measurements.</p></section>
   </>;
 }
@@ -306,8 +700,8 @@ function Audit({ token, role }: { token: string; role: string }) {
     if (!token || role !== "ADMIN") { setLogs([]); setStubEvents([]); return; }
     try {
       const [data, events] = await Promise.all([
-        authorizedApi<{items: Record<string, unknown>[]}>("/api/v1/acs/logs/audit?limit=20", token),
-        authorizedApi<{items: StubEvent[]}>("/api/v1/operational/events", token),
+        authorizedApi<{ items: Record<string, unknown>[] }>("/api/v1/acs/logs/audit?limit=20", token),
+        authorizedApi<{ items: StubEvent[] }>("/api/v1/operational/events", token),
       ]);
       setLogs(data.items); setStubEvents(events.items); setError("");
     } catch (reason) { setError(reason instanceof Error ? reason.message : "Audit retrieval failed"); }
@@ -354,7 +748,7 @@ function App() {
 
   const login = async () => {
     try {
-      const response = await postApi("/api/v1/acs/auth/dashboard/login", {credential_id:credential});
+      const response = await postApi("/api/v1/acs/auth/dashboard/login", { credential_id: credential });
       if (!response.allowed || !response.session_token) throw new Error(response.message ?? "No dashboard session issued");
       setToken(response.session_token); setRole(response.details?.role ?? "UNKNOWN"); setLoginError("");
     } catch (reason) { setToken(""); setRole(""); setLoginError(reason instanceof Error ? reason.message : "Login failed"); }
@@ -364,10 +758,10 @@ function App() {
     catch { /* Clear client session even when the server has expired it. */ }
     setToken(""); setRole("");
   };
-  const page = view === "overview" ? <Overview fleet={fleet} summary={summary} /> : view === "simulation" ? <Simulation fleet={fleet} onFleetRefresh={onFleetRefresh} /> : view === "elevators" ? <Elevators fleet={fleet} refresh={onFleetRefresh} /> : view === "credentials" ? <Credentials /> : view === "security" ? <Security token={token} role={role} refreshFleet={onFleetRefresh} /> : view === "analytics" ? <Analytics summary={summary} /> : <Audit token={token} role={role} />;
+  const page = view === "overview" ? <Overview fleet={fleet} summary={summary} token={token} /> : view === "simulation" ? <Simulation fleet={fleet} onFleetRefresh={onFleetRefresh} /> : view === "elevators" ? <Elevators fleet={fleet} refresh={onFleetRefresh} /> : view === "credentials" ? <Credentials token={token} role={role} /> : view === "security" ? <Security token={token} role={role} refreshFleet={onFleetRefresh} /> : view === "analytics" ? <Analytics summary={summary} /> : <Audit token={token} role={role} />;
   return <div className="app-shell">
     <aside className="sidebar"><div className="brand"><span className="brand-mark">S</span><div><strong>SREMS</strong><span>Operations</span></div></div><nav aria-label="Primary navigation">{navigation.map((item) => <button className={`nav-item ${item.id === view ? "active" : ""}`} key={item.id} onClick={() => setView(item.id)}><span className="nav-icon">{item.icon}</span>{item.label}</button>)}</nav><div className="sidebar-footer"><span className="status-dot" /> {error ? "API unavailable" : fleet ? "Test stub connected" : "Connecting"}</div></aside>
-    <main className="content"><header className="topbar"><div><p className="eyebrow">Building operations</p><div className="breadcrumb">SREMS / {active.label}</div></div><div className="operator">{token ? <><span className="avatar">{role.slice(0,1)}</span><span><strong>{role}</strong><small>ACS session</small></span><button className="button secondary" onClick={() => { void logout(); }}>Log out</button></> : <><label className="login-field">Dashboard card<input aria-label="Dashboard card" value={credential} onChange={(event) => setCredential(event.target.value)} /></label><button className="button secondary" onClick={() => { void login(); }}>Sign in</button></>}</div></header>{loginError && <div className="error-banner" role="alert">{loginError}</div>}{error && <div className="error-banner" role="alert">{error}</div>}<div className="page-content">{page}</div></main>
+    <main className="content"><header className="topbar"><div><p className="eyebrow">Building operations</p><div className="breadcrumb">SREMS / {active.label}</div></div><div className="operator">{token ? <><span className="avatar">{role.slice(0, 1)}</span><span><strong>{role}</strong><small>ACS session</small></span><button className="button secondary" onClick={() => { void logout(); }}>Log out</button></> : <><label className="login-field">Dashboard card<input aria-label="Dashboard card" value={credential} onChange={(event) => setCredential(event.target.value)} /></label><button className="button secondary" onClick={() => { void login(); }}>Sign in</button></>}</div></header>{loginError && <div className="error-banner" role="alert">{loginError}</div>}{error && <div className="error-banner" role="alert">{error}</div>}<div className="page-content">{page}</div></main>
   </div>;
 }
 

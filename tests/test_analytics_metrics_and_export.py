@@ -5,71 +5,63 @@ from datetime import timedelta
 import json
 
 from acs.enums import DenialReason
-from db import DbConnectionPool
+from simulation.operational import operational_simulator
 from simulation.clock import MORNING_PEAK_BASE_TIME
 from tests.conftest import advance_clock, api_test_session, bearer, login_dashboard, seed_user_row
 
 
-async def _seed_trips_downtime_and_heartbeats() -> None:
-    """Seed Mode 5 trips, downtime, and heartbeat rows anchored around MORNING_PEAK_BASE_TIME."""
-    t0 = MORNING_PEAK_BASE_TIME
-    async with DbConnectionPool.acquire() as conn:
-        await conn.execute(
-            """
-            INSERT INTO trips (
-                elevator_id, origin_floor, destination_floor, departure_time, arrival_time,
-                travel_time_seconds, floors_traversed, motor_starts, traffic_profile,
-                is_service_run, is_estimated
-            )
-            VALUES
-                ('E1', 1, 10, $1, $2, 18.0, 9, 1, 'PEAK', FALSE, FALSE),
-                ('E2', 6, -1, $2, $3, 14.0, 7, 1, 'PEAK', FALSE, FALSE);
-            """,
-            t0 + timedelta(seconds=45),
-            t0 + timedelta(seconds=63),
-            t0 + timedelta(seconds=77),
-        )
+async def _run_operational_activity_via_api(
+    client: Any, admin_token: str, tech_token: str
+) -> dict[str, Any]:
+    """Drive Mode 1/2/4 operational activity through API endpoints so Mode 5 analytics measures it."""
+    # 1. Swipe Admin card in E1 at floor 1 and travel 1 -> 10 (UP trip, 9 floors traversed)
+    e1_swipe = await client.post(
+        "/api/v1/acs/auth/cab/swipe",
+        json_body={
+            "elevator_id": "E1",
+            "credential_id": "ADMIN-CARD-0001",
+            "origin_floor": 1,
+        },
+    )
+    assert e1_swipe.status_code == 200
+    e1_dest = await client.post(
+        "/api/v1/acs/cab/destination",
+        json_body={"elevator_id": "E1", "origin_floor": 1, "requested_floor": 10},
+    )
+    assert e1_dest.status_code == 200
 
-        await conn.execute(
-            """
-            INSERT INTO car_downtime_intervals (
-                elevator_id, state, reason, started_at, ended_at, duration_seconds
-            )
-            VALUES ('E3', 'MAINTENANCE', 'Scheduled cable check', $1, NULL, NULL);
-            """,
-            t0 + timedelta(seconds=120),
-        )
+    # 2. Swipe Technician card in E2 at floor 1 and travel 1 -> -1 (DOWN to B1 trip)
+    e2_swipe = await client.post(
+        "/api/v1/acs/auth/cab/swipe",
+        json_body={
+            "elevator_id": "E2",
+            "credential_id": "TECH-HENRY-01",
+            "origin_floor": 1,
+        },
+    )
+    assert e2_swipe.status_code == 200
+    e2_dest = await client.post(
+        "/api/v1/acs/cab/destination",
+        json_body={"elevator_id": "E2", "origin_floor": 1, "requested_floor": -1},
+    )
+    assert e2_dest.status_code == 200
 
-        for sec in range(0, 181, 10):
-            await conn.execute(
-                """
-                INSERT INTO system_heartbeats (timestamp, status, active_cars_count, active_requests_count)
-                VALUES ($1, 'HEALTHY', 4, 1);
-                """,
-                t0 + timedelta(seconds=sec),
-            )
+    # Advance 120s to 07:02:00 (completes E1 & E2 trips and emits heartbeats every 10s)
+    await advance_clock(client, admin_token, 120)
 
+    # 3. Technician puts E3 into MAINTENANCE at 07:02:00
+    maint_resp = await client.post(
+        "/api/v1/acs/fleet/maintenance",
+        headers=bearer(tech_token),
+        json_body={
+            "elevator_id": "E3",
+            "operation_type": "ENTER_MAINTENANCE",
+        },
+    )
+    assert maint_resp.status_code == 200
 
-async def _seed_hall_calls_with_traffic_profile() -> None:
-    """Seed `hall_calls` rows including `traffic_profile` (requires schema matching `seed.sql`)."""
-    t0 = MORNING_PEAK_BASE_TIME
-    async with DbConnectionPool.acquire() as conn:
-        await conn.execute(
-            """
-            INSERT INTO hall_calls (
-                origin_floor, direction, assigned_elevator_id, status,
-                created_at, assigned_at, arrived_at, completed_at, wait_time_seconds,
-                reassignments_count, no_boarding, traffic_profile
-            )
-            VALUES
-                (1, 'UP', 'E1', 'COMPLETED', $1, $2, $3, $4, 30.0, 0, FALSE, 'PEAK'),
-                (5, 'DOWN', NULL, 'CANCELLED', $2, NULL, NULL, $4, NULL, 1, FALSE, 'PEAK');
-            """,
-            t0 + timedelta(seconds=10),
-            t0 + timedelta(seconds=15),
-            t0 + timedelta(seconds=40),
-            t0 + timedelta(seconds=45),
-        )
+    # Advance 60s to 07:03:00 so E3 has 60s of maintenance downtime
+    return await advance_clock(client, admin_token, 60)
 
 
 def test_analytics_role_gates_and_fleet_travel_security_kpis() -> None:
@@ -88,8 +80,9 @@ def test_analytics_role_gates_and_fleet_travel_security_kpis() -> None:
             )
             tech_token = await login_dashboard(client, "TECH-HENRY-01")
 
-            await _seed_trips_downtime_and_heartbeats()
-            clock_snap = await advance_clock(client, admin_token, 180)  # 07:03:00
+            clock_snap = await _run_operational_activity_via_api(
+                client, admin_token, tech_token
+            )  # 07:03:00
 
             start = MORNING_PEAK_BASE_TIME.isoformat()
             end = clock_snap["current_sim_time"]
@@ -164,9 +157,33 @@ def test_analytics_wait_times_and_export() -> None:
     async def scenario() -> None:
         async with api_test_session(base_time=MORNING_PEAK_BASE_TIME) as client:
             admin_token = await login_dashboard(client, "ADMIN-CARD-0001")
-            await _seed_trips_downtime_and_heartbeats()
-            await _seed_hall_calls_with_traffic_profile()
-            clock_snap = await advance_clock(client, admin_token, 180)  # 07:03:00
+            tech_uid = await seed_user_row(full_name="Tech Henry", role="TECHNICIAN")
+            await client.post(
+                "/api/v1/acs/credentials/manage",
+                headers=bearer(admin_token),
+                json_body={
+                    "action": "ISSUE",
+                    "target_user_id": tech_uid,
+                    "target_credential_id": "TECH-HENRY-01",
+                },
+            )
+            tech_token = await login_dashboard(client, "TECH-HENRY-01")
+
+            # Submit a PEAK hall call at floor 4 UP (assigned to an idle car at floor 1 -> 3s wait)
+            hc_resp = await client.post(
+                "/api/v1/operational/hall-calls",
+                json_body={
+                    "origin_floor": 4,
+                    "direction": "UP",
+                    "call_type": "ORDINARY",
+                    "traffic_profile": "PEAK",
+                },
+            )
+            assert hc_resp.status_code == 201
+
+            clock_snap = await _run_operational_activity_via_api(
+                client, admin_token, tech_token
+            )  # 07:03:00
 
             start = MORNING_PEAK_BASE_TIME.isoformat()
             end = clock_snap["current_sim_time"]
@@ -177,10 +194,10 @@ def test_analytics_wait_times_and_export() -> None:
                 params={"start_time": start, "end_time": end, "traffic_profile": "PEAK"},
             )
             assert wait_resp.status_code == 200
-            assert wait_resp.json()["total_calls"] == 2
+            assert wait_resp.json()["total_calls"] == 1
             assert wait_resp.json()["completed_calls"] == 1
-            assert wait_resp.json()["dropped_calls"] == 1
-            assert wait_resp.json()["mean_wait_seconds"] == 30.0
+            assert wait_resp.json()["dropped_calls"] == 0
+            assert wait_resp.json()["mean_wait_seconds"] == 3.0
 
             json_export = await client.post(
                 "/api/v1/analytics/export",
@@ -197,7 +214,7 @@ def test_analytics_wait_times_and_export() -> None:
             j_body = json_export.json()
             assert j_body["export_format"] == "JSON"
             assert j_body["generated_at"] == end
-            assert j_body["record_count"] == 2
+            assert j_body["record_count"] == 3
             parsed_content = json.loads(j_body["content"])
             assert parsed_content["run_id"] == "peak-run-01"
 

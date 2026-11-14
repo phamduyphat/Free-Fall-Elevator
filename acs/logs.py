@@ -631,37 +631,41 @@ class Logging:
         limit: int = 100,
         db_pool: type[DbConnectionPool] = DbConnectionPool,
     ) -> list[dict[str, Any]]:
-        """Query `incidents` with optional filters (`ANA-5.7, SEC-2.14, EMR-3.4`)."""
-        clauses: list[str] = []
-        params: list[Any] = []
+        """Query `incidents` from `operational_simulator` in-memory state (`ANA-5.7, SEC-2.14, EMR-3.4`)."""
+        from simulation.operational import operational_simulator
 
-        if status is not None:
-            params.append(str(status))
-            clauses.append(f"status = ${len(params)}")
-        if emergency_type is not None:
-            params.append(str(emergency_type))
-            clauses.append(f"emergency_type = ${len(params)}")
-        if elevator_id is not None:
-            params.append(str(elevator_id))
-            clauses.append(f"elevator_id = ${len(params)}")
-        if start_time is not None:
-            params.append(Logging.normalize_timestamp(start_time))
-            clauses.append(f"created_at >= ${len(params)}")
-        if end_time is not None:
-            params.append(Logging.normalize_timestamp(end_time))
-            clauses.append(f"created_at <= ${len(params)}")
-
-        where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-        params.append(limit)
-        query = f"""
-            SELECT *
-            FROM incidents
-            {where_sql}
-            ORDER BY created_at DESC
-            LIMIT ${len(params)}
-        """
-        async with db_pool.acquire() as conn:
-            rows = await conn.fetch(query, *params)
-            return [dict(row) for row in rows]
+        st = Logging.normalize_timestamp(start_time) if start_time is not None else None
+        et = Logging.normalize_timestamp(end_time) if end_time is not None else None
+        results: list[dict[str, Any]] = []
+        with operational_simulator._lock:
+            for inc in operational_simulator.incidents.values():
+                inc_ts = Logging.normalize_timestamp(inc.created_at)
+                if st is not None and inc_ts < st:
+                    continue
+                if et is not None and inc_ts > et:
+                    continue
+                if status is not None and str(inc.status) != str(status):
+                    continue
+                if emergency_type is not None and str(inc.kind) != str(emergency_type):
+                    continue
+                if elevator_id is not None and inc.elevator_id != str(elevator_id):
+                    continue
+                results.append(
+                    {
+                        "incident_id": inc.incident_id,
+                        "emergency_type": inc.kind,
+                        "kind": inc.kind,
+                        "status": inc.status,
+                        "elevator_id": inc.elevator_id,
+                        "incident_floor": inc.floor,
+                        "floor": inc.floor,
+                        "description": inc.details,
+                        "details": inc.details,
+                        "created_at": inc.created_at,
+                        "resolved_at": inc.resolved_at,
+                    }
+                )
+        results.sort(key=lambda r: Logging.normalize_timestamp(r["created_at"]), reverse=True)
+        return results[: max(1, min(limit, 500))]
 
     search_audit_records = search_audit_logs
