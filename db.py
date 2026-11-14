@@ -94,7 +94,7 @@ class DbConnectionPool:
                 "SELECT setval(pg_get_serial_sequence('system_heartbeats', 'heartbeat_id'), 1, false);"
             )
 
-            # Re-seed initial Admin user and Admin card matching seed.sql
+            # Re-seed initial Admin users and Admin cards matching seed.sql
             await conn.execute(
                 """
                 INSERT INTO users (
@@ -106,15 +106,25 @@ class DbConnectionPool:
                     created_at,
                     updated_at
                 )
-                VALUES (
-                    '00000000-0000-0000-0000-000000000001',
-                    'Initial System Administrator',
-                    'ADMIN',
-                    NULL,
-                    NULL,
-                    CURRENT_TIMESTAMP,
-                    CURRENT_TIMESTAMP
-                )
+                VALUES
+                    (
+                        '00000000-0000-0000-0000-000000000001',
+                        'Initial System Administrator',
+                        'ADMIN',
+                        NULL,
+                        NULL,
+                        CURRENT_TIMESTAMP,
+                        CURRENT_TIMESTAMP
+                    ),
+                    (
+                        '00000000-0000-0000-0000-000000000002',
+                        'Secondary System Administrator',
+                        'ADMIN',
+                        NULL,
+                        NULL,
+                        CURRENT_TIMESTAMP,
+                        CURRENT_TIMESTAMP
+                    )
                 ON CONFLICT (user_id) DO NOTHING;
                 """
             )
@@ -134,19 +144,33 @@ class DbConnectionPool:
                     created_at,
                     updated_at
                 )
-                VALUES (
-                    'ADMIN-CARD-0001',
-                    '00000000-0000-0000-0000-000000000001',
-                    'ADMIN',
-                    'ACTIVE',
-                    NULL,
-                    NULL,
-                    NULL,
-                    '[-1, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30]'::jsonb,
-                    '00000000-0000-0000-0000-000000000001',
-                    CURRENT_TIMESTAMP,
-                    CURRENT_TIMESTAMP
-                )
+                VALUES
+                    (
+                        'ADMIN-CARD-0001',
+                        '00000000-0000-0000-0000-000000000001',
+                        'ADMIN',
+                        'ACTIVE',
+                        NULL,
+                        NULL,
+                        NULL,
+                        '[-1, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30]'::jsonb,
+                        '00000000-0000-0000-0000-000000000001',
+                        CURRENT_TIMESTAMP,
+                        CURRENT_TIMESTAMP
+                    ),
+                    (
+                        'ADMIN-CARD-0002',
+                        '00000000-0000-0000-0000-000000000002',
+                        'ADMIN',
+                        'ACTIVE',
+                        NULL,
+                        NULL,
+                        NULL,
+                        '[-1, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30]'::jsonb,
+                        '00000000-0000-0000-0000-000000000001',
+                        CURRENT_TIMESTAMP,
+                        CURRENT_TIMESTAMP
+                    )
                 ON CONFLICT (credential_id) DO NOTHING;
                 """
             )

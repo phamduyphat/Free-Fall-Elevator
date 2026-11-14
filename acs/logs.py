@@ -1,109 +1,24 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from datetime import datetime, timezone
-from enum import StrEnum
 import hashlib
 import json
-from typing import Any, Optional
+from typing import Any, Optional, Sequence
 import uuid
 
+import asyncpg
+
+from acs.enums import (
+    AlertSeverity,
+    AlertStatus,
+    AlertType,
+    AuditActionType,
+    AuthorizationOutcome,
+    DenialReason,
+    UserRole,
+)
+from acs.payloads import AuditEntry, IntegrityCheckResult
 from db import DbConnectionPool
-
-
-class AuthorizationOutcome(StrEnum):
-    ALLOWED = "ALLOWED"
-    DENIED = "DENIED"
-
-
-class DenialReason(StrEnum):
-    UNREGISTERED_CARD = "UNREGISTERED_CARD"
-    CARD_SUSPENDED = "CARD_SUSPENDED"
-    CARD_REVOKED = "CARD_REVOKED"
-    CARD_EXPIRED = "CARD_EXPIRED"
-    UNAUTHORIZED_FLOOR = "UNAUTHORIZED_FLOOR"
-    E5_B1_FORBIDDEN = "E5_B1_FORBIDDEN"
-    ONE_TAP_LIMIT_EXCEEDED = "ONE_TAP_LIMIT_EXCEEDED"
-    TOKEN_WINDOW_EXPIRED = "TOKEN_WINDOW_EXPIRED"
-    NO_ACTIVE_CREDENTIAL = "NO_ACTIVE_CREDENTIAL"
-    DB_FAIL_CLOSED = "DB_FAIL_CLOSED"
-    MALFORMED_MSG_REJECTED = "MALFORMED_MSG_REJECTED"
-    UNAUTHORIZED_CMD_REJECTED = "UNAUTHORIZED_CMD_REJECTED"
-    COMMAND_CONFLICT_REJECTED = "COMMAND_CONFLICT_REJECTED"
-    CONFIRMATION_REQUIRED = "CONFIRMATION_REQUIRED"
-    PEER_ADMIN_REQUIRED = "PEER_ADMIN_REQUIRED"
-    INVALID_STATE_TRANSITION = "INVALID_STATE_TRANSITION"
-    CREDENTIAL_ALREADY_EXISTS = "CREDENTIAL_ALREADY_EXISTS"
-    REPLACEMENT_ID_IN_USE = "REPLACEMENT_ID_IN_USE"
-    DASHBOARD_ACCESS_DENIED = "DASHBOARD_ACCESS_DENIED"
-    SESSION_INVALID = "SESSION_INVALID"
-    SESSION_EXPIRED = "SESSION_EXPIRED"
-    UNAUTHORIZED_ROLE = "UNAUTHORIZED_ROLE"
-
-
-class AlertSeverity(StrEnum):
-    LOW = "LOW"
-    MEDIUM = "MEDIUM"
-    HIGH = "HIGH"
-    CRITICAL = "CRITICAL"
-
-
-class AlertType(StrEnum):
-    REPEATED_FAILURES = "REPEATED_FAILURES"
-    CLONED_CREDENTIAL = "CLONED_CREDENTIAL"
-    CARD_SCANNING = "CARD_SCANNING"
-    LOST_CARD_USAGE = "LOST_CARD_USAGE"
-    REVOKED_CARD_USAGE = "REVOKED_CARD_USAGE"
-    DOOR_OBSTRUCTION = "DOOR_OBSTRUCTION"
-
-
-class AlertStatus(StrEnum):
-    OPEN = "OPEN"
-    ACKNOWLEDGED = "ACKNOWLEDGED"
-    RESOLVED = "RESOLVED"
-
-
-class AuditActionType(StrEnum):
-    ADMIN_LOGIN = "ADMIN_LOGIN"
-    ADMIN_LOGOUT = "ADMIN_LOGOUT"
-    ACCESS_DENIAL = "ACCESS_DENIAL"
-    ONE_TAP_VIOLATION = "ONE_TAP_VIOLATION"
-    CREDENTIAL_ISSUED = "CREDENTIAL_ISSUED"
-    CREDENTIAL_SUSPENDED = "CREDENTIAL_SUSPENDED"
-    CREDENTIAL_REINSTATED = "CREDENTIAL_REINSTATED"
-    CREDENTIAL_REVOKED = "CREDENTIAL_REVOKED"
-    CREDENTIAL_REPLACED = "CREDENTIAL_REPLACED"
-    VISITOR_PASS_ISSUED = "VISITOR_PASS_ISSUED"
-    VISITOR_PASS_EXPIRED = "VISITOR_PASS_EXPIRED"
-    POLICY_CHANGED = "POLICY_CHANGED"
-    CALL_CANCELLED_BY_ADMIN = "CALL_CANCELLED_BY_ADMIN"
-    E5_SERVICE_RUN_START = "E5_SERVICE_RUN_START"
-    E5_SERVICE_RUN_END = "E5_SERVICE_RUN_END"
-    EMERGENCY_OVERRIDE = "EMERGENCY_OVERRIDE"
-    RESCUE_CAR_DISPATCHED = "RESCUE_CAR_DISPATCHED"
-    RESCUE_CAR_BOARDED = "RESCUE_CAR_BOARDED"
-    RESCUE_CAR_RELEASED = "RESCUE_CAR_RELEASED"
-    INCIDENT_RESOLVED = "INCIDENT_RESOLVED"
-    FALSE_ALARM_CLOSED = "FALSE_ALARM_CLOSED"
-    MAINTENANCE_ENTER = "MAINTENANCE_ENTER"
-    RETURN_TO_SERVICE = "RETURN_TO_SERVICE"
-    MALFORMED_MSG_REJECTED = "MALFORMED_MSG_REJECTED"
-    COMMAND_CONFLICT_REJECTED = "COMMAND_CONFLICT_REJECTED"
-    UNAUTHORIZED_CMD_REJECTED = "UNAUTHORIZED_CMD_REJECTED"
-    INTEGRITY_CHECK_RUN = "INTEGRITY_CHECK_RUN"
-    REPORT_EXPORTED = "REPORT_EXPORTED"
-    SYSTEM_STARTUP = "SYSTEM_STARTUP"
-    SYSTEM_SHUTDOWN = "SYSTEM_SHUTDOWN"
-    DATA_BACKUP_CREATED = "DATA_BACKUP_CREATED"
-    DATA_RESTORE_COMPLETED = "DATA_RESTORE_COMPLETED"
-
-
-@dataclass
-class IntegrityCheckResult:
-    passed: bool
-    total_records_inspected: int
-    mismatch_index: Optional[int] = None
-    reason: Optional[str] = None
 
 
 class Logging:
@@ -164,42 +79,45 @@ class Logging:
 
     @staticmethod
     async def write_audit(
+        entries: Sequence[AuditEntry],
         *,
-        timestamp: datetime,
-        actor_id: str,
-        actor_role: str,
-        action_type: AuditActionType | str,
-        target_id: str,
-        event_payload: dict[str, Any] | str,
         db_pool: type[DbConnectionPool] = DbConnectionPool,
-    ) -> dict[str, Any]:
-        """Append a tamper-evident record to `audit_log_chain`."""
-        normalized_ts = Logging.normalize_timestamp(timestamp)
-        canonical_payload = Logging.canonicalize_payload(event_payload)
-        action_type_str = str(action_type)
-        actor_role_str = str(actor_role)
+        conn: Optional[asyncpg.Connection] = None,
+    ) -> list[dict[str, Any]]:
+        """Append tamper-evident records to `audit_log_chain`."""
+        if not entries:
+            return []
+        if conn is None:
+            async with db_pool.acquire() as acquired_conn:
+                return await Logging.write_audit(entries, conn=acquired_conn)
 
-        async with db_pool.acquire() as conn:
-            last_row = await conn.fetchrow(
-                """
-                SELECT log_index, current_hash
-                FROM audit_log_chain
-                ORDER BY log_index DESC
-                LIMIT 1
-                FOR UPDATE
-                """
-            )
-            if last_row is None:
-                next_index = 1
-                prev_hash = Logging.GENESIS_PREV_HASH
-            else:
-                next_index = int(last_row["log_index"]) + 1
-                prev_hash = str(last_row["current_hash"])
+        last_row = await conn.fetchrow(
+            """
+            SELECT log_index, current_hash
+            FROM audit_log_chain
+            ORDER BY log_index DESC
+            LIMIT 1
+            FOR UPDATE
+            """
+        )
+        if last_row is None:
+            next_index = 1
+            prev_hash = Logging.GENESIS_PREV_HASH
+        else:
+            next_index = int(last_row["log_index"]) + 1
+            prev_hash = str(last_row["current_hash"])
+
+        results: list[dict[str, Any]] = []
+        for entry in entries:
+            normalized_ts = Logging.normalize_timestamp(entry.timestamp)
+            canonical_payload = Logging.canonicalize_payload(entry.event_payload)
+            action_type_str = str(entry.action_type)
+            actor_role_str = str(entry.actor_role)
 
             current_hash = Logging.compute_audit_hash(
                 log_index=next_index,
                 timestamp=normalized_ts,
-                actor_id=actor_id,
+                actor_id=entry.actor_id,
                 action_type=action_type_str,
                 canonical_payload=canonical_payload,
                 prev_hash=prev_hash,
@@ -222,26 +140,32 @@ class Logging:
                 """,
                 next_index,
                 normalized_ts,
-                actor_id,
+                entry.actor_id,
                 actor_role_str,
                 action_type_str,
-                target_id,
+                entry.target_id,
                 canonical_payload,
                 prev_hash,
                 current_hash,
             )
 
-        return {
-            "log_index": next_index,
-            "timestamp": normalized_ts,
-            "actor_id": actor_id,
-            "actor_role": actor_role_str,
-            "action_type": action_type_str,
-            "target_id": target_id,
-            "event_payload": json.loads(canonical_payload),
-            "prev_hash": prev_hash,
-            "current_hash": current_hash,
-        }
+            results.append(
+                {
+                    "log_index": next_index,
+                    "timestamp": normalized_ts,
+                    "actor_id": entry.actor_id,
+                    "actor_role": actor_role_str,
+                    "action_type": action_type_str,
+                    "target_id": entry.target_id,
+                    "event_payload": json.loads(canonical_payload),
+                    "prev_hash": prev_hash,
+                    "current_hash": current_hash,
+                }
+            )
+            next_index += 1
+            prev_hash = current_hash
+
+        return results
 
     @staticmethod
     async def log_authorization_event(
@@ -263,7 +187,7 @@ class Logging:
             INSERT INTO access_authorization_events (
                 event_id,
                 timestamp,
-                credential_id,
+                credential_id, 
                 elevator_id,
                 origin_floor,
                 destination_floor,
@@ -333,6 +257,76 @@ class Logging:
                 normalized_ts,
             )
         return alert_id
+
+    @staticmethod
+    async def record_security_incident(
+        *,
+        timestamp: datetime,
+        credential_id: Optional[str],
+        actor_role: UserRole | str,
+        target_id: str,
+        action_type: AuditActionType | str,
+        event_payload: dict[str, Any],
+        elevator_id: Optional[str] = None,
+        origin_floor: int = 1,
+        destination_floor: int = 1,
+        outcome: AuthorizationOutcome | str = AuthorizationOutcome.DENIED,
+        denial_reason: Optional[DenialReason | str] = None,
+        alert_triggered: bool = False,
+        alert_severity: Optional[AlertSeverity | str] = None,
+        alert_type: Optional[AlertType | str] = None,
+        alert_details: Optional[str] = None,
+        primary_car_id: Optional[str] = None,
+        secondary_car_id: Optional[str] = None,
+        db_pool: type[DbConnectionPool] = DbConnectionPool,
+    ) -> None:
+        """
+        Record a denial/security incident sequentially across `security_alerts`
+        (when `alert_type` is set), `access_authorization_events` (when
+        `elevator_id` is set), and `audit_log_chain`.
+        """
+        if alert_type is not None:
+            if alert_severity is None or alert_details is None:
+                raise ValueError(
+                    "alert_severity and alert_details are required when alert_type is set."
+                )
+            await Logging.create_security_alert(
+                severity=alert_severity,
+                alert_type=alert_type,
+                credential_id=credential_id,
+                primary_car_id=primary_car_id,
+                secondary_car_id=secondary_car_id,
+                details=alert_details,
+                created_at=timestamp,
+                db_pool=db_pool,
+            )
+
+        if elevator_id is not None:
+            await Logging.log_authorization_event(
+                timestamp=timestamp,
+                credential_id=credential_id,
+                elevator_id=elevator_id,
+                origin_floor=origin_floor,
+                destination_floor=destination_floor,
+                outcome=outcome,
+                denial_reason=denial_reason,
+                alert_triggered=alert_triggered or (alert_type is not None),
+                db_pool=db_pool,
+            )
+
+        await Logging.write_audit(
+            [
+                AuditEntry(
+                    timestamp=timestamp,
+                    actor_id=credential_id or UserRole.SYSTEM,
+                    actor_role=actor_role,
+                    action_type=action_type,
+                    target_id=target_id,
+                    event_payload=event_payload,
+                )
+            ],
+            db_pool=db_pool,
+        )
 
     @staticmethod
     async def update_security_alert_status(
@@ -458,16 +452,20 @@ class Logging:
 
         if admin_credential_id is not None and check_result.passed:
             await Logging.write_audit(
-                timestamp=timestamp or datetime.now(),
-                actor_id=admin_credential_id,
-                actor_role=admin_role,
-                action_type=AuditActionType.INTEGRITY_CHECK_RUN,
-                target_id="audit_log_chain",
-                event_payload={
-                    "total_records_inspected": check_result.total_records_inspected,
-                    "result": "PASS",
-                    "mismatch_index": None,
-                },
+                [
+                    AuditEntry(
+                        timestamp=timestamp or datetime.now(),
+                        actor_id=admin_credential_id,
+                        actor_role=admin_role,
+                        action_type=AuditActionType.INTEGRITY_CHECK_RUN,
+                        target_id="audit_log_chain",
+                        event_payload={
+                            "total_records_inspected": check_result.total_records_inspected,
+                            "result": "PASS",
+                            "mismatch_index": None,
+                        },
+                    )
+                ],
                 db_pool=db_pool,
             )
 
@@ -633,37 +631,41 @@ class Logging:
         limit: int = 100,
         db_pool: type[DbConnectionPool] = DbConnectionPool,
     ) -> list[dict[str, Any]]:
-        """Query `incidents` with optional filters (`ANA-5.7, SEC-2.14, EMR-3.4`)."""
-        clauses: list[str] = []
-        params: list[Any] = []
+        """Query `incidents` from `operational_simulator` in-memory state (`ANA-5.7, SEC-2.14, EMR-3.4`)."""
+        from simulation.operational import operational_simulator
 
-        if status is not None:
-            params.append(str(status))
-            clauses.append(f"status = ${len(params)}")
-        if emergency_type is not None:
-            params.append(str(emergency_type))
-            clauses.append(f"emergency_type = ${len(params)}")
-        if elevator_id is not None:
-            params.append(str(elevator_id))
-            clauses.append(f"elevator_id = ${len(params)}")
-        if start_time is not None:
-            params.append(Logging.normalize_timestamp(start_time))
-            clauses.append(f"created_at >= ${len(params)}")
-        if end_time is not None:
-            params.append(Logging.normalize_timestamp(end_time))
-            clauses.append(f"created_at <= ${len(params)}")
-
-        where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-        params.append(limit)
-        query = f"""
-            SELECT *
-            FROM incidents
-            {where_sql}
-            ORDER BY created_at DESC
-            LIMIT ${len(params)}
-        """
-        async with db_pool.acquire() as conn:
-            rows = await conn.fetch(query, *params)
-            return [dict(row) for row in rows]
+        st = Logging.normalize_timestamp(start_time) if start_time is not None else None
+        et = Logging.normalize_timestamp(end_time) if end_time is not None else None
+        results: list[dict[str, Any]] = []
+        with operational_simulator._lock:
+            for inc in operational_simulator.incidents.values():
+                inc_ts = Logging.normalize_timestamp(inc.created_at)
+                if st is not None and inc_ts < st:
+                    continue
+                if et is not None and inc_ts > et:
+                    continue
+                if status is not None and str(inc.status) != str(status):
+                    continue
+                if emergency_type is not None and str(inc.kind) != str(emergency_type):
+                    continue
+                if elevator_id is not None and inc.elevator_id != str(elevator_id):
+                    continue
+                results.append(
+                    {
+                        "incident_id": inc.incident_id,
+                        "emergency_type": inc.kind,
+                        "kind": inc.kind,
+                        "status": inc.status,
+                        "elevator_id": inc.elevator_id,
+                        "incident_floor": inc.floor,
+                        "floor": inc.floor,
+                        "description": inc.details,
+                        "details": inc.details,
+                        "created_at": inc.created_at,
+                        "resolved_at": inc.resolved_at,
+                    }
+                )
+        results.sort(key=lambda r: Logging.normalize_timestamp(r["created_at"]), reverse=True)
+        return results[: max(1, min(limit, 500))]
 
     search_audit_records = search_audit_logs

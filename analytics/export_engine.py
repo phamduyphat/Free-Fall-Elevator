@@ -1,31 +1,18 @@
 from __future__ import annotations
 
 import csv
-from dataclasses import asdict, dataclass
 from datetime import datetime
 import io
 import json
 from typing import Any, Literal, Optional
 
 from acs.logs import AuditActionType, Logging
-from analytics.metrics import Metrics, normalize_timestamp
+from acs.payloads import AuditEntry
+from analytics.helpers import normalize_timestamp
+from analytics.metrics import Metrics
+from analytics.reports import ExportPayload
 from db import DbConnectionPool
-
-
-@dataclass
-class ExportPayload:
-    """Standardized serialized report container (ANA-5.9, BEN-4, VT-29)."""
-
-    run_id: str
-    export_format: Literal["CSV", "JSON"]
-    generated_at: str
-    record_count: int
-    content: str
-    summary: dict[str, Any]
-    per_request_data: Optional[list[dict[str, Any]]] = None
-
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+from simulation.operational import operational_simulator
 
 
 class ExportEngine:
@@ -60,25 +47,21 @@ class ExportEngine:
 
         # Resolve time range bounds if not explicitly supplied
         if start_time is None or end_time is None:
-            async with db_pool.acquire() as conn:
-                bounds = await conn.fetchrow(
-                    """
-                    SELECT
-                        MIN(min_ts) AS start_ts,
-                        MAX(max_ts) AS end_ts
-                    FROM (
-                        SELECT MIN(created_at) AS min_ts, MAX(coalesce(completed_at, created_at)) AS max_ts FROM hall_calls
-                        UNION ALL
-                        SELECT MIN(departure_time) AS min_ts, MAX(arrival_time) AS max_ts FROM trips
-                    ) t
-                    """
-                )
-                if bounds and bounds["start_ts"] and bounds["end_ts"]:
-                    st = normalize_timestamp(start_time or bounds["start_ts"])
-                    et = normalize_timestamp(end_time or bounds["end_ts"])
-                else:
-                    st = normalize_timestamp(start_time or datetime(2026, 1, 1, 0, 0, 0))
-                    et = normalize_timestamp(end_time or gen_time)
+            candidate_timestamps: list[datetime] = []
+            with operational_simulator._lock:
+                for h in operational_simulator.hall_calls.values():
+                    candidate_timestamps.append(normalize_timestamp(h.accepted_at))
+                    if h.arrived_at is not None:
+                        candidate_timestamps.append(normalize_timestamp(h.arrived_at))
+                for t in operational_simulator.trips:
+                    candidate_timestamps.append(normalize_timestamp(t["departure_time"]))
+                    candidate_timestamps.append(normalize_timestamp(t["arrival_time"]))
+            if candidate_timestamps:
+                st = normalize_timestamp(start_time or min(candidate_timestamps))
+                et = normalize_timestamp(end_time or max(candidate_timestamps))
+            else:
+                st = normalize_timestamp(start_time or datetime(2026, 1, 1, 0, 0, 0))
+                et = normalize_timestamp(end_time or gen_time)
         else:
             st = normalize_timestamp(start_time)
             et = normalize_timestamp(end_time)
@@ -108,48 +91,46 @@ class ExportEngine:
         # Query Per-Request Dataset if requested
         per_request_rows: list[dict[str, Any]] = []
         if include_per_request:
-            async with db_pool.acquire() as conn:
-                hall_rows = await conn.fetch(
-                    """
-                    SELECT
-                        call_id,
-                        'HALL' AS type,
-                        origin_floor AS origin,
-                        NULL::int AS dest,
-                        created_at,
-                        arrived_at,
-                        completed_at,
-                        wait_time_seconds AS wait_seconds,
-                        status,
-                        reassignments_count AS reassignments
-                    FROM hall_calls
-                    WHERE created_at >= $1 AND created_at <= $2
-                    ORDER BY created_at ASC
-                    """,
-                    st,
-                    et,
-                )
+            hall_rows: list[dict[str, Any]] = []
+            car_rows: list[dict[str, Any]] = []
+            with operational_simulator._lock:
+                for h in operational_simulator.hall_calls.values():
+                    h_ts = normalize_timestamp(h.accepted_at)
+                    if st <= h_ts <= et:
+                        b_ts = normalize_timestamp(h.arrived_at) if h.arrived_at is not None else None
+                        hall_rows.append(
+                            {
+                                "call_id": h.request_id,
+                                "origin": h.origin_floor,
+                                "dest": None,
+                                "created_at": h_ts,
+                                "arrived_at": b_ts,
+                                "completed_at": b_ts,
+                                "wait_seconds": h.wait_seconds,
+                                "status": h.status,
+                                "reassignments": h.reassignment_count,
+                            }
+                        )
+                hall_rows.sort(key=lambda r: r["created_at"])
 
-                car_rows = await conn.fetch(
-                    """
-                    SELECT
-                        call_id,
-                        'CAR' AS type,
-                        NULL::int AS origin,
-                        destination_floor AS dest,
-                        created_at,
-                        command_sent_at AS arrived_at,
-                        completed_at,
-                        NULL::double precision AS wait_seconds,
-                        status,
-                        0 AS reassignments
-                    FROM car_calls
-                    WHERE created_at >= $1 AND created_at <= $2
-                    ORDER BY created_at ASC
-                    """,
-                    st,
-                    et,
-                )
+                for c in operational_simulator.car_calls.values():
+                    c_ts = normalize_timestamp(c.accepted_at)
+                    if st <= c_ts <= et:
+                        comp_ts = normalize_timestamp(c.completed_at) if c.completed_at is not None else None
+                        car_rows.append(
+                            {
+                                "call_id": c.request_id,
+                                "origin": c.origin_floor,
+                                "dest": c.destination_floor,
+                                "created_at": c_ts,
+                                "arrived_at": c_ts,
+                                "completed_at": comp_ts,
+                                "wait_seconds": None,
+                                "status": c.status,
+                                "reassignments": 0,
+                            }
+                        )
+                car_rows.sort(key=lambda r: r["created_at"])
 
             for r in hall_rows:
                 created_ts = r.get("created_at")
@@ -233,22 +214,26 @@ class ExportEngine:
         # Emit REPORT_EXPORTED audit event when an admin actor is supplied (ANA-5.9, VT-29)
         if admin_id is not None:
             await Logging.write_audit(
-                timestamp=gen_time,
-                actor_id=admin_id,
-                actor_role=admin_role,
-                action_type=AuditActionType.REPORT_EXPORTED,
-                target_id=run_id,
-                event_payload={
-                    "run_id": run_id,
-                    "report_type": "PERFORMANCE_AND_AUDIT",
-                    "export_format": fmt_upper,
-                    "row_count": record_count,
-                    "include_per_request": include_per_request,
-                    "date_range": {
-                        "start_time": st.isoformat(),
-                        "end_time": et.isoformat(),
-                    },
-                },
+                [
+                    AuditEntry(
+                        timestamp=gen_time,
+                        actor_id=admin_id,
+                        actor_role=admin_role,
+                        action_type=AuditActionType.REPORT_EXPORTED,
+                        target_id=run_id,
+                        event_payload={
+                            "run_id": run_id,
+                            "report_type": "PERFORMANCE_AND_AUDIT",
+                            "export_format": fmt_upper,
+                            "row_count": record_count,
+                            "include_per_request": include_per_request,
+                            "date_range": {
+                                "start_time": st.isoformat(),
+                                "end_time": et.isoformat(),
+                            },
+                        },
+                    )
+                ],
                 db_pool=db_pool,
             )
 

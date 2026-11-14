@@ -1,20 +1,27 @@
-from analytics.export_engine import ExportEngine, ExportPayload
-from analytics.metrics import (
+from analytics.enums import ELEVATOR_IDS, TrafficProfile
+from analytics.export_engine import ExportEngine
+from analytics.fleet_metrics import FleetMetrics
+from analytics.metrics import Metrics
+from analytics.reports import (
     CarUtilizationReport,
     DowntimeReport,
-    Metrics,
+    ExportPayload,
     SecuritySummaryReport,
-    TrafficProfile,
     TravelTimeReport,
     TripDistributionReport,
     WaitTimeReport,
 )
+from analytics.security_metrics import SecurityMetrics
+from analytics.traffic_metrics import TrafficMetrics
 
 
 class Analytics:
-    """Namespace facade exposing `Analytics.Metrics` and `Analytics.ExportEngine`."""
+    """Namespace facade exposing `Metrics`, `TrafficMetrics`, `FleetMetrics`, `SecurityMetrics`, and `ExportEngine`."""
 
     Metrics = Metrics
+    TrafficMetrics = TrafficMetrics
+    FleetMetrics = FleetMetrics
+    SecurityMetrics = SecurityMetrics
     ExportEngine = ExportEngine
 
 
@@ -22,13 +29,16 @@ __all__ = [
     "Analytics",
     "CarUtilizationReport",
     "DowntimeReport",
+    "ELEVATOR_IDS",
     "ExportEngine",
     "ExportPayload",
+    "FleetMetrics",
     "Metrics",
+    "SecurityMetrics",
     "SecuritySummaryReport",
+    "TrafficMetrics",
     "TrafficProfile",
     "TravelTimeReport",
     "TripDistributionReport",
     "WaitTimeReport",
 ]
-

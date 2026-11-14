@@ -17,11 +17,11 @@ The repository is also known as **Free-Fall-Elevator**.
 - PostgreSQL with the `pgcrypto` extension
 - `asyncpg`, `fastapi`, and `uvicorn`
 
-The repository does not currently include a dependency manifest. Install the
-runtime dependencies in your environment before starting the application:
+The repository includes a `requirements.txt` file. Install the runtime
+dependencies before starting the application:
 
 ```powershell
-python -m pip install fastapi uvicorn asyncpg
+python -m pip install -r requirements.txt
 ```
 
 ## Database setup
@@ -54,6 +54,10 @@ using the system outside a local development environment.
 Start the FastAPI application with:
 
 ```powershell
+python -m uvicorn api:app --reload
+```
+or via `main.py`:
+```powershell
 python main.py
 ```
 
@@ -69,51 +73,42 @@ modules through `DbConnectionPool.acquire()` and
 
 ```text
 .
-├── main.py                         FastAPI application and lifecycle hooks
-├── db.py                           Async PostgreSQL pool and DB dependencies
-├── seed.sql                        PostgreSQL schema, indexes, and seed data
+├── main.py                              FastAPI application and lifecycle hooks
+├── db.py                                Async PostgreSQL pool and DB dependencies
+├── seed.sql                             PostgreSQL schema, indexes, and seed data
 ├── acs/
-│   ├── accesscontrol.py            Credential and elevator access policies
-│   ├── logs.py                     Audit chain, authorization events, alerts
-│   └── design_decisions_ACS.md    ACS design and requirements
+│   ├── __init__.py                      ACS namespace facade and exports
+│   ├── accesscontrol.py                 Re-exports of access-control classes
+│   ├── cab_accesscontrol.py             In-cabin swipe, floor, and E5 freight checks
+│   ├── dashboard_accesscontrol.py       Dashboard login, sessions, and audit checks
+│   ├── credential_accesscontrol.py      Credential & visitor pass lifecycle management
+│   ├── fleet_accesscontrol.py           Maintenance, emergency override, rescue dispatch
+│   ├── enums.py                         ACS enums and role/permission mappings
+│   ├── payloads.py                      Strongly typed request payloads and results
+│   ├── helpers.py                       Shared validation and anomaly-tracking helpers
+│   ├── logs.py                          Audit chain, authorization events, alerts
+│   └── design_decisions_ACS.md          ACS design and requirements
 └── analytics/
-    ├── metrics.py                  KPI calculations from persisted records
-    ├── export_engine.py            CSV/JSON report generation
-    └── design_decisions_analytics.md
-                                     Analytics design and requirements
+    ├── __init__.py                      Analytics namespace facade and exports
+    ├── metrics.py                       Unified Metrics facade
+    ├── traffic_metrics.py               Wait-time, travel-time, and trip-distribution KPIs
+    ├── fleet_metrics.py                 Per-car utilization and downtime/availability KPIs
+    ├── security_metrics.py              Security denials, alerts, and incident KPIs
+    ├── enums.py                         TrafficProfile enum and elevator constants
+    ├── reports.py                       Report and export payload dataclasses
+    ├── helpers.py                       Timestamp and percentile/distribution helpers
+    ├── export_engine.py                 CSV/JSON report generation
+    └── design_decisions_analytics.md    Analytics design and requirements
 ```
+## Mode 1 test-stub integration
 
-## Architecture notes
+The operational simulator, direction-aware dispatch, live stub fleet states, and
+backend-connected passenger demo are documented in
+[`docs/MODE1_INTEGRATION.md`](docs/MODE1_INTEGRATION.md). This is a **software
+test stub** and not a physical elevator controller or safety-certified product.
 
-- **Access control is fail-closed:** restricted operations are denied when
-  required database checks cannot be completed.
-- **Audit records are append-only and hash chained:** each record includes the
-  previous record's hash and a SHA-256 current hash.
-- **Analytics is read-only:** metrics query operational records and do not
-  dispatch elevators or mutate operational state.
-- **Simulation timestamps are separate from CPU wall-clock timing:** analytics
-  uses persisted timestamps for operational measurements, while wall-clock
-  timing is reserved for software-performance checks.
-- **E5 is the dedicated service/freight elevator:** residential elevators are
-  E1-E4, and E5 has distinct service-run rules.
+To run its independent tests without PostgreSQL:
 
-For detailed requirements and invariants, see
-[`acs/design_decisions_ACS.md`](acs/design_decisions_ACS.md) and
-[`analytics/design_decisions_analytics.md`](analytics/design_decisions_analytics.md).
-
-## Development
-
-Run Python modules from the repository root so imports such as `from db import
-DbConnectionPool` resolve correctly. Before opening a change, verify the
-application imports and starts against a configured PostgreSQL instance:
-
-```powershell
-python -m compileall main.py db.py acs analytics
-python main.py
+```bash
+python -m unittest discover -s tests -p test_operational.py -v
 ```
-
-Stop the server with `Ctrl+C`.
-
-## License
-
-No license file is currently included in this repository.
