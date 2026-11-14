@@ -8,7 +8,7 @@ from acs.enums import DenialReason
 from simulation.operational import operational_simulator
 from simulation.clock import MORNING_PEAK_BASE_TIME
 from tests.conftest import advance_clock, api_test_session, bearer, login_dashboard, seed_user_row
-
+from typing import Any
 
 async def _run_operational_activity_via_api(
     client: Any, admin_token: str, tech_token: str
