@@ -361,7 +361,7 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA public
     GRANT USAGE, SELECT, UPDATE ON SEQUENCES TO srems_user;
 
 -- -----------------------------------------------------------------------------
--- 6. Initial Seed Data: 1 Admin User & 1 Admin Credential (Idempotent)
+-- 6. Initial Seed Data: 2 Admin Users & 2 Admin Credentials (Idempotent)
 -- -----------------------------------------------------------------------------
 INSERT INTO users (
     user_id,
@@ -372,15 +372,25 @@ INSERT INTO users (
     created_at,
     updated_at
 )
-VALUES (
-    '00000000-0000-0000-0000-000000000001',
-    'Initial System Administrator',
-    'ADMIN',
-    NULL,
-    NULL,
-    CURRENT_TIMESTAMP,
-    CURRENT_TIMESTAMP
-)
+VALUES
+    (
+        '00000000-0000-0000-0000-000000000001',
+        'Initial System Administrator',
+        'ADMIN',
+        NULL,
+        NULL,
+        CURRENT_TIMESTAMP,
+        CURRENT_TIMESTAMP
+    ),
+    (
+        '00000000-0000-0000-0000-000000000002',
+        'Secondary System Administrator',
+        'ADMIN',
+        NULL,
+        NULL,
+        CURRENT_TIMESTAMP,
+        CURRENT_TIMESTAMP
+    )
 ON CONFLICT (user_id) DO NOTHING;
 
 INSERT INTO credentials (
@@ -396,17 +406,31 @@ INSERT INTO credentials (
     created_at,
     updated_at
 )
-VALUES (
-    'ADMIN-CARD-0001',
-    '00000000-0000-0000-0000-000000000001',
-    'ADMIN',
-    'ACTIVE',
-    NULL,
-    NULL,
-    NULL,
-    '[-1, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30]'::jsonb,
-    '00000000-0000-0000-0000-000000000001',
-    CURRENT_TIMESTAMP,
-    CURRENT_TIMESTAMP
-)
+VALUES
+    (
+        'ADMIN-CARD-0001',
+        '00000000-0000-0000-0000-000000000001',
+        'ADMIN',
+        'ACTIVE',
+        NULL,
+        NULL,
+        NULL,
+        '[-1, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30]'::jsonb,
+        '00000000-0000-0000-0000-000000000001',
+        CURRENT_TIMESTAMP,
+        CURRENT_TIMESTAMP
+    ),
+    (
+        'ADMIN-CARD-0002',
+        '00000000-0000-0000-0000-000000000002',
+        'ADMIN',
+        'ACTIVE',
+        NULL,
+        NULL,
+        NULL,
+        '[-1, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30]'::jsonb,
+        '00000000-0000-0000-0000-000000000001',
+        CURRENT_TIMESTAMP,
+        CURRENT_TIMESTAMP
+    )
 ON CONFLICT (credential_id) DO NOTHING;

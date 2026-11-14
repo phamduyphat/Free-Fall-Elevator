@@ -6,6 +6,8 @@ import json
 from typing import Any, Optional
 import uuid
 
+import asyncpg
+
 from acs.enums import (
     AlertSeverity,
     AlertStatus,
@@ -76,73 +78,66 @@ class Logging:
         return hashlib.sha256(preimage.encode("utf-8")).hexdigest()
 
     @staticmethod
-    async def write_audit(
+    async def _write_audit_with_conn(
+        conn: asyncpg.Connection,
         *,
-        timestamp: datetime,
+        normalized_ts: datetime,
         actor_id: str,
-        actor_role: str,
-        action_type: AuditActionType | str,
+        actor_role_str: str,
+        action_type_str: str,
         target_id: str,
-        event_payload: dict[str, Any] | str,
-        db_pool: type[DbConnectionPool] = DbConnectionPool,
+        canonical_payload: str,
     ) -> dict[str, Any]:
-        """Append a tamper-evident record to `audit_log_chain`."""
-        normalized_ts = Logging.normalize_timestamp(timestamp)
-        canonical_payload = Logging.canonicalize_payload(event_payload)
-        action_type_str = str(action_type)
-        actor_role_str = str(actor_role)
+        last_row = await conn.fetchrow(
+            """
+            SELECT log_index, current_hash
+            FROM audit_log_chain
+            ORDER BY log_index DESC
+            LIMIT 1
+            FOR UPDATE
+            """
+        )
+        if last_row is None:
+            next_index = 1
+            prev_hash = Logging.GENESIS_PREV_HASH
+        else:
+            next_index = int(last_row["log_index"]) + 1
+            prev_hash = str(last_row["current_hash"])
 
-        async with db_pool.acquire() as conn:
-            last_row = await conn.fetchrow(
-                """
-                SELECT log_index, current_hash
-                FROM audit_log_chain
-                ORDER BY log_index DESC
-                LIMIT 1
-                FOR UPDATE
-                """
-            )
-            if last_row is None:
-                next_index = 1
-                prev_hash = Logging.GENESIS_PREV_HASH
-            else:
-                next_index = int(last_row["log_index"]) + 1
-                prev_hash = str(last_row["current_hash"])
+        current_hash = Logging.compute_audit_hash(
+            log_index=next_index,
+            timestamp=normalized_ts,
+            actor_id=actor_id,
+            action_type=action_type_str,
+            canonical_payload=canonical_payload,
+            prev_hash=prev_hash,
+        )
 
-            current_hash = Logging.compute_audit_hash(
-                log_index=next_index,
-                timestamp=normalized_ts,
-                actor_id=actor_id,
-                action_type=action_type_str,
-                canonical_payload=canonical_payload,
-                prev_hash=prev_hash,
-            )
-
-            await conn.execute(
-                """
-                INSERT INTO audit_log_chain (
-                    log_index,
-                    timestamp,
-                    actor_id,
-                    actor_role,
-                    action_type,
-                    target_id,
-                    event_payload,
-                    prev_hash,
-                    current_hash
-                )
-                VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9)
-                """,
-                next_index,
-                normalized_ts,
+        await conn.execute(
+            """
+            INSERT INTO audit_log_chain (
+                log_index,
+                timestamp,
                 actor_id,
-                actor_role_str,
-                action_type_str,
+                actor_role,
+                action_type,
                 target_id,
-                canonical_payload,
+                event_payload,
                 prev_hash,
-                current_hash,
+                current_hash
             )
+            VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9)
+            """,
+            next_index,
+            normalized_ts,
+            actor_id,
+            actor_role_str,
+            action_type_str,
+            target_id,
+            canonical_payload,
+            prev_hash,
+            current_hash,
+        )
 
         return {
             "log_index": next_index,
@@ -155,6 +150,46 @@ class Logging:
             "prev_hash": prev_hash,
             "current_hash": current_hash,
         }
+
+    @staticmethod
+    async def write_audit(
+        *,
+        timestamp: datetime,
+        actor_id: str,
+        actor_role: str,
+        action_type: AuditActionType | str,
+        target_id: str,
+        event_payload: dict[str, Any] | str,
+        db_pool: type[DbConnectionPool] = DbConnectionPool,
+        conn: Optional[asyncpg.Connection] = None,
+    ) -> dict[str, Any]:
+        """Append a tamper-evident record to `audit_log_chain`."""
+        normalized_ts = Logging.normalize_timestamp(timestamp)
+        canonical_payload = Logging.canonicalize_payload(event_payload)
+        action_type_str = str(action_type)
+        actor_role_str = str(actor_role)
+
+        if conn is not None:
+            return await Logging._write_audit_with_conn(
+                conn,
+                normalized_ts=normalized_ts,
+                actor_id=actor_id,
+                actor_role_str=actor_role_str,
+                action_type_str=action_type_str,
+                target_id=target_id,
+                canonical_payload=canonical_payload,
+            )
+
+        async with db_pool.acquire() as acquired_conn:
+            return await Logging._write_audit_with_conn(
+                acquired_conn,
+                normalized_ts=normalized_ts,
+                actor_id=actor_id,
+                actor_role_str=actor_role_str,
+                action_type_str=action_type_str,
+                target_id=target_id,
+                canonical_payload=canonical_payload,
+            )
 
     @staticmethod
     async def log_authorization_event(

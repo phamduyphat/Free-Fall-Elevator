@@ -220,11 +220,16 @@ async def record_unregistered_scan(
 ) -> bool:
     global unregistered_scan_counter
     cutoff = timestamp - timedelta(seconds=SCANNING_WINDOW_SECONDS)
+    
+    # Time-based cutoff
     unregistered_scan_counter = [
         (cid, t) for cid, t in unregistered_scan_counter if t >= cutoff
     ]
+
+    # Append unregistered scan counter
     unregistered_scan_counter.append((credential_id, timestamp))
 
+    # Check if more than the allowed number of unique IDs were scanned
     unique_ids = {cid for cid, _ in unregistered_scan_counter}
     if len(unique_ids) >= SCANNING_UNIQUE_CARDS_THRESHOLD:
         await Logging.create_security_alert(

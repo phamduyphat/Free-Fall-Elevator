@@ -1,9 +1,16 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+import os
 import threading
 from typing import Callable, Optional
+
+import asyncpg
+
+from acs.credential_accesscontrol import CredentialAccessControl
+from db import DEFAULT_DSN
 
 DEFAULT_BASE_TIME: datetime = datetime(2026, 1, 1, 0, 0, 0)
 MORNING_PEAK_BASE_TIME: datetime = datetime(2026, 1, 1, 7, 0, 0)
@@ -38,7 +45,8 @@ class SimulationClock:
     """
     Server-side tick-based virtual clock (`T_sim = T_0 + tick * dt_sim_seconds`).
 
-    Runs a sequential tick-then-sleep daemon thread so heavy or synchronous
+    Runs a sequential tick-then-sleep daemon thread with a dedicated asyncio event
+    loop and a single persistent PostgreSQL connection so heavy or synchronous
     simulation steps never stall FastAPI's event loop and sleep-until-next-tick
     only begins after the current tick finishes.
     """
@@ -53,6 +61,7 @@ class SimulationClock:
     _thread: Optional[threading.Thread] = None
     _stop_event: Optional[threading.Event] = None
     _tick_hook: Optional[Callable[[datetime, int], None]] = None
+    _loop_db_conn: Optional[asyncpg.Connection] = None
 
     @classmethod
     def now(cls) -> datetime:
@@ -83,8 +92,19 @@ class SimulationClock:
             cls._tick_hook = hook
 
     @classmethod
-    def _execute_single_tick(cls) -> datetime:
-        """Execute the tick action hook (if any) and advance virtual clock state sequentially."""
+    async def _open_persistent_connection(cls) -> Optional[asyncpg.Connection]:
+        """Open a single persistent asyncpg connection for the current clock loop."""
+        dsn = os.getenv("DATABASE_URL", DEFAULT_DSN)
+        try:
+            return await asyncpg.connect(dsn=dsn, timeout=1.0)
+        except (OSError, asyncpg.PostgresError, TimeoutError):
+            return None
+
+    @classmethod
+    async def _execute_single_tick_async(
+        cls, db_conn: Optional[asyncpg.Connection] = None
+    ) -> datetime:
+        """Run bulk credential transitions, then tick hooks, then advance virtual clock state."""
         with cls._lock:
             hook = cls._tick_hook
             next_tick = cls._tick + 1
@@ -92,6 +112,18 @@ class SimulationClock:
                 seconds=next_tick * cls._sim_seconds_per_tick
             )
 
+        if db_conn is None or db_conn.is_closed():
+            db_conn = await cls._open_persistent_connection()
+            cls._loop_db_conn = db_conn
+
+        if db_conn is not None and not db_conn.is_closed():
+            await CredentialAccessControl.apply_bulk_transitions(
+                next_time,
+                conn=db_conn,
+            )
+
+        # NOTE: Subsequent actions in this tick MUST come after the bulk card state transition above
+        # so that expired visitor passes and auto-revoked lost cards are reflected before any tick actions run.
         if hook is not None:
             hook(next_time, next_tick)
 
@@ -103,14 +135,50 @@ class SimulationClock:
             return cls.current_time
 
     @classmethod
+    def _cleanup_loop(cls, loop: asyncio.AbstractEventLoop) -> None:
+        """Close any active persistent loop connection and tear down the thread's event loop."""
+        active_conn = cls._loop_db_conn
+        cls._loop_db_conn = None
+        if active_conn is not None and not active_conn.is_closed():
+            try:
+                loop.run_until_complete(active_conn.close())
+            except Exception:
+                pass
+        asyncio.set_event_loop(None)
+        loop.close()
+
+    @classmethod
     def _run_loop(
         cls, stop_event: threading.Event, interval_seconds: float
     ) -> None:
-        """Sequential loop: wait for interval only after each tick completes."""
-        while not stop_event.wait(timeout=interval_seconds):
-            if stop_event.is_set():
-                break
-            cls._execute_single_tick()
+        """Sequential loop: hold one persistent DB connection and wait only after each tick completes."""
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        cls._loop_db_conn = None
+        try:
+            while not stop_event.wait(timeout=interval_seconds):
+                if stop_event.is_set():
+                    break
+
+                # Run a single tick
+                loop.run_until_complete(cls._execute_single_tick_async(cls._loop_db_conn))
+        finally:
+            cls._cleanup_loop(loop)
+
+    @classmethod
+    def _run_advance_steps(cls, steps: int) -> None:
+        """Execute `steps` sequential ticks in CPU clock time using one persistent DB connection."""
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        cls._loop_db_conn = None
+        try:
+            async def _run_batch() -> None:
+                for _ in range(steps):
+                    await cls._execute_single_tick_async(cls._loop_db_conn)
+
+            loop.run_until_complete(_run_batch())
+        finally:
+            cls._cleanup_loop(loop)
 
     @classmethod
     def stop(cls, timeout: float = 2.0) -> None:
@@ -182,10 +250,35 @@ class SimulationClock:
 
     @classmethod
     def advance(cls, steps: int = 1) -> ClockSnapshot:
-        """Synchronously advance the virtual clock by `steps` sequential ticks."""
+        """Run the tick loop `steps` times sequentially in CPU clock time."""
         if steps < 0:
             raise ValueError("steps must be non-negative.")
-        for _ in range(steps):
-            cls._execute_single_tick()
-        return cls.snapshot()
+        if steps == 0:
+            return cls.snapshot()
 
+        try:
+            asyncio.get_running_loop()
+            in_running_loop = True
+        except RuntimeError:
+            in_running_loop = False
+
+        if in_running_loop:
+            error: list[BaseException] = []
+
+            def _worker() -> None:
+                try:
+                    cls._run_advance_steps(steps)
+                except BaseException as exc:
+                    error.append(exc)
+
+            worker = threading.Thread(
+                target=_worker, name="srems-sim-advance", daemon=True
+            )
+            worker.start()
+            worker.join()
+            if error:
+                raise error[0]
+        else:
+            cls._run_advance_steps(steps)
+
+        return cls.snapshot()

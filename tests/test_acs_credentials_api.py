@@ -498,19 +498,6 @@ def test_peer_admin_restrictions_and_cross_admin_management() -> None:
     async def scenario() -> None:
         async with api_test_session(base_time=MORNING_PEAK_BASE_TIME) as client:
             admin1_token = await login_dashboard(client, "ADMIN-CARD-0001")
-
-            # Seed a second distinct Admin user + card
-            admin2_uid = await seed_user_row(full_name="Peer Admin Two", role=UserRole.ADMIN)
-            issue_admin2 = await client.post(
-                "/api/v1/acs/credentials/manage",
-                headers=bearer(admin1_token),
-                json_body={
-                    "action": CredentialAction.ISSUE.value,
-                    "target_user_id": admin2_uid,
-                    "target_credential_id": "ADMIN-CARD-0002",
-                },
-            )
-            assert issue_admin2.status_code == 200
             admin2_token = await login_dashboard(client, "ADMIN-CARD-0002")
 
             # Admin1 cannot self-suspend, self-revoke, or self-replace their own card -> 403 PEER_ADMIN_REQUIRED

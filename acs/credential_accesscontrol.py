@@ -18,6 +18,7 @@ from acs.enums import (
     UserRole,
 )
 from acs.helpers import (
+    LOST_CARD_REVIEW_WINDOW_SECONDS,
     authorize_credential_role,
     fail_closed,
     fetch_and_refresh_credential,
@@ -498,4 +499,135 @@ class CredentialAccessControl:
                 )
         except Exception:
             return fail_closed(payload.admin_credential_id)
+
+    @staticmethod
+    async def apply_bulk_transitions(
+        current_time: datetime,
+        *,
+        conn: Optional[asyncpg.Connection] = None,
+        db_pool: type[DbConnectionPool] = DbConnectionPool,
+    ) -> dict[str, list[str]]:
+        """
+        Bulk-transition expired ACTIVE credentials (`EXPIRED`) and 72-hour LOST
+        SUSPENDED credentials (`REVOKED`) using SQL `IN` updates and per-credential
+        audit entries over a single connection.
+        """
+        ts = Logging.normalize_timestamp(current_time)
+        review_cutoff = ts - timedelta(seconds=LOST_CARD_REVIEW_WINDOW_SECONDS)
+
+        async def _run(active_conn: asyncpg.Connection) -> dict[str, list[str]]:
+            async with active_conn.transaction():
+                expired_rows = await active_conn.fetch(
+                    """
+                    SELECT credential_id, created_at, expires_at
+                    FROM credentials
+                    WHERE status = $1
+                      AND expires_at IS NOT NULL
+                      AND expires_at <= $2
+                    ORDER BY credential_id ASC
+                    FOR UPDATE
+                    """,
+                    CredentialStatus.ACTIVE.value,
+                    ts,
+                )
+                expired_ids = [str(row["credential_id"]) for row in expired_rows]
+                if expired_ids:
+                    in_placeholders = ", ".join(
+                        f"${idx}" for idx in range(3, 3 + len(expired_ids))
+                    )
+                    await active_conn.execute(
+                        f"""
+                        UPDATE credentials
+                        SET status = $1,
+                            updated_at = $2
+                        WHERE credential_id IN ({in_placeholders})
+                        """,
+                        CredentialStatus.EXPIRED.value,
+                        ts,
+                        *expired_ids,
+                    )
+                    for row in expired_rows:
+                        cid = str(row["credential_id"])
+                        expires_at_dt = Logging.normalize_timestamp(row["expires_at"])
+                        created_at_dt = Logging.normalize_timestamp(row["created_at"])
+                        await Logging.write_audit(
+                            timestamp=ts,
+                            actor_id=UserRole.SYSTEM,
+                            actor_role=UserRole.SYSTEM,
+                            action_type=AuditActionType.VISITOR_PASS_EXPIRED,
+                            target_id=cid,
+                            event_payload={
+                                "credential_id": cid,
+                                "expires_at": Logging.format_timestamp(expires_at_dt),
+                                "total_valid_duration_seconds": (
+                                    expires_at_dt - created_at_dt
+                                ).total_seconds(),
+                                "final_status": CredentialStatus.EXPIRED.value,
+                            },
+                            conn=active_conn,
+                        )
+
+                revoked_rows = await active_conn.fetch(
+                    """
+                    SELECT credential_id, suspension_start
+                    FROM credentials
+                    WHERE status = $1
+                      AND suspension_reason = $2
+                      AND suspension_start IS NOT NULL
+                      AND suspension_start <= $3
+                    ORDER BY credential_id ASC
+                    FOR UPDATE
+                    """,
+                    CredentialStatus.SUSPENDED.value,
+                    SuspensionReason.LOST.value,
+                    review_cutoff,
+                )
+                revoked_ids = [str(row["credential_id"]) for row in revoked_rows]
+                if revoked_ids:
+                    in_placeholders = ", ".join(
+                        f"${idx}" for idx in range(4, 4 + len(revoked_ids))
+                    )
+                    await active_conn.execute(
+                        f"""
+                        UPDATE credentials
+                        SET status = $1,
+                            revocation_reason = 'WINDOW_EXPIRED',
+                            revoked_at = $2,
+                            updated_at = $3
+                        WHERE credential_id IN ({in_placeholders})
+                        """,
+                        CredentialStatus.REVOKED.value,
+                        ts,
+                        ts,
+                        *revoked_ids,
+                    )
+                    for row in revoked_rows:
+                        cid = str(row["credential_id"])
+                        suspension_start_dt = Logging.normalize_timestamp(
+                            row["suspension_start"]
+                        )
+                        await Logging.write_audit(
+                            timestamp=ts,
+                            actor_id=UserRole.SYSTEM,
+                            actor_role=UserRole.SYSTEM,
+                            action_type=AuditActionType.CREDENTIAL_REVOKED,
+                            target_id=cid,
+                            event_payload={
+                                "credential_id": cid,
+                                "trigger": "WINDOW_EXPIRED",
+                                "suspension_start": Logging.format_timestamp(
+                                    suspension_start_dt
+                                ),
+                                "revoked_at": Logging.format_timestamp(ts),
+                            },
+                            conn=active_conn,
+                        )
+
+                return {"expired": expired_ids, "revoked": revoked_ids}
+
+        if conn is not None:
+            return await _run(conn)
+
+        async with db_pool.acquire() as acquired_conn:
+            return await _run(acquired_conn)
 

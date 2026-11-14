@@ -5,8 +5,17 @@ from datetime import datetime, timedelta
 import threading
 import time
 
-from acs.enums import DenialReason
+from acs.enums import (
+    AuditActionType,
+    CredentialAction,
+    CredentialStatus,
+    DenialReason,
+    SuspensionReason,
+    UserRole,
+)
+from acs.logs import Logging
 from api import app
+from db import DbConnectionPool
 from simulation.clock import (
     DEFAULT_BASE_TIME,
     DEFAULT_SIM_SECONDS_PER_TICK,
@@ -173,6 +182,111 @@ def test_system_reset_requires_admin_and_configures_clock() -> None:
             clock_resp = await client.get("/api/v1/system/clock")
             assert clock_resp.status_code == 200
             assert clock_resp.json()["tick"] == 3
+
+    asyncio.run(scenario())
+
+
+def test_bulk_credential_transitions_in_clock_advance_and_loop() -> None:
+    async def scenario() -> None:
+        async with api_test_session(
+            base_time=MORNING_PEAK_BASE_TIME,
+            sim_seconds_per_tick=3600.0,
+            tick_interval_seconds=0.0,
+            start_loop=False,
+        ) as client:
+            admin_token = await login_dashboard(client, "ADMIN-CARD-0001")
+
+            # Seed 2 short visitor passes (expire in 1h) and 2 lost-suspended cards (auto-revoke in 72h)
+            vis_uid = await seed_user_row(full_name="Bulk Visitor", role=UserRole.VISITOR)
+            res_uid = await seed_user_row(
+                full_name="Bulk Resident", role=UserRole.RESIDENT, assigned_floor=4
+            )
+            for cid in ("VIS-BULK-1", "VIS-BULK-2"):
+                assert (
+                    await client.post(
+                        "/api/v1/acs/credentials/manage",
+                        headers=bearer(admin_token),
+                        json_body={
+                            "action": CredentialAction.ISSUE_VISITOR_PASS.value,
+                            "target_user_id": vis_uid,
+                            "target_credential_id": cid,
+                            "payload_details": {"duration_seconds": 3600},
+                        },
+                    )
+                ).status_code == 200
+
+            for cid in ("RES-LOST-1", "RES-LOST-2"):
+                assert (
+                    await client.post(
+                        "/api/v1/acs/credentials/manage",
+                        headers=bearer(admin_token),
+                        json_body={
+                            "action": CredentialAction.ISSUE.value,
+                            "target_user_id": res_uid,
+                            "target_credential_id": cid,
+                        },
+                    )
+                ).status_code == 200
+                assert (
+                    await client.post(
+                        "/api/v1/acs/credentials/manage",
+                        headers=bearer(admin_token),
+                        json_body={
+                            "action": CredentialAction.SUSPEND.value,
+                            "target_credential_id": cid,
+                            "payload_details": {"suspension_reason": SuspensionReason.LOST.value},
+                        },
+                    )
+                ).status_code == 200
+
+            # Verify hook sees persistent loop connection & runs AFTER bulk transition
+            hook_saw_conn: list[bool] = []
+
+            def check_hook(_next_time: datetime, _next_tick: int) -> None:
+                hook_saw_conn.append(SimulationClock._loop_db_conn is not None)
+
+            SimulationClock.set_tick_hook(check_hook)
+            try:
+                # 1 tick = +3600s -> both visitor passes expire via bulk SQL IN transition
+                SimulationClock.advance(1)
+                assert hook_saw_conn == [True]
+                assert SimulationClock._loop_db_conn is None
+
+                async with DbConnectionPool.acquire() as conn:
+                    rows = await conn.fetch(
+                        "SELECT credential_id, status FROM credentials WHERE credential_id IN ('VIS-BULK-1', 'VIS-BULK-2')"
+                    )
+                    assert {r["credential_id"]: r["status"] for r in rows} == {
+                        "VIS-BULK-1": CredentialStatus.EXPIRED,
+                        "VIS-BULK-2": CredentialStatus.EXPIRED,
+                    }
+
+                # 71 more ticks = 72h total -> both LOST cards auto-revoke via bulk SQL IN transition
+                SimulationClock.advance(71)
+                async with DbConnectionPool.acquire() as conn:
+                    rows = await conn.fetch(
+                        "SELECT credential_id, status, revocation_reason FROM credentials WHERE credential_id IN ('RES-LOST-1', 'RES-LOST-2')"
+                    )
+                    assert {r["credential_id"]: (r["status"], r["revocation_reason"]) for r in rows} == {
+                        "RES-LOST-1": (CredentialStatus.REVOKED, "WINDOW_EXPIRED"),
+                        "RES-LOST-2": (CredentialStatus.REVOKED, "WINDOW_EXPIRED"),
+                    }
+
+                    audit_rows = await conn.fetch(
+                        "SELECT action_type, target_id FROM audit_log_chain WHERE target_id IN ('VIS-BULK-1', 'VIS-BULK-2', 'RES-LOST-1', 'RES-LOST-2')"
+                    )
+                    actions_by_card: dict[str, list[str]] = {}
+                    for r in audit_rows:
+                        actions_by_card.setdefault(r["target_id"], []).append(r["action_type"])
+                    assert AuditActionType.VISITOR_PASS_EXPIRED in actions_by_card["VIS-BULK-1"]
+                    assert AuditActionType.VISITOR_PASS_EXPIRED in actions_by_card["VIS-BULK-2"]
+                    assert AuditActionType.CREDENTIAL_REVOKED in actions_by_card["RES-LOST-1"]
+                    assert AuditActionType.CREDENTIAL_REVOKED in actions_by_card["RES-LOST-2"]
+
+                integrity = await Logging.verify_audit_chain(db_pool=DbConnectionPool)
+                assert integrity.passed is True
+            finally:
+                SimulationClock.set_tick_hook(None)
 
     asyncio.run(scenario())
 
