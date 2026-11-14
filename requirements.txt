@@ -1,0 +1,22 @@
+# SREMS (Free-Fall-Elevator) — Python runtime dependencies
+# Requires Python 3.11+ (enum.StrEnum is used in acs/logs.py, acs/accesscontrol.py,
+# analytics/metrics.py) and works on Python 3.12 / 3.13 / 3.14.
+# Install: python -m pip install -r requirements.txt
+
+# --- Web API (main.py, api/routes.py) ---
+fastapi>=0.115,<1.0        # FastAPI app, APIRouter, CORSMiddleware, /docs
+uvicorn>=0.30,<1.0         # ASGI server used by `python main.py`
+pydantic>=2.9,<3.0         # request/response models in api/routes.py (installed with FastAPI; pinned explicitly)
+
+# --- Database (db.py, acs/accesscontrol.py) ---
+asyncpg>=0.29,<1.0         # async PostgreSQL connection pool / transaction helpers
+
+# --- No dependency needed for these (standard library) ---
+# csv, io, json, hashlib, uuid, os, math, statistics, dataclasses, datetime,
+# enum, typing, collections.abc, contextlib
+#
+# Database server itself (PostgreSQL + pgcrypto extension) is external and not
+# installed by pip; run `psql -U postgres -f seed.sql`.
+#
+# Optional, add only when needed:
+# uvicorn[standard]>=0.30,<1.0   # adds websockets/httptools/watchfiles for reload & performance
