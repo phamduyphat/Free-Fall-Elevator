@@ -17,11 +17,11 @@ The repository is also known as **Free-Fall-Elevator**.
 - PostgreSQL with the `pgcrypto` extension
 - `asyncpg`, `fastapi`, and `uvicorn`
 
-The repository does not currently include a dependency manifest. Install the
-runtime dependencies in your environment before starting the application:
+The repository includes a `requirements.txt` file. Install the runtime
+dependencies before starting the application:
 
 ```powershell
-python -m pip install fastapi uvicorn asyncpg
+python -m pip install -r requirements.txt
 ```
 
 ## Database setup
@@ -99,4 +99,16 @@ modules through `DbConnectionPool.acquire()` and
     ├── helpers.py                       Timestamp and percentile/distribution helpers
     ├── export_engine.py                 CSV/JSON report generation
     └── design_decisions_analytics.md    Analytics design and requirements
+```
+## Mode 1 test-stub integration
+
+The operational simulator, direction-aware dispatch, live stub fleet states, and
+backend-connected passenger demo are documented in
+[`docs/MODE1_INTEGRATION.md`](docs/MODE1_INTEGRATION.md). This is a **software
+test stub** and not a physical elevator controller or safety-certified product.
+
+To run its independent tests without PostgreSQL:
+
+```bash
+python -m unittest discover -s tests -p test_operational.py -v
 ```
