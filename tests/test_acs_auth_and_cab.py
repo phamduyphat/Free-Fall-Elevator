@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 
-from acs.enums import DenialReason
+from acs.enums import AlertSeverity, AlertStatus, AlertType, DenialReason
 from simulation.clock import MORNING_PEAK_BASE_TIME
 from tests.conftest import advance_clock, api_test_session, bearer, login_dashboard, seed_user_row
 
@@ -164,6 +164,125 @@ def test_cab_swipe_one_tap_b1_exception_e5_and_clone_detection() -> None:
             assert cloned_resp.status_code == 403
             assert cloned_resp.json()["alert_triggered"] is True
             assert cloned_resp.json()["reason_code"] == DenialReason.CARD_SUSPENDED
+
+    asyncio.run(scenario())
+
+
+def test_unregistered_card_scanning_triggers_high_severity_alert() -> None:
+    async def scenario() -> None:
+        async with api_test_session(base_time=MORNING_PEAK_BASE_TIME) as client:
+            admin_token = await login_dashboard(client, "ADMIN-CARD-0001")
+
+            # First 10 distinct unregistered cards within 5 minutes -> 401 UNREGISTERED_CARD, no scan alert
+            for idx in range(1, 11):
+                resp = await client.post(
+                    "/api/v1/acs/auth/cab/swipe",
+                    json_body={
+                        "elevator_id": "E1",
+                        "credential_id": f"SCAN-UNKNOWN-{idx:02d}",
+                        "origin_floor": 1,
+                    },
+                )
+                assert resp.status_code == 401
+                body = resp.json()
+                assert body["allowed"] is False
+                assert body["reason_code"] == DenialReason.UNREGISTERED_CARD
+                assert body["alert_triggered"] is False
+
+            # 11th distinct unregistered card within 300s -> triggers HIGH CARD_SCANNING alert
+            eleventh = await client.post(
+                "/api/v1/acs/auth/cab/swipe",
+                json_body={
+                    "elevator_id": "E1",
+                    "credential_id": "SCAN-UNKNOWN-11",
+                    "origin_floor": 1,
+                },
+            )
+            assert eleventh.status_code == 401
+            assert eleventh.json()["reason_code"] == DenialReason.UNREGISTERED_CARD
+            assert eleventh.json()["alert_triggered"] is True
+
+            alerts_resp = await client.get(
+                "/api/v1/acs/logs/alerts",
+                headers=bearer(admin_token),
+                params={
+                    "alert_type": AlertType.CARD_SCANNING.value,
+                    "status": AlertStatus.OPEN.value,
+                },
+            )
+            assert alerts_resp.status_code == 200
+            assert alerts_resp.json()["count"] >= 1
+            alert = alerts_resp.json()["items"][0]
+            assert alert["severity"] == AlertSeverity.HIGH
+            assert alert["primary_car_id"] == "E1"
+
+            # After 5-minute (300s) window expires, a new unknown card does not trigger scanning alert
+            await advance_clock(client, admin_token, 301)
+            after_window = await client.post(
+                "/api/v1/acs/auth/cab/swipe",
+                json_body={
+                    "elevator_id": "E1",
+                    "credential_id": "SCAN-UNKNOWN-12",
+                    "origin_floor": 1,
+                },
+            )
+            assert after_window.status_code == 401
+            assert after_window.json()["reason_code"] == DenialReason.UNREGISTERED_CARD
+            assert after_window.json()["alert_triggered"] is False
+
+            verify_resp = await client.post(
+                "/api/v1/acs/logs/audit/verify",
+                headers=bearer(admin_token),
+            )
+            assert verify_resp.status_code == 200
+            assert verify_resp.json()["details"]["passed"] is True
+
+    asyncio.run(scenario())
+
+
+def test_repeated_failures_triggers_medium_severity_alert() -> None:
+    async def scenario() -> None:
+        async with api_test_session(base_time=MORNING_PEAK_BASE_TIME) as client:
+            admin_token = await login_dashboard(client, "ADMIN-CARD-0001")
+
+            for attempt in range(1, 3):
+                resp = await client.post(
+                    "/api/v1/acs/auth/cab/swipe",
+                    json_body={
+                        "elevator_id": "E2",
+                        "credential_id": "REPEAT-UNKNOWN-01",
+                        "origin_floor": 1,
+                    },
+                )
+                assert resp.status_code == 401
+                assert resp.json()["reason_code"] == DenialReason.UNREGISTERED_CARD
+                assert resp.json()["alert_triggered"] is False, f"attempt {attempt}"
+
+            # 3rd failure within 60s -> triggers MEDIUM REPEATED_FAILURES alert
+            third = await client.post(
+                "/api/v1/acs/auth/cab/swipe",
+                json_body={
+                    "elevator_id": "E2",
+                    "credential_id": "REPEAT-UNKNOWN-01",
+                    "origin_floor": 1,
+                },
+            )
+            assert third.status_code == 401
+            assert third.json()["reason_code"] == DenialReason.UNREGISTERED_CARD
+            assert third.json()["alert_triggered"] is True
+
+            alerts_resp = await client.get(
+                "/api/v1/acs/logs/alerts",
+                headers=bearer(admin_token),
+                params={
+                    "credential_id": "REPEAT-UNKNOWN-01",
+                    "alert_type": AlertType.REPEATED_FAILURES.value,
+                    "status": AlertStatus.OPEN.value,
+                },
+            )
+            assert alerts_resp.status_code == 200
+            assert alerts_resp.json()["count"] == 1
+            assert alerts_resp.json()["items"][0]["severity"] == AlertSeverity.MEDIUM
 
     asyncio.run(scenario())
 

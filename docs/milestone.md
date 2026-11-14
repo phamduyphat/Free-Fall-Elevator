@@ -35,7 +35,7 @@
 - `SEC-2.8`, `SEC-2.12`, `SEC-2.14`, `ANA-5.7`, `ANA-5.8`: Exposed `GET /api/v1/acs/logs/authorization-events`, `GET /api/v1/acs/logs/audit`, `GET /api/v1/acs/logs/incidents`, `GET /api/v1/acs/logs/alerts`, `PATCH /api/v1/acs/logs/alerts/{alert_id}`, and `POST /api/v1/acs/logs/audit/verify` in `api/acs/logs.py`.
 
 ### 1.3 Mode 2 Testing Integrations (`tests/`)
-- `SEC-2.15`, `SEC-2.21`, `SEC-2.5`, `SEC-2.6`, `SEC-2.18`, `FR-1.13`: Verified opaque dashboard tokens, 15-minute sliding TTL expiry, manual logout, cardless B1 access, one-tap enforcement, E5 B1 block, and 10-second clone suspension in `tests/test_acs_auth_and_cab.py`.
+- `SEC-2.15`, `SEC-2.21`, `SEC-2.5`, `SEC-2.6`, `SEC-2.7`, `SEC-2.18`, `SEC-2.19`, `FR-1.13`: Verified opaque dashboard tokens, 15-minute sliding TTL expiry, manual logout, cardless B1 access, one-tap enforcement, E5 B1 block, 10-second clone suspension, >10-card unregistered scanning alerts (`CARD_SCANNING`), and 3-attempt repeated-failure alerts (`REPEATED_FAILURES`) in `tests/test_acs_auth_and_cab.py`.
 - `SEC-2.16`, `SEC-2.17`, `SEC-2.22`, `VT-17`: Verified RBAC gates, all `CredentialAction` members (`ISSUE`, `ISSUE_VISITOR_PASS`, `SUSPEND`, `REINSTATE`, `REVOKE`), invalid transition rejections, peer-admin restrictions, and atomic lost-card replacement rollback in `tests/test_acs_credentials_api.py` and `tests/test_acs_credentials_fleet_logs.py`.
 - `SEC-2.17`, `SEC-2.11`, `OR-19`, `VT-17`: Verified two seeded Admin cards, self lost-card rejection (`403 PEER_ADMIN_REQUIRED`), peer lost-card suspension, lost-card usage denial/alerting (`403 CARD_SUSPENDED`), and peer void-and-reissue via API in `tests/test_admin_lost_card_api.py`.
 - `SEC-2.9`, `SEC-2.12`, `SEC-2.13`, `SEC-2.14`, `VT-10`: Verified technician vs. admin role separation, security alert resolution, time-ranged audit queries, and PostgreSQL tamper detection in `tests/test_acs_credentials_fleet_logs.py`.
@@ -68,7 +68,7 @@
 - `OR-10`, `PERF-8` ("Benchmark traffic profiles"), Deterministic Time Anchor: Implemented `SimulationClock` (`T_sim = T_0 + tick * dt`) with `DEFAULT_BASE_TIME`, `MORNING_PEAK_BASE_TIME`, `EVENING_PEAK_BASE_TIME`, `OFF_PEAK_BASE_TIME`, a persistent loop DB connection, and bulk credential state transitions at the start of every tick in `simulation/clock.py`.
 - System & Emulator Control Endpoints: Exposed `GET /api/v1/health`, `GET /api/v1/fleet/status` (backed by the in-memory `operational_simulator` test stub), `GET /api/v1/health/db`, `GET /api/v1/system/clock`, Admin-gated `POST /api/v1/system/reset`, and Admin-gated `POST /api/v1/system/clock/tick` in `api/routes.py` and `api/emulator/system.py`.
 - Cross-Mode Operational & Incident Stubs (`simulation/operational.py`, `api/operational.py`, `api/incident.py`): Added an in-memory Mode 1/3/4 simulator and HTTP endpoints (hall calls, stub advance/state, emergency/door/incident/rescue/fault/obstruction/communication-loss controls) gated by `authorize_dashboard_op` (`SEC-2.13`).
-- Test Coverage: Verified background thread isolation, sequential tick timing, DB readiness (`503` uninitialized vs. `200` connected), Admin reset/manual tick endpoints, and bulk tick-loop transitions in `tests/test_clock_and_system.py` (all 47 tests across `tests/` — 19 Mode 2/5/clock tests and 28 operational/incident stub tests — pass against PostgreSQL).
+- Test Coverage: Verified background thread isolation, sequential tick timing, DB readiness (`503` uninitialized vs. `200` connected), Admin reset/manual tick endpoints, and bulk tick-loop transitions in `tests/test_clock_and_system.py` (all 49 tests across `tests/` — 21 Mode 2/5/clock tests and 28 operational/incident stub tests — pass against PostgreSQL).
 
 ---
 
@@ -84,4 +84,4 @@
 
 ### 4.3 Frontend Dashboard & End-to-End Verification
 - `UI-3`, `UI-4`, `UI-8`, `UI-10`: Connect the `frontend/` Car Operating Panel, Hall Panel, Technician Diagnostic View, and Admin Monitoring Dashboard views to the `/api/v1/acs/*`, `/api/v1/analytics/*`, and `/api/v1/system/*` endpoints.
-- `VT-10`, `VT-18`, `VT-19`, `VT-23`, `VT-24`, `VT-25`, `VT-26`: Add automated tests for unregistered card scanning (>10 unknown IDs in 5 minutes per `SEC-2.19`), benchmark traffic profile targets (`VT-23`, `PERF-9`, `PERF-10`), 3,000-credential scale latency (`VT-24`, `PERF-1`–`PERF-5`), and backup/restore validation (`VT-25`, `DAT-2`, `DAT-3`).
+- `VT-10`, `VT-18`, `VT-19`, `VT-23`, `VT-24`, `VT-25`, `VT-26`: Add automated tests for benchmark traffic profile targets (`VT-23`, `PERF-9`, `PERF-10`), 3,000-credential scale latency (`VT-24`, `PERF-1`–`PERF-5`), and backup/restore validation (`VT-25`, `DAT-2`, `DAT-3`).
