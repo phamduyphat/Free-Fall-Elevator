@@ -12,6 +12,7 @@ from acs.dashboard_accesscontrol import DashboardAccessControl
 from acs.enums import DashboardOperationType
 from api.helpers import auth_denial_response, authorize_dashboard_op, extract_bearer_token
 from db import DbConnectionPool, get_db_pool
+from simulation.operational import operational_simulator
 from simulation.clock import (
     DEFAULT_BASE_TIME,
     DEFAULT_SIM_SECONDS_PER_TICK,
@@ -89,6 +90,7 @@ async def reset_system(
 
     SimulationClock.stop()
     await db_pool.reset_database_tables()
+    operational_simulator.reset()
     CabAccessControl.reset_in_memory_state()
     DashboardAccessControl.reset_in_memory_state()
 

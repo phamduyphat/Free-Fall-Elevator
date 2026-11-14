@@ -12,6 +12,7 @@ from acs.cab_accesscontrol import CabAccessControl
 from acs.dashboard_accesscontrol import DashboardAccessControl
 from api import app
 from db import DbConnectionPool
+from simulation.operational import operational_simulator
 from simulation.clock import (
     DEFAULT_BASE_TIME,
     DEFAULT_SIM_SECONDS_PER_TICK,
@@ -136,6 +137,7 @@ async def api_test_session(
     await DbConnectionPool.reset_database_tables()
     CabAccessControl.reset_in_memory_state()
     DashboardAccessControl.reset_in_memory_state()
+    operational_simulator.reset()
     SimulationClock.reset(
         base_time=base_time,
         sim_seconds_per_tick=sim_seconds_per_tick,
@@ -148,6 +150,7 @@ async def api_test_session(
         SimulationClock.stop()
         CabAccessControl.reset_in_memory_state()
         DashboardAccessControl.reset_in_memory_state()
+        operational_simulator.reset()
         await DbConnectionPool.close_pool()
 
 

@@ -5,7 +5,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from acs.cab_accesscontrol import CabAccessControl
-from acs.enums import ElevatorId
+from acs.enums import DenialReason, ElevatorId
 from acs.payloads import (
     AuthorizationResult,
     CarDestinationRequestPayload,
@@ -14,6 +14,7 @@ from acs.payloads import (
 from api.helpers import auth_result_response
 from db import DbConnectionPool, get_db_pool
 from simulation.clock import SimulationClock
+from simulation.operational import OperationalError, operational_simulator
 
 router = APIRouter(prefix="/cab", tags=["acs-cab"])
 
@@ -49,6 +50,15 @@ async def select_cab_destination(
         ),
         db_pool=db_pool,
     )
+    if result.allowed:
+        try:
+            trip = operational_simulator.submit_car_call(str(body.elevator_id), body.requested_floor)
+            result.details["operational_request_id"] = trip["request_id"]
+            result.details["operational_source"] = "labelled-test-stub"
+        except OperationalError as exc:
+            return auth_result_response(AuthorizationResult.deny(
+                DenialReason.COMMAND_CONFLICT_REJECTED, message=str(exc)
+            ))
     return auth_result_response(result)
 
 
@@ -67,5 +77,14 @@ async def start_e5_service_run(
         ),
         db_pool=db_pool,
     )
+    if result.allowed:
+        try:
+            trip = operational_simulator.start_service_run(body.destination_floor)
+            result.details["operational_request_id"] = trip["request_id"]
+            result.details["operational_source"] = "labelled-test-stub"
+        except OperationalError as exc:
+            return auth_result_response(AuthorizationResult.deny(
+                DenialReason.COMMAND_CONFLICT_REJECTED, message=str(exc)
+            ))
     return auth_result_response(result)
 

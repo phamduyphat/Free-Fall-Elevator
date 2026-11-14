@@ -78,3 +78,12 @@ h1, h2 { margin: 0; color: #172033; } h1 { font-size: 28px; } h2 { font-size: 20
 .simulation-legend { color: #596a7d; font-size: 12px; line-height: 2.2; } .simulation-legend > div { display: flex; gap: 8px; align-items: center; } .legend-car { width: 15px; height: 15px; border-radius: 3px; background: #1c6b99; border: 2px solid #65c2ff; } .legend-passenger { color: #e0ad35; font-size: 16px; } .legend-line { width: 15px; border-top: 1px solid #8997a8; } .muted.dark { color: #7d899d; margin-top: 10px; }
 @media (max-width: 900px) { .simulation-layout { grid-template-columns: 1fr; } }
 @media (max-width: 760px) { .sidebar { width: 66px; padding: 18px 8px; } .brand { padding: 0 7px 30px; } .brand div, .nav-item { font-size: 0; } .nav-item { height: 42px; } .nav-icon { font-size: 12px; } .sidebar-footer { font-size: 0; padding: 8px; } .content { padding: 28px 20px; } .hero-card { align-items: flex-start; gap: 20px; flex-direction: column; } .hero-metric { text-align: left; } .summary-grid, .kpi-grid { grid-template-columns: 1fr; } .page-header { flex-direction: column; } .toolbar, .filter-bar { align-items: stretch; flex-direction: column; } .toolbar input { min-width: 0; } .breadcrumb { font-size: 22px; } .shaft-panel { min-height: 520px; padding: 16px 8px; } .sim-car-row { grid-template-columns: 28px 55px 45px 1fr; } .sim-car-row .weight { display: none; } }
+/* Operational incident and verified dashboard-session views. */
+.incident-card { border-top: 1px solid rgba(127,127,127,.2); padding: 14px 6px; }
+.incident-card p { margin: 8px 0; overflow-wrap: anywhere; }
+.incident-card small { display: block; color: #657184; overflow-wrap: anywhere; }
+.incident-actions { display: flex; flex-wrap: wrap; gap: 7px; padding-top: 12px; }
+.incident-actions .button { padding: 7px 11px; }
+.login-field { display: flex; align-items: center; gap: 6px; font-size: 12px; }
+.login-field input { max-width: 180px; min-width: 130px; }
+.event-row { border-top: 1px solid #dfe3ea; padding: 8px; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; }

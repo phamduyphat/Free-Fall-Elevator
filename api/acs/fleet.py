@@ -27,6 +27,7 @@ from api.helpers import (
     extract_bearer_token,
 )
 from db import DbConnectionPool, get_db_pool
+from simulation.operational import OperationalError, operational_simulator
 
 router = APIRouter(prefix="/fleet", tags=["acs-fleet"])
 
@@ -85,6 +86,12 @@ async def execute_maintenance_operation(
         ),
         db_pool=db_pool,
     )
+    if result.allowed and str(body.operation_type) == "ENTER_MAINTENANCE":
+        try:
+            operational_simulator.isolate(str(body.elevator_id), "MAINTENANCE")
+        except OperationalError as exc:
+            return auth_result_response(AuthorizationResult.deny(
+                "COMMAND_CONFLICT_REJECTED", message=str(exc)))
     return auth_result_response(result)
 
 
@@ -101,6 +108,14 @@ async def return_to_service(
     if session is None:
         return auth_denial_response(auth_res)
 
+    # Recovery conditions must be checked against current test-stub state.
+    # Authorization alone does not restore operational availability.
+    if ElevatorId.has_value(body.elevator_id) and not operational_simulator.can_return_to_service(str(body.elevator_id)):
+        return auth_result_response(AuthorizationResult.deny(
+            "INVALID_STATE_TRANSITION",
+            message="Return to service blocked: stale state, active fault/emergency or obstruction.",
+        ))
+
     result = await FleetAccessControl.validate_return_to_service(
         ReturnToServicePayload(
             credential_id=session.credential_id,
@@ -110,6 +125,12 @@ async def return_to_service(
         ),
         db_pool=db_pool,
     )
+    if result.allowed:
+        try:
+            operational_simulator.isolate(str(body.elevator_id), "IN_SERVICE")
+        except OperationalError as exc:
+            return auth_result_response(AuthorizationResult.deny(
+                "INVALID_STATE_TRANSITION", message=str(exc)))
     return auth_result_response(result)
 
 
