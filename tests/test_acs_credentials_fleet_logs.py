@@ -3,10 +3,9 @@ from __future__ import annotations
 import asyncio
 
 from acs.enums import DenialReason
-from acs.logs import Logging
 from db import DbConnectionPool
-from simulation.clock import MORNING_PEAK_BASE_TIME, SimulationClock
-from tests.conftest import api_test_session, bearer, login_dashboard, seed_user_row
+from simulation.clock import MORNING_PEAK_BASE_TIME
+from tests.conftest import advance_clock, api_test_session, bearer, login_dashboard, seed_user_row
 
 
 def test_credential_lifecycle_peer_admin_and_lost_card_replacement() -> None:
@@ -153,7 +152,7 @@ def test_fleet_permissions_alerts_logs_and_audit_chain_verification() -> None:
             assert audit_denied.json()["reason_code"] == DenialReason.UNAUTHORIZED_ROLE
 
             # Admin can run emergency override & rescue dispatch
-            SimulationClock.advance(5)
+            await advance_clock(client, admin_token, 5)
             ovr_ok = await client.post(
                 "/api/v1/acs/fleet/emergency-override",
                 headers=bearer(admin_token),
@@ -165,17 +164,40 @@ def test_fleet_permissions_alerts_logs_and_audit_chain_verification() -> None:
             )
             assert ovr_ok.status_code == 200
 
-            # Create an alert via unknown swipes / clone & inspect alerts under VIEW_DIAGNOSTICS (tech allowed)
-            alert_id = await Logging.create_security_alert(
-                created_at=SimulationClock.now(),
-                severity="HIGH",
-                alert_type="REPEATED_FAILURES",
-                credential_id="UNKNOWN-999",
-                primary_car_id="E1",
-                secondary_car_id=None,
-                details="3 failures in 60s",
-                db_pool=DbConnectionPool,
+            # Trigger an alert via API (swipe a lost-suspended card) & inspect alerts under VIEW_DIAGNOSTICS (tech allowed)
+            vis_alert_uid = await seed_user_row(full_name="Alert Visitor", role="VISITOR")
+            assert (
+                await client.post(
+                    "/api/v1/acs/credentials/manage",
+                    headers=bearer(admin_token),
+                    json_body={
+                        "action": "ISSUE_VISITOR_PASS",
+                        "target_user_id": vis_alert_uid,
+                        "target_credential_id": "VIS-ALERT-01",
+                    },
+                )
+            ).status_code == 200
+            assert (
+                await client.post(
+                    "/api/v1/acs/credentials/manage",
+                    headers=bearer(admin_token),
+                    json_body={
+                        "action": "SUSPEND",
+                        "target_credential_id": "VIS-ALERT-01",
+                        "payload_details": {"suspension_reason": "LOST"},
+                    },
+                )
+            ).status_code == 200
+            lost_swipe = await client.post(
+                "/api/v1/acs/auth/cab/swipe",
+                json_body={
+                    "elevator_id": "E1",
+                    "credential_id": "VIS-ALERT-01",
+                    "origin_floor": 1,
+                },
             )
+            assert lost_swipe.status_code == 403
+            assert lost_swipe.json()["alert_triggered"] is True
 
             tech_alerts = await client.get(
                 "/api/v1/acs/logs/alerts",
@@ -184,6 +206,7 @@ def test_fleet_permissions_alerts_logs_and_audit_chain_verification() -> None:
             )
             assert tech_alerts.status_code == 200
             assert tech_alerts.json()["count"] >= 1
+            alert_id = tech_alerts.json()["items"][0]["alert_id"]
 
             # Alert PATCH requires ADMIN under EMERGENCY_OVERRIDE
             tech_patch = await client.patch(
@@ -218,8 +241,10 @@ def test_fleet_permissions_alerts_logs_and_audit_chain_verification() -> None:
             ).status_code == 400
 
             # Time-range query on audit logs & integrity check
+            clock_resp = await client.get("/api/v1/system/clock")
+            assert clock_resp.status_code == 200
             window_start = MORNING_PEAK_BASE_TIME.isoformat()
-            window_end = SimulationClock.now().isoformat()
+            window_end = clock_resp.json()["current_sim_time"]
             audit_list = await client.get(
                 "/api/v1/acs/logs/audit",
                 headers=bearer(admin_token),

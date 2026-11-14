@@ -28,6 +28,7 @@ from acs.helpers import (
 )
 from acs.logs import Logging
 from acs.payloads import (
+    AuditEntry,
     AuthorizationResult,
     CarDestinationRequestPayload,
     CardSwipePayload,
@@ -112,17 +113,21 @@ class CabAccessControl:
         )
         if updated_id is not None:
             await Logging.write_audit(
-                timestamp=ts,
-                actor_id=UserRole.SYSTEM,
-                actor_role=UserRole.SYSTEM,
-                action_type=AuditActionType.CREDENTIAL_SUSPENDED,
-                target_id=payload.credential_id,
-                event_payload={
-                    "credential_id": payload.credential_id,
-                    "reason": SuspensionReason.CLONE_SUSPECTED.value,
-                    "primary_car_id": str(payload.elevator_id),
-                    "secondary_car_id": prior_car,
-                },
+                [
+                    AuditEntry(
+                        timestamp=ts,
+                        actor_id=UserRole.SYSTEM,
+                        actor_role=UserRole.SYSTEM,
+                        action_type=AuditActionType.CREDENTIAL_SUSPENDED,
+                        target_id=payload.credential_id,
+                        event_payload={
+                            "credential_id": payload.credential_id,
+                            "reason": SuspensionReason.CLONE_SUSPECTED.value,
+                            "primary_car_id": str(payload.elevator_id),
+                            "secondary_car_id": prior_car,
+                        },
+                    )
+                ],
                 db_pool=db_pool,
             )
 
@@ -464,21 +469,25 @@ class CabAccessControl:
                         else DenialReason.MALFORMED_MSG_REJECTED
                     )
                     await Logging.write_audit(
-                        timestamp=ts,
-                        actor_id=UserRole.SYSTEM,
-                        actor_role=UserRole.SYSTEM,
-                        action_type=(
-                            AuditActionType.MALFORMED_MSG_REJECTED
-                            if reason == DenialReason.MALFORMED_MSG_REJECTED
-                            else AuditActionType.ACCESS_DENIAL
-                        ),
-                        target_id=str(payload.elevator_id),
-                        event_payload={
-                            "elevator_id": str(payload.elevator_id),
-                            "destination_floor": payload.destination_floor,
-                            "purpose": payload.purpose,
-                            "reason": reason.value,
-                        },
+                        [
+                            AuditEntry(
+                                timestamp=ts,
+                                actor_id=UserRole.SYSTEM,
+                                actor_role=UserRole.SYSTEM,
+                                action_type=(
+                                    AuditActionType.MALFORMED_MSG_REJECTED
+                                    if reason == DenialReason.MALFORMED_MSG_REJECTED
+                                    else AuditActionType.ACCESS_DENIAL
+                                ),
+                                target_id=str(payload.elevator_id),
+                                event_payload={
+                                    "elevator_id": str(payload.elevator_id),
+                                    "destination_floor": payload.destination_floor,
+                                    "purpose": payload.purpose,
+                                    "reason": reason.value,
+                                },
+                            )
+                        ],
                         db_pool=db_pool,
                     )
                     return AuthorizationResult.deny(
@@ -494,16 +503,20 @@ class CabAccessControl:
                     cred_id = session["credential_id"] if session else None
                     if action_type == AuditActionType.ONE_TAP_VIOLATION and session:
                         await Logging.write_audit(
-                            timestamp=ts,
-                            actor_id=cred_id or UserRole.SYSTEM,
-                            actor_role=session["role"],
-                            action_type=AuditActionType.ONE_TAP_VIOLATION,
-                            target_id=ElevatorId.E5,
-                            event_payload={
-                                "elevator_id": ElevatorId.E5.value,
-                                "denied_floor": payload.destination_floor,
-                                "token_age_seconds": token_age,
-                            },
+                            [
+                                AuditEntry(
+                                    timestamp=ts,
+                                    actor_id=cred_id or UserRole.SYSTEM,
+                                    actor_role=session["role"],
+                                    action_type=AuditActionType.ONE_TAP_VIOLATION,
+                                    target_id=ElevatorId.E5,
+                                    event_payload={
+                                        "elevator_id": ElevatorId.E5.value,
+                                        "denied_floor": payload.destination_floor,
+                                        "token_age_seconds": token_age,
+                                    },
+                                )
+                            ],
                             db_pool=db_pool,
                         )
                     return AuthorizationResult.deny(reason, message=msg, credential_id=cred_id)
@@ -533,16 +546,20 @@ class CabAccessControl:
 
                 session["consumed"] = True
                 await Logging.write_audit(
-                    timestamp=ts,
-                    actor_id=cred_id,
-                    actor_role=role,
-                    action_type=AuditActionType.E5_SERVICE_RUN_START,
-                    target_id=ElevatorId.E5,
-                    event_payload={
-                        "elevator_id": ElevatorId.E5.value,
-                        "destination_floor": payload.destination_floor,
-                        "purpose": payload.purpose,
-                    },
+                    [
+                        AuditEntry(
+                            timestamp=ts,
+                            actor_id=cred_id,
+                            actor_role=role,
+                            action_type=AuditActionType.E5_SERVICE_RUN_START,
+                            target_id=ElevatorId.E5,
+                            event_payload={
+                                "elevator_id": ElevatorId.E5.value,
+                                "destination_floor": payload.destination_floor,
+                                "purpose": payload.purpose,
+                            },
+                        )
+                    ],
                     db_pool=db_pool,
                 )
                 return AuthorizationResult.allow(

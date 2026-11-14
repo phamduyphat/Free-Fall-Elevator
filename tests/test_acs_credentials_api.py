@@ -13,8 +13,8 @@ from acs.enums import (
     UserRole,
 )
 from db import DbConnectionPool
-from simulation.clock import MORNING_PEAK_BASE_TIME, SimulationClock
-from tests.conftest import api_test_session, bearer, login_dashboard, seed_user_row
+from simulation.clock import MORNING_PEAK_BASE_TIME
+from tests.conftest import advance_clock, api_test_session, bearer, login_dashboard, seed_user_row
 
 
 async def _fetch_credential_row(credential_id: str) -> dict | None:
@@ -245,7 +245,7 @@ def test_manage_issue_and_issue_visitor_pass_actions() -> None:
             assert swipe_ok.status_code == 200
 
             # Advance clock past 60s -> visitor pass expires (403 CARD_EXPIRED)
-            SimulationClock.advance(61)
+            await advance_clock(client, admin_token, 61)
             swipe_expired = await client.post(
                 "/api/v1/acs/auth/cab/swipe",
                 json_body={"elevator_id": "E1", "credential_id": "VIS-SHORT-01", "origin_floor": 1},
@@ -477,7 +477,7 @@ def test_manage_suspend_reinstate_revoke_and_invalid_transitions() -> None:
                     },
                 )
             ).status_code == 200
-            SimulationClock.advance(31)
+            await advance_clock(client, admin_token, 31)
             for action in (
                 CredentialAction.SUSPEND.value,
                 CredentialAction.REINSTATE.value,

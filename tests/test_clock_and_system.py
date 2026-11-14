@@ -13,7 +13,6 @@ from acs.enums import (
     SuspensionReason,
     UserRole,
 )
-from acs.logs import Logging
 from api import app
 from db import DbConnectionPool
 from simulation.clock import (
@@ -25,7 +24,14 @@ from simulation.clock import (
     OFF_PEAK_BASE_TIME,
     SimulationClock,
 )
-from tests.conftest import AsgiClient, api_test_session, bearer, login_dashboard, seed_user_row
+from tests.conftest import (
+    AsgiClient,
+    advance_clock,
+    api_test_session,
+    bearer,
+    login_dashboard,
+    seed_user_row,
+)
 
 
 def test_simulation_clock_constants_and_sequential_thread_loop() -> None:
@@ -248,7 +254,7 @@ def test_bulk_credential_transitions_in_clock_advance_and_loop() -> None:
             SimulationClock.set_tick_hook(check_hook)
             try:
                 # 1 tick = +3600s -> both visitor passes expire via bulk SQL IN transition
-                SimulationClock.advance(1)
+                await advance_clock(client, admin_token, 1)
                 assert hook_saw_conn == [True]
                 assert SimulationClock._loop_db_conn is None
 
@@ -262,7 +268,9 @@ def test_bulk_credential_transitions_in_clock_advance_and_loop() -> None:
                     }
 
                 # 71 more ticks = 72h total -> both LOST cards auto-revoke via bulk SQL IN transition
-                SimulationClock.advance(71)
+                admin_token = await login_dashboard(client, "ADMIN-CARD-0001")
+                await advance_clock(client, admin_token, 71)
+                admin_token = await login_dashboard(client, "ADMIN-CARD-0001")
                 async with DbConnectionPool.acquire() as conn:
                     rows = await conn.fetch(
                         "SELECT credential_id, status, revocation_reason FROM credentials WHERE credential_id IN ('RES-LOST-1', 'RES-LOST-2')"
@@ -272,19 +280,26 @@ def test_bulk_credential_transitions_in_clock_advance_and_loop() -> None:
                         "RES-LOST-2": (CredentialStatus.REVOKED, "WINDOW_EXPIRED"),
                     }
 
-                    audit_rows = await conn.fetch(
-                        "SELECT action_type, target_id FROM audit_log_chain WHERE target_id IN ('VIS-BULK-1', 'VIS-BULK-2', 'RES-LOST-1', 'RES-LOST-2')"
+                for cid, expected_action in (
+                    ("VIS-BULK-1", AuditActionType.VISITOR_PASS_EXPIRED.value),
+                    ("VIS-BULK-2", AuditActionType.VISITOR_PASS_EXPIRED.value),
+                    ("RES-LOST-1", AuditActionType.CREDENTIAL_REVOKED.value),
+                    ("RES-LOST-2", AuditActionType.CREDENTIAL_REVOKED.value),
+                ):
+                    audit_resp = await client.get(
+                        "/api/v1/acs/logs/audit",
+                        headers=bearer(admin_token),
+                        params={"target_id": cid, "action_type": expected_action},
                     )
-                    actions_by_card: dict[str, list[str]] = {}
-                    for r in audit_rows:
-                        actions_by_card.setdefault(r["target_id"], []).append(r["action_type"])
-                    assert AuditActionType.VISITOR_PASS_EXPIRED in actions_by_card["VIS-BULK-1"]
-                    assert AuditActionType.VISITOR_PASS_EXPIRED in actions_by_card["VIS-BULK-2"]
-                    assert AuditActionType.CREDENTIAL_REVOKED in actions_by_card["RES-LOST-1"]
-                    assert AuditActionType.CREDENTIAL_REVOKED in actions_by_card["RES-LOST-2"]
+                    assert audit_resp.status_code == 200
+                    assert audit_resp.json()["count"] >= 1
 
-                integrity = await Logging.verify_audit_chain(db_pool=DbConnectionPool)
-                assert integrity.passed is True
+                verify_resp = await client.post(
+                    "/api/v1/acs/logs/audit/verify",
+                    headers=bearer(admin_token),
+                )
+                assert verify_resp.status_code == 200
+                assert verify_resp.json()["details"]["passed"] is True
             finally:
                 SimulationClock.set_tick_hook(None)
 

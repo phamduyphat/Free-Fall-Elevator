@@ -3,8 +3,8 @@ from __future__ import annotations
 import asyncio
 
 from acs.enums import DenialReason
-from simulation.clock import MORNING_PEAK_BASE_TIME, SimulationClock
-from tests.conftest import api_test_session, bearer, login_dashboard, seed_user_row
+from simulation.clock import MORNING_PEAK_BASE_TIME
+from tests.conftest import advance_clock, api_test_session, bearer, login_dashboard, seed_user_row
 
 
 def test_dashboard_auth_opaque_token_sliding_ttl_and_logout() -> None:
@@ -45,13 +45,14 @@ def test_dashboard_auth_opaque_token_sliding_ttl_and_logout() -> None:
             assert denied_login.json()["allowed"] is False
             assert denied_login.json()["reason_code"] == DenialReason.DASHBOARD_ACCESS_DENIED
 
-            # Advance 800 virtual seconds (< 15 min) -> session still valid and slides TTL
-            SimulationClock.advance(800)
+            # Advance 800 virtual seconds (< 15 min) via peer admin -> session still valid and slides TTL
+            clock_token = await login_dashboard(client, "ADMIN-CARD-0002")
+            await advance_clock(client, clock_token, 800)
             still_ok = await client.get("/api/v1/acs/fleet/view", headers=bearer(token))
             assert still_ok.status_code == 200
 
             # Advance 901 virtual seconds past last activity -> 401 SESSION_EXPIRED
-            SimulationClock.advance(901)
+            await advance_clock(client, clock_token, 901)
             expired_resp = await client.get("/api/v1/acs/fleet/view", headers=bearer(token))
             assert expired_resp.status_code == 401
             assert expired_resp.json()["allowed"] is False
@@ -124,7 +125,7 @@ def test_cab_swipe_one_tap_b1_exception_e5_and_clone_detection() -> None:
             assert second_tap.json()["reason_code"] == DenialReason.ONE_TAP_LIMIT_EXCEEDED
 
             # Unauthorized floor (floor 15 for floor 10 resident) -> 403 UNAUTHORIZED_FLOOR
-            SimulationClock.advance(20)
+            await advance_clock(client, admin_token, 20)
             await client.post(
                 "/api/v1/acs/auth/cab/swipe",
                 json_body={"elevator_id": "E2", "credential_id": "RES-CARD-10", "origin_floor": 1},
@@ -155,7 +156,7 @@ def test_cab_swipe_one_tap_b1_exception_e5_and_clone_detection() -> None:
             assert e5_ok.status_code == 200
 
             # Clone detection: same card swiped on E3 within 10s of E5 swipe
-            SimulationClock.advance(3)
+            await advance_clock(client, admin_token, 3)
             cloned_resp = await client.post(
                 "/api/v1/acs/auth/cab/swipe",
                 json_body={"elevator_id": "E3", "credential_id": "STAFF-CARD-01", "origin_floor": 1},

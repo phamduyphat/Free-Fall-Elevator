@@ -15,8 +15,8 @@ from acs.enums import (
     UserRole,
 )
 from db import DbConnectionPool
-from simulation.clock import MORNING_PEAK_BASE_TIME, SimulationClock
-from tests.conftest import api_test_session, bearer, login_dashboard
+from simulation.clock import MORNING_PEAK_BASE_TIME
+from tests.conftest import advance_clock, api_test_session, bearer, login_dashboard
 
 
 async def _suspend_admin1_as_lost_by_peer(client, admin2_token: str):
@@ -133,7 +133,7 @@ def test_attempted_lost_card_usage() -> None:
             peer_report = await _suspend_admin1_as_lost_by_peer(client, admin2_token)
             assert peer_report.status_code == 200
 
-            SimulationClock.advance(1)
+            await advance_clock(client, admin2_token, 1)
             cab_attempt = await client.post(
                 "/api/v1/acs/auth/cab/swipe",
                 json_body={
@@ -204,7 +204,7 @@ def test_lost_card_void_and_reissue_for_admin_by_peer() -> None:
             peer_report = await _suspend_admin1_as_lost_by_peer(client, admin2_token)
             assert peer_report.status_code == 200
 
-            SimulationClock.advance(1)
+            await advance_clock(client, admin2_token, 1)
             reissue_resp = await client.post(
                 "/api/v1/acs/credentials/replace-lost",
                 headers=bearer(admin2_token),

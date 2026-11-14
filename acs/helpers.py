@@ -17,7 +17,7 @@ from acs.enums import (
     UserRole,
 )
 from acs.logs import Logging
-from acs.payloads import AuthorizationResult, CardSwipePayload
+from acs.payloads import AuditEntry, AuthorizationResult, CardSwipePayload
 from db import DbConnectionPool
 
 ALL_BUILDING_FLOORS: list[int] = [-1] + list(range(1, 31))
@@ -93,12 +93,16 @@ async def reject_unauthorized_role(
     if extra_payload:
         payload.update(extra_payload)
     await Logging.write_audit(
-        timestamp=timestamp,
-        actor_id=actor_id,
-        actor_role=actor_role,
-        action_type=AuditActionType.UNAUTHORIZED_CMD_REJECTED,
-        target_id=target_id,
-        event_payload=payload,
+        [
+            AuditEntry(
+                timestamp=timestamp,
+                actor_id=actor_id,
+                actor_role=actor_role,
+                action_type=AuditActionType.UNAUTHORIZED_CMD_REJECTED,
+                target_id=target_id,
+                event_payload=payload,
+            )
+        ],
         db_pool=db_pool,
     )
     return AuthorizationResult.deny(
@@ -162,12 +166,16 @@ async def reject_malformed_msg(
 ) -> AuthorizationResult:
     try:
         await Logging.write_audit(
-            timestamp=timestamp,
-            actor_id=UserRole.SYSTEM,
-            actor_role=UserRole.SYSTEM,
-            action_type=AuditActionType.MALFORMED_MSG_REJECTED,
-            target_id=target_id,
-            event_payload={"source": source, **payload_details},
+            [
+                AuditEntry(
+                    timestamp=timestamp,
+                    actor_id=UserRole.SYSTEM,
+                    actor_role=UserRole.SYSTEM,
+                    action_type=AuditActionType.MALFORMED_MSG_REJECTED,
+                    target_id=target_id,
+                    event_payload={"source": source, **payload_details},
+                )
+            ],
             db_pool=db_pool,
         )
     except Exception:
@@ -277,19 +285,23 @@ async def apply_credential_transitions(
             rec["status"] = CredentialStatus.EXPIRED.value
             rec["updated_at"] = current_time
             await Logging.write_audit(
-                timestamp=current_time,
-                actor_id=UserRole.SYSTEM,
-                actor_role=UserRole.SYSTEM,
-                action_type=AuditActionType.VISITOR_PASS_EXPIRED,
-                target_id=cid,
-                event_payload={
-                    "credential_id": cid,
-                    "expires_at": Logging.format_timestamp(expires_at_dt),
-                    "total_valid_duration_seconds": (
-                        expires_at_dt - created_at_dt
-                    ).total_seconds(),
-                    "final_status": CredentialStatus.EXPIRED.value,
-                },
+                [
+                    AuditEntry(
+                        timestamp=current_time,
+                        actor_id=UserRole.SYSTEM,
+                        actor_role=UserRole.SYSTEM,
+                        action_type=AuditActionType.VISITOR_PASS_EXPIRED,
+                        target_id=cid,
+                        event_payload={
+                            "credential_id": cid,
+                            "expires_at": Logging.format_timestamp(expires_at_dt),
+                            "total_valid_duration_seconds": (
+                                expires_at_dt - created_at_dt
+                            ).total_seconds(),
+                            "final_status": CredentialStatus.EXPIRED.value,
+                        },
+                    )
+                ],
                 db_pool=db_pool,
             )
 
@@ -319,17 +331,21 @@ async def apply_credential_transitions(
             rec["revoked_at"] = current_time
             rec["updated_at"] = current_time
             await Logging.write_audit(
-                timestamp=current_time,
-                actor_id=UserRole.SYSTEM,
-                actor_role=UserRole.SYSTEM,
-                action_type=AuditActionType.CREDENTIAL_REVOKED,
-                target_id=cid,
-                event_payload={
-                    "credential_id": cid,
-                    "trigger": "WINDOW_EXPIRED",
-                    "suspension_start": Logging.format_timestamp(suspension_start_dt),
-                    "revoked_at": Logging.format_timestamp(current_time),
-                },
+                [
+                    AuditEntry(
+                        timestamp=current_time,
+                        actor_id=UserRole.SYSTEM,
+                        actor_role=UserRole.SYSTEM,
+                        action_type=AuditActionType.CREDENTIAL_REVOKED,
+                        target_id=cid,
+                        event_payload={
+                            "credential_id": cid,
+                            "trigger": "WINDOW_EXPIRED",
+                            "suspension_start": Logging.format_timestamp(suspension_start_dt),
+                            "revoked_at": Logging.format_timestamp(current_time),
+                        },
+                    )
+                ],
                 db_pool=db_pool,
             )
 

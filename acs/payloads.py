@@ -5,6 +5,7 @@ from datetime import datetime
 from typing import Any, Optional
 
 from acs.enums import (
+    AuditActionType,
     AuthorizationOutcome,
     CredentialAction,
     DashboardOperationType,
@@ -182,4 +183,16 @@ class IntegrityCheckResult:
     total_records_inspected: int
     mismatch_index: Optional[int] = None
     reason: Optional[str] = None
+
+
+@dataclass
+class AuditEntry:
+    """Single audit event record to be persisted in `audit_log_chain`."""
+
+    timestamp: datetime
+    actor_id: str
+    actor_role: str
+    action_type: AuditActionType | str
+    target_id: str
+    event_payload: dict[str, Any] | str
 

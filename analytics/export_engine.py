@@ -7,6 +7,7 @@ import json
 from typing import Any, Literal, Optional
 
 from acs.logs import AuditActionType, Logging
+from acs.payloads import AuditEntry
 from analytics.helpers import normalize_timestamp
 from analytics.metrics import Metrics
 from analytics.reports import ExportPayload
@@ -218,22 +219,26 @@ class ExportEngine:
         # Emit REPORT_EXPORTED audit event when an admin actor is supplied (ANA-5.9, VT-29)
         if admin_id is not None:
             await Logging.write_audit(
-                timestamp=gen_time,
-                actor_id=admin_id,
-                actor_role=admin_role,
-                action_type=AuditActionType.REPORT_EXPORTED,
-                target_id=run_id,
-                event_payload={
-                    "run_id": run_id,
-                    "report_type": "PERFORMANCE_AND_AUDIT",
-                    "export_format": fmt_upper,
-                    "row_count": record_count,
-                    "include_per_request": include_per_request,
-                    "date_range": {
-                        "start_time": st.isoformat(),
-                        "end_time": et.isoformat(),
-                    },
-                },
+                [
+                    AuditEntry(
+                        timestamp=gen_time,
+                        actor_id=admin_id,
+                        actor_role=admin_role,
+                        action_type=AuditActionType.REPORT_EXPORTED,
+                        target_id=run_id,
+                        event_payload={
+                            "run_id": run_id,
+                            "report_type": "PERFORMANCE_AND_AUDIT",
+                            "export_format": fmt_upper,
+                            "row_count": record_count,
+                            "include_per_request": include_per_request,
+                            "date_range": {
+                                "start_time": st.isoformat(),
+                                "end_time": et.isoformat(),
+                            },
+                        },
+                    )
+                ],
                 db_pool=db_pool,
             )
 

@@ -6,8 +6,8 @@ import json
 
 from acs.enums import DenialReason
 from db import DbConnectionPool
-from simulation.clock import MORNING_PEAK_BASE_TIME, SimulationClock
-from tests.conftest import api_test_session, bearer, login_dashboard, seed_user_row
+from simulation.clock import MORNING_PEAK_BASE_TIME
+from tests.conftest import advance_clock, api_test_session, bearer, login_dashboard, seed_user_row
 
 
 async def _seed_trips_downtime_and_heartbeats() -> None:
@@ -89,10 +89,10 @@ def test_analytics_role_gates_and_fleet_travel_security_kpis() -> None:
             tech_token = await login_dashboard(client, "TECH-HENRY-01")
 
             await _seed_trips_downtime_and_heartbeats()
-            SimulationClock.advance(180)  # 07:03:00
+            clock_snap = await advance_clock(client, admin_token, 180)  # 07:03:00
 
             start = MORNING_PEAK_BASE_TIME.isoformat()
-            end = SimulationClock.now().isoformat()
+            end = clock_snap["current_sim_time"]
 
             # Technician denied VIEW_ANALYTICS and EXPORT_ANALYTICS_REPORTS -> 403 UNAUTHORIZED_ROLE
             tech_wait = await client.get(
@@ -166,10 +166,10 @@ def test_analytics_wait_times_and_export() -> None:
             admin_token = await login_dashboard(client, "ADMIN-CARD-0001")
             await _seed_trips_downtime_and_heartbeats()
             await _seed_hall_calls_with_traffic_profile()
-            SimulationClock.advance(180)  # 07:03:00
+            clock_snap = await advance_clock(client, admin_token, 180)  # 07:03:00
 
             start = MORNING_PEAK_BASE_TIME.isoformat()
-            end = SimulationClock.now().isoformat()
+            end = clock_snap["current_sim_time"]
 
             wait_resp = await client.get(
                 "/api/v1/analytics/wait-times",
@@ -196,7 +196,7 @@ def test_analytics_wait_times_and_export() -> None:
             assert json_export.status_code == 200
             j_body = json_export.json()
             assert j_body["export_format"] == "JSON"
-            assert j_body["generated_at"] == SimulationClock.now().isoformat()
+            assert j_body["generated_at"] == end
             assert j_body["record_count"] == 2
             parsed_content = json.loads(j_body["content"])
             assert parsed_content["run_id"] == "peak-run-01"

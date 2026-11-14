@@ -20,6 +20,7 @@ from acs.helpers import (
 )
 from acs.logs import Logging
 from acs.payloads import (
+    AuditEntry,
     AuthorizationResult,
     CardSwipePayload,
     DashboardOperationPayload,
@@ -80,16 +81,20 @@ class DashboardAccessControl:
                 user_role = record["user_role"]
                 if user_role not in (UserRole.ADMIN, UserRole.TECHNICIAN):
                     await Logging.write_audit(
-                        timestamp=ts,
-                        actor_id=payload.credential_id,
-                        actor_role=user_role,
-                        action_type=AuditActionType.ACCESS_DENIAL,
-                        target_id="DASHBOARD",
-                        event_payload={
-                            "denial_reason": DenialReason.DASHBOARD_ACCESS_DENIED.value,
-                            "role": user_role,
-                            "is_dashboard_access": True,
-                        },
+                        [
+                            AuditEntry(
+                                timestamp=ts,
+                                actor_id=payload.credential_id,
+                                actor_role=user_role,
+                                action_type=AuditActionType.ACCESS_DENIAL,
+                                target_id="DASHBOARD",
+                                event_payload={
+                                    "denial_reason": DenialReason.DASHBOARD_ACCESS_DENIED.value,
+                                    "role": user_role,
+                                    "is_dashboard_access": True,
+                                },
+                            )
+                        ],
                         db_pool=db_pool,
                     )
                     return AuthorizationResult.deny(
@@ -112,16 +117,20 @@ class DashboardAccessControl:
                     "expires_at": expires_at,
                 }
                 await Logging.write_audit(
-                    timestamp=ts,
-                    actor_id=payload.credential_id,
-                    actor_role=user_role,
-                    action_type=AuditActionType.ADMIN_LOGIN,
-                    target_id="DASHBOARD",
-                    event_payload={
-                        "session_token": session_token,
-                        "credential_id": payload.credential_id,
-                        "role": user_role,
-                    },
+                    [
+                        AuditEntry(
+                            timestamp=ts,
+                            actor_id=payload.credential_id,
+                            actor_role=user_role,
+                            action_type=AuditActionType.ADMIN_LOGIN,
+                            target_id="DASHBOARD",
+                            event_payload={
+                                "session_token": session_token,
+                                "credential_id": payload.credential_id,
+                                "role": user_role,
+                            },
+                        )
+                    ],
                     db_pool=db_pool,
                 )
                 return AuthorizationResult.allow(
@@ -217,15 +226,19 @@ class DashboardAccessControl:
             del DashboardAccessControl.active_dashboard_sessions[payload.session_token]
             try:
                 await Logging.write_audit(
-                    timestamp=ts,
-                    actor_id=session["credential_id"],
-                    actor_role=session["role"],
-                    action_type=AuditActionType.ADMIN_LOGOUT,
-                    target_id="DASHBOARD",
-                    event_payload={
-                        "reason": "TIMEOUT",
-                        "session_token": payload.session_token,
-                    },
+                    [
+                        AuditEntry(
+                            timestamp=ts,
+                            actor_id=session["credential_id"],
+                            actor_role=session["role"],
+                            action_type=AuditActionType.ADMIN_LOGOUT,
+                            target_id="DASHBOARD",
+                            event_payload={
+                                "reason": "TIMEOUT",
+                                "session_token": payload.session_token,
+                            },
+                        )
+                    ],
                     db_pool=db_pool,
                 )
             except Exception:
@@ -246,17 +259,21 @@ class DashboardAccessControl:
         if not DASHBOARD_PERMISSIONS.get(user_role, {}).get(op_enum, False):
             try:
                 await Logging.write_audit(
-                    timestamp=ts,
-                    actor_id=session["credential_id"],
-                    actor_role=user_role,
-                    action_type=AuditActionType.UNAUTHORIZED_CMD_REJECTED,
-                    target_id="DASHBOARD",
-                    event_payload={
-                        "attempted_operation": op_enum.value,
-                        "role": user_role,
-                        "reason": "MISSING_REQUIRED_ROLE",
-                        "session_token": payload.session_token,
-                    },
+                    [
+                        AuditEntry(
+                            timestamp=ts,
+                            actor_id=session["credential_id"],
+                            actor_role=user_role,
+                            action_type=AuditActionType.UNAUTHORIZED_CMD_REJECTED,
+                            target_id="DASHBOARD",
+                            event_payload={
+                                "attempted_operation": op_enum.value,
+                                "role": user_role,
+                                "reason": "MISSING_REQUIRED_ROLE",
+                                "session_token": payload.session_token,
+                            },
+                        )
+                    ],
                     db_pool=db_pool,
                 )
             except Exception:
@@ -299,15 +316,19 @@ class DashboardAccessControl:
 
         try:
             await Logging.write_audit(
-                timestamp=ts,
-                actor_id=session["credential_id"],
-                actor_role=session["role"],
-                action_type=AuditActionType.ADMIN_LOGOUT,
-                target_id="DASHBOARD",
-                event_payload={
-                    "reason": "MANUAL",
-                    "session_token": session_token,
-                },
+                [
+                    AuditEntry(
+                        timestamp=ts,
+                        actor_id=session["credential_id"],
+                        actor_role=session["role"],
+                        action_type=AuditActionType.ADMIN_LOGOUT,
+                        target_id="DASHBOARD",
+                        event_payload={
+                            "reason": "MANUAL",
+                            "session_token": session_token,
+                        },
+                    )
+                ],
                 db_pool=db_pool,
             )
         except Exception:

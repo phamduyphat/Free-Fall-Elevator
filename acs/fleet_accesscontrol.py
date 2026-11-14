@@ -15,6 +15,7 @@ from acs.helpers import (
 )
 from acs.logs import Logging
 from acs.payloads import (
+    AuditEntry,
     AuthorizationResult,
     EmergencyOverridePayload,
     MaintenanceOperationPayload,
@@ -73,15 +74,19 @@ class FleetAccessControl:
                 role = record["user_role"]
 
                 await Logging.write_audit(
-                    timestamp=ts,
-                    actor_id=payload.credential_id,
-                    actor_role=role,
-                    action_type=AuditActionType.MAINTENANCE_ENTER,
-                    target_id=str(payload.elevator_id),
-                    event_payload={
-                        "elevator_id": str(payload.elevator_id),
-                        "operation_type": str(payload.operation_type),
-                    },
+                    [
+                        AuditEntry(
+                            timestamp=ts,
+                            actor_id=payload.credential_id,
+                            actor_role=role,
+                            action_type=AuditActionType.MAINTENANCE_ENTER,
+                            target_id=str(payload.elevator_id),
+                            event_payload={
+                                "elevator_id": str(payload.elevator_id),
+                                "operation_type": str(payload.operation_type),
+                            },
+                        )
+                    ],
                     db_pool=db_pool,
                 )
                 return AuthorizationResult.allow(
@@ -139,15 +144,19 @@ class FleetAccessControl:
                     )
 
                 await Logging.write_audit(
-                    timestamp=ts,
-                    actor_id=payload.credential_id,
-                    actor_role=role,
-                    action_type=AuditActionType.RETURN_TO_SERVICE,
-                    target_id=str(payload.elevator_id),
-                    event_payload={
-                        "elevator_id": str(payload.elevator_id),
-                        "technician_confirmation": payload.technician_confirmation,
-                    },
+                    [
+                        AuditEntry(
+                            timestamp=ts,
+                            actor_id=payload.credential_id,
+                            actor_role=role,
+                            action_type=AuditActionType.RETURN_TO_SERVICE,
+                            target_id=str(payload.elevator_id),
+                            event_payload={
+                                "elevator_id": str(payload.elevator_id),
+                                "technician_confirmation": payload.technician_confirmation,
+                            },
+                        )
+                    ],
                     db_pool=db_pool,
                 )
                 return AuthorizationResult.allow(
@@ -200,19 +209,23 @@ class FleetAccessControl:
                     else AuditActionType.EMERGENCY_OVERRIDE
                 )
                 await Logging.write_audit(
-                    timestamp=ts,
-                    actor_id=payload.credential_id,
-                    actor_role=role,
-                    action_type=audit_action,
-                    target_id=target_entity,
-                    event_payload={
-                        "override_type": str(payload.override_type),
-                        "target_car_id": (
-                            str(payload.target_car_id) if payload.target_car_id else None
-                        ),
-                        "incident_id": payload.incident_id,
-                        "reason": payload.reason,
-                    },
+                    [
+                        AuditEntry(
+                            timestamp=ts,
+                            actor_id=payload.credential_id,
+                            actor_role=role,
+                            action_type=audit_action,
+                            target_id=target_entity,
+                            event_payload={
+                                "override_type": str(payload.override_type),
+                                "target_car_id": (
+                                    str(payload.target_car_id) if payload.target_car_id else None
+                                ),
+                                "incident_id": payload.incident_id,
+                                "reason": payload.reason,
+                            },
+                        )
+                    ],
                     db_pool=db_pool,
                 )
                 return AuthorizationResult.allow(
@@ -256,17 +269,21 @@ class FleetAccessControl:
 
                 if not ElevatorId.is_residential(payload.rescue_car_id):
                     await Logging.write_audit(
-                        timestamp=ts,
-                        actor_id=payload.credential_id,
-                        actor_role=role,
-                        action_type=AuditActionType.COMMAND_CONFLICT_REJECTED,
-                        target_id=str(payload.rescue_car_id),
-                        event_payload={
-                            "attempted_command": AuditActionType.RESCUE_CAR_DISPATCHED.value,
-                            "rescue_car_id": str(payload.rescue_car_id),
-                            "incident_id": payload.incident_id,
-                            "conflict_reason": "E5_INELIGIBLE_AS_RESCUE_CAR",
-                        },
+                        [
+                            AuditEntry(
+                                timestamp=ts,
+                                actor_id=payload.credential_id,
+                                actor_role=role,
+                                action_type=AuditActionType.COMMAND_CONFLICT_REJECTED,
+                                target_id=str(payload.rescue_car_id),
+                                event_payload={
+                                    "attempted_command": AuditActionType.RESCUE_CAR_DISPATCHED.value,
+                                    "rescue_car_id": str(payload.rescue_car_id),
+                                    "incident_id": payload.incident_id,
+                                    "conflict_reason": "E5_INELIGIBLE_AS_RESCUE_CAR",
+                                },
+                            )
+                        ],
                         db_pool=db_pool,
                     )
                     return AuthorizationResult.deny(
@@ -283,17 +300,21 @@ class FleetAccessControl:
                     )
 
                 await Logging.write_audit(
-                    timestamp=ts,
-                    actor_id=payload.credential_id,
-                    actor_role=role,
-                    action_type=AuditActionType.RESCUE_CAR_DISPATCHED,
-                    target_id=str(payload.rescue_car_id),
-                    event_payload={
-                        "rescue_car_id": str(payload.rescue_car_id),
-                        "incident_id": payload.incident_id,
-                        "incident_floor": payload.incident_floor,
-                        "dwell_wait_seconds": payload.dwell_wait_seconds,
-                    },
+                    [
+                        AuditEntry(
+                            timestamp=ts,
+                            actor_id=payload.credential_id,
+                            actor_role=role,
+                            action_type=AuditActionType.RESCUE_CAR_DISPATCHED,
+                            target_id=str(payload.rescue_car_id),
+                            event_payload={
+                                "rescue_car_id": str(payload.rescue_car_id),
+                                "incident_id": payload.incident_id,
+                                "incident_floor": payload.incident_floor,
+                                "dwell_wait_seconds": payload.dwell_wait_seconds,
+                            },
+                        )
+                    ],
                     db_pool=db_pool,
                 )
                 return AuthorizationResult.allow(

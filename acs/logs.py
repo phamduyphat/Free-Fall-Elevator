@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import hashlib
 import json
-from typing import Any, Optional
+from typing import Any, Optional, Sequence
 import uuid
 
 import asyncpg
@@ -17,7 +17,7 @@ from acs.enums import (
     DenialReason,
     UserRole,
 )
-from acs.payloads import IntegrityCheckResult
+from acs.payloads import AuditEntry, IntegrityCheckResult
 from db import DbConnectionPool
 
 
@@ -78,16 +78,19 @@ class Logging:
         return hashlib.sha256(preimage.encode("utf-8")).hexdigest()
 
     @staticmethod
-    async def _write_audit_with_conn(
-        conn: asyncpg.Connection,
+    async def write_audit(
+        entries: Sequence[AuditEntry],
         *,
-        normalized_ts: datetime,
-        actor_id: str,
-        actor_role_str: str,
-        action_type_str: str,
-        target_id: str,
-        canonical_payload: str,
-    ) -> dict[str, Any]:
+        db_pool: type[DbConnectionPool] = DbConnectionPool,
+        conn: Optional[asyncpg.Connection] = None,
+    ) -> list[dict[str, Any]]:
+        """Append tamper-evident records to `audit_log_chain`."""
+        if not entries:
+            return []
+        if conn is None:
+            async with db_pool.acquire() as acquired_conn:
+                return await Logging.write_audit(entries, conn=acquired_conn)
+
         last_row = await conn.fetchrow(
             """
             SELECT log_index, current_hash
@@ -104,92 +107,65 @@ class Logging:
             next_index = int(last_row["log_index"]) + 1
             prev_hash = str(last_row["current_hash"])
 
-        current_hash = Logging.compute_audit_hash(
-            log_index=next_index,
-            timestamp=normalized_ts,
-            actor_id=actor_id,
-            action_type=action_type_str,
-            canonical_payload=canonical_payload,
-            prev_hash=prev_hash,
-        )
+        results: list[dict[str, Any]] = []
+        for entry in entries:
+            normalized_ts = Logging.normalize_timestamp(entry.timestamp)
+            canonical_payload = Logging.canonicalize_payload(entry.event_payload)
+            action_type_str = str(entry.action_type)
+            actor_role_str = str(entry.actor_role)
 
-        await conn.execute(
-            """
-            INSERT INTO audit_log_chain (
-                log_index,
-                timestamp,
-                actor_id,
-                actor_role,
-                action_type,
-                target_id,
-                event_payload,
+            current_hash = Logging.compute_audit_hash(
+                log_index=next_index,
+                timestamp=normalized_ts,
+                actor_id=entry.actor_id,
+                action_type=action_type_str,
+                canonical_payload=canonical_payload,
+                prev_hash=prev_hash,
+            )
+
+            await conn.execute(
+                """
+                INSERT INTO audit_log_chain (
+                    log_index,
+                    timestamp,
+                    actor_id,
+                    actor_role,
+                    action_type,
+                    target_id,
+                    event_payload,
+                    prev_hash,
+                    current_hash
+                )
+                VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9)
+                """,
+                next_index,
+                normalized_ts,
+                entry.actor_id,
+                actor_role_str,
+                action_type_str,
+                entry.target_id,
+                canonical_payload,
                 prev_hash,
-                current_hash
-            )
-            VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9)
-            """,
-            next_index,
-            normalized_ts,
-            actor_id,
-            actor_role_str,
-            action_type_str,
-            target_id,
-            canonical_payload,
-            prev_hash,
-            current_hash,
-        )
-
-        return {
-            "log_index": next_index,
-            "timestamp": normalized_ts,
-            "actor_id": actor_id,
-            "actor_role": actor_role_str,
-            "action_type": action_type_str,
-            "target_id": target_id,
-            "event_payload": json.loads(canonical_payload),
-            "prev_hash": prev_hash,
-            "current_hash": current_hash,
-        }
-
-    @staticmethod
-    async def write_audit(
-        *,
-        timestamp: datetime,
-        actor_id: str,
-        actor_role: str,
-        action_type: AuditActionType | str,
-        target_id: str,
-        event_payload: dict[str, Any] | str,
-        db_pool: type[DbConnectionPool] = DbConnectionPool,
-        conn: Optional[asyncpg.Connection] = None,
-    ) -> dict[str, Any]:
-        """Append a tamper-evident record to `audit_log_chain`."""
-        normalized_ts = Logging.normalize_timestamp(timestamp)
-        canonical_payload = Logging.canonicalize_payload(event_payload)
-        action_type_str = str(action_type)
-        actor_role_str = str(actor_role)
-
-        if conn is not None:
-            return await Logging._write_audit_with_conn(
-                conn,
-                normalized_ts=normalized_ts,
-                actor_id=actor_id,
-                actor_role_str=actor_role_str,
-                action_type_str=action_type_str,
-                target_id=target_id,
-                canonical_payload=canonical_payload,
+                current_hash,
             )
 
-        async with db_pool.acquire() as acquired_conn:
-            return await Logging._write_audit_with_conn(
-                acquired_conn,
-                normalized_ts=normalized_ts,
-                actor_id=actor_id,
-                actor_role_str=actor_role_str,
-                action_type_str=action_type_str,
-                target_id=target_id,
-                canonical_payload=canonical_payload,
+            results.append(
+                {
+                    "log_index": next_index,
+                    "timestamp": normalized_ts,
+                    "actor_id": entry.actor_id,
+                    "actor_role": actor_role_str,
+                    "action_type": action_type_str,
+                    "target_id": entry.target_id,
+                    "event_payload": json.loads(canonical_payload),
+                    "prev_hash": prev_hash,
+                    "current_hash": current_hash,
+                }
             )
+            next_index += 1
+            prev_hash = current_hash
+
+        return results
 
     @staticmethod
     async def log_authorization_event(
@@ -339,12 +315,16 @@ class Logging:
             )
 
         await Logging.write_audit(
-            timestamp=timestamp,
-            actor_id=credential_id or UserRole.SYSTEM,
-            actor_role=actor_role,
-            action_type=action_type,
-            target_id=target_id,
-            event_payload=event_payload,
+            [
+                AuditEntry(
+                    timestamp=timestamp,
+                    actor_id=credential_id or UserRole.SYSTEM,
+                    actor_role=actor_role,
+                    action_type=action_type,
+                    target_id=target_id,
+                    event_payload=event_payload,
+                )
+            ],
             db_pool=db_pool,
         )
 
@@ -472,16 +452,20 @@ class Logging:
 
         if admin_credential_id is not None and check_result.passed:
             await Logging.write_audit(
-                timestamp=timestamp or datetime.now(),
-                actor_id=admin_credential_id,
-                actor_role=admin_role,
-                action_type=AuditActionType.INTEGRITY_CHECK_RUN,
-                target_id="audit_log_chain",
-                event_payload={
-                    "total_records_inspected": check_result.total_records_inspected,
-                    "result": "PASS",
-                    "mismatch_index": None,
-                },
+                [
+                    AuditEntry(
+                        timestamp=timestamp or datetime.now(),
+                        actor_id=admin_credential_id,
+                        actor_role=admin_role,
+                        action_type=AuditActionType.INTEGRITY_CHECK_RUN,
+                        target_id="audit_log_chain",
+                        event_payload={
+                            "total_records_inspected": check_result.total_records_inspected,
+                            "result": "PASS",
+                            "mismatch_index": None,
+                        },
+                    )
+                ],
                 db_pool=db_pool,
             )
 

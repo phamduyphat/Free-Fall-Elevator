@@ -26,6 +26,7 @@ from acs.helpers import (
 )
 from acs.logs import Logging
 from acs.payloads import (
+    AuditEntry,
     AuthorizationResult,
     CredentialManagementPayload,
     RevokeAndReissuePayload,
@@ -59,15 +60,19 @@ class CredentialAccessControl:
             or admin_user_id == target_record["user_id"]
         ):
             await Logging.write_audit(
-                timestamp=timestamp,
-                actor_id=admin_credential_id,
-                actor_role=admin_role,
-                action_type=AuditActionType.UNAUTHORIZED_CMD_REJECTED,
-                target_id=target_record["credential_id"],
-                event_payload={
-                    "attempted_operation": operation,
-                    "reason": DenialReason.PEER_ADMIN_REQUIRED.value,
-                },
+                [
+                    AuditEntry(
+                        timestamp=timestamp,
+                        actor_id=admin_credential_id,
+                        actor_role=admin_role,
+                        action_type=AuditActionType.UNAUTHORIZED_CMD_REJECTED,
+                        target_id=target_record["credential_id"],
+                        event_payload={
+                            "attempted_operation": operation,
+                            "reason": DenialReason.PEER_ADMIN_REQUIRED.value,
+                        },
+                    )
+                ],
                 db_pool=db_pool,
             )
             return AuthorizationResult.deny(
@@ -210,20 +215,26 @@ class CredentialAccessControl:
             else AuditActionType.CREDENTIAL_ISSUED
         )
         await Logging.write_audit(
-            timestamp=ts,
-            actor_id=payload.admin_credential_id,
-            actor_role=admin_record["user_role"],
-            action_type=audit_type,
-            target_id=payload.target_credential_id,
-            event_payload={
-                "user_id": target_user_id,
-                "credential_id": payload.target_credential_id,
-                "role": target_role,
-                "allowed_floors": allowed_floors,
-                "expires_at": (
-                    Logging.format_timestamp(expires_at) if expires_at is not None else None
-                ),
-            },
+            [
+                AuditEntry(
+                    timestamp=ts,
+                    actor_id=payload.admin_credential_id,
+                    actor_role=admin_record["user_role"],
+                    action_type=audit_type,
+                    target_id=payload.target_credential_id,
+                    event_payload={
+                        "user_id": target_user_id,
+                        "credential_id": payload.target_credential_id,
+                        "role": target_role,
+                        "allowed_floors": allowed_floors,
+                        "expires_at": (
+                            Logging.format_timestamp(expires_at)
+                            if expires_at is not None
+                            else None
+                        ),
+                    },
+                )
+            ],
             db_pool=db_pool,
         )
         return AuthorizationResult.allow(
@@ -309,12 +320,16 @@ class CredentialAccessControl:
 
         await conn.execute(sql, *sql_args)
         await Logging.write_audit(
-            timestamp=ts,
-            actor_id=admin_id,
-            actor_role=admin_role,
-            action_type=audit_action,
-            target_id=target_id,
-            event_payload=audit_payload,
+            [
+                AuditEntry(
+                    timestamp=ts,
+                    actor_id=admin_id,
+                    actor_role=admin_role,
+                    action_type=audit_action,
+                    target_id=target_id,
+                    event_payload=audit_payload,
+                )
+            ],
             db_pool=db_pool,
         )
         return AuthorizationResult.allow(message=ok_msg, credential_id=target_id)
@@ -469,18 +484,22 @@ class CredentialAccessControl:
                     ts=ts,
                 )
                 await Logging.write_audit(
-                    timestamp=ts,
-                    actor_id=payload.admin_credential_id,
-                    actor_role=admin_role,
-                    action_type=AuditActionType.CREDENTIAL_REPLACED,
-                    target_id=payload.replacement_credential_id,
-                    event_payload={
-                        "lost_credential_id": payload.lost_credential_id,
-                        "replacement_credential_id": payload.replacement_credential_id,
-                        "user_id": lost_record["user_id"],
-                        "role": lost_record["user_role"],
-                        "assigned_floors": allowed_floors,
-                    },
+                    [
+                        AuditEntry(
+                            timestamp=ts,
+                            actor_id=payload.admin_credential_id,
+                            actor_role=admin_role,
+                            action_type=AuditActionType.CREDENTIAL_REPLACED,
+                            target_id=payload.replacement_credential_id,
+                            event_payload={
+                                "lost_credential_id": payload.lost_credential_id,
+                                "replacement_credential_id": payload.replacement_credential_id,
+                                "user_id": lost_record["user_id"],
+                                "role": lost_record["user_role"],
+                                "assigned_floors": allowed_floors,
+                            },
+                        )
+                    ],
                     db_pool=db_pool,
                 )
                 return AuthorizationResult.allow(
@@ -546,26 +565,30 @@ class CredentialAccessControl:
                         ts,
                         *expired_ids,
                     )
+                    audit_entries: list[AuditEntry] = []
                     for row in expired_rows:
                         cid = str(row["credential_id"])
                         expires_at_dt = Logging.normalize_timestamp(row["expires_at"])
                         created_at_dt = Logging.normalize_timestamp(row["created_at"])
-                        await Logging.write_audit(
-                            timestamp=ts,
-                            actor_id=UserRole.SYSTEM,
-                            actor_role=UserRole.SYSTEM,
-                            action_type=AuditActionType.VISITOR_PASS_EXPIRED,
-                            target_id=cid,
-                            event_payload={
-                                "credential_id": cid,
-                                "expires_at": Logging.format_timestamp(expires_at_dt),
-                                "total_valid_duration_seconds": (
-                                    expires_at_dt - created_at_dt
-                                ).total_seconds(),
-                                "final_status": CredentialStatus.EXPIRED.value,
-                            },
-                            conn=active_conn,
+                        audit_entries.append(
+                            AuditEntry(
+                                timestamp=ts,
+                                actor_id=UserRole.SYSTEM,
+                                actor_role=UserRole.SYSTEM,
+                                action_type=AuditActionType.VISITOR_PASS_EXPIRED,
+                                target_id=cid,
+                                event_payload={
+                                    "credential_id": cid,
+                                    "expires_at": Logging.format_timestamp(expires_at_dt),
+                                    "total_valid_duration_seconds": (
+                                        expires_at_dt - created_at_dt
+                                    ).total_seconds(),
+                                    "final_status": CredentialStatus.EXPIRED.value,
+                                },
+                            )
                         )
+                else:
+                    audit_entries = []
 
                 revoked_rows = await active_conn.fetch(
                     """
@@ -606,23 +629,25 @@ class CredentialAccessControl:
                         suspension_start_dt = Logging.normalize_timestamp(
                             row["suspension_start"]
                         )
-                        await Logging.write_audit(
-                            timestamp=ts,
-                            actor_id=UserRole.SYSTEM,
-                            actor_role=UserRole.SYSTEM,
-                            action_type=AuditActionType.CREDENTIAL_REVOKED,
-                            target_id=cid,
-                            event_payload={
-                                "credential_id": cid,
-                                "trigger": "WINDOW_EXPIRED",
-                                "suspension_start": Logging.format_timestamp(
-                                    suspension_start_dt
-                                ),
-                                "revoked_at": Logging.format_timestamp(ts),
-                            },
-                            conn=active_conn,
+                        audit_entries.append(
+                            AuditEntry(
+                                timestamp=ts,
+                                actor_id=UserRole.SYSTEM,
+                                actor_role=UserRole.SYSTEM,
+                                action_type=AuditActionType.CREDENTIAL_REVOKED,
+                                target_id=cid,
+                                event_payload={
+                                    "credential_id": cid,
+                                    "trigger": "WINDOW_EXPIRED",
+                                    "suspension_start": Logging.format_timestamp(
+                                        suspension_start_dt
+                                    ),
+                                    "revoked_at": Logging.format_timestamp(ts),
+                                },
+                            )
                         )
 
+                await Logging.write_audit(audit_entries, conn=active_conn)
                 return {"expired": expired_ids, "revoked": revoked_ids}
 
         if conn is not None:

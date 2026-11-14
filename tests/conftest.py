@@ -194,3 +194,14 @@ def bearer(token: str) -> dict[str, str]:
     """Build an Authorization Bearer header dictionary."""
     return {"Authorization": f"Bearer {token}"}
 
+
+async def advance_clock(client: AsgiClient, admin_token: str, steps: int = 1) -> dict[str, Any]:
+    """Advance the simulation clock via `POST /api/v1/system/clock/tick`."""
+    resp = await client.post(
+        "/api/v1/system/clock/tick",
+        headers=bearer(admin_token),
+        json_body={"steps": steps},
+    )
+    assert resp.status_code == 200, resp.text
+    return resp.json()
+
