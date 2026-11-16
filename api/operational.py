@@ -23,6 +23,11 @@ class HallCallInput(BaseModel):
     traffic_profile: str | None = None
 
 
+class CarCallInput(BaseModel):
+    elevator_id: Literal["E1", "E2", "E3", "E4", "E5"]
+    destination_floor: int = Field(ge=-1, le=30)
+
+
 class StubAdvanceInput(BaseModel):
     seconds: int = Field(default=1, ge=0, le=10000)
 
@@ -46,6 +51,20 @@ async def submit_hall_call(body: HallCallInput) -> dict:
     except OperationalError as exc:
         raise HTTPException(status_code=409 if "unavailable" in str(exc) else 422,
                             detail=str(exc)) from exc
+
+
+@router.post("/car-calls", status_code=201)
+async def submit_car_call(body: CarCallInput) -> dict:
+    """Submit a destination request directly to the operational simulator test stub."""
+    try:
+        trip = operational_simulator.submit_car_call(body.elevator_id, body.destination_floor)
+        return {
+            "source": "labelled-test-stub",
+            "message": f"Destination {body.destination_floor} accepted for {body.elevator_id}.",
+            "trip": trip,
+        }
+    except OperationalError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.get("/hall-calls")

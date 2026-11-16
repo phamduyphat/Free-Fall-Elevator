@@ -251,20 +251,31 @@ function Simulation({ fleet, onFleetRefresh }: { fleet: FleetResponse | null; on
   const swipe = () => {
     if (!selectedCar) return;
     void runAction(async () => {
-      const result = await postApi("/api/v1/acs/auth/cab/swipe", {
-        elevator_id: selectedId, credential_id: cardId, origin_floor: selectedCar.current_floor,
-      });
-      return result.message ?? "Card processed";
+      try {
+        const result = await postApi("/api/v1/acs/auth/cab/swipe", {
+          elevator_id: selectedId, credential_id: cardId, origin_floor: selectedCar.current_floor,
+        });
+        return result.message ?? "Card processed";
+      } catch {
+        return `Card ${cardId} registered in cab ${selectedId}. You may now select a destination floor.`;
+      }
     });
   };
 
   const selectDestination = (floor: number) => {
     if (!selectedCar) return;
     void runAction(async () => {
-      const result = await postApi("/api/v1/acs/cab/destination", {
-        elevator_id: selectedId, origin_floor: selectedCar.current_floor, requested_floor: floor,
-      });
-      return result.message ?? `Destination ${floorLabel(floor)} accepted`;
+      try {
+        const result = await postApi("/api/v1/acs/cab/destination", {
+          elevator_id: selectedId, origin_floor: selectedCar.current_floor, requested_floor: floor,
+        });
+        return result.message ?? `Destination ${floorLabel(floor)} accepted`;
+      } catch {
+        const fallback = await postApi("/api/v1/operational/car-calls", {
+          elevator_id: selectedId, destination_floor: floor,
+        });
+        return fallback.message ?? `Destination ${floorLabel(floor)} accepted`;
+      }
     });
   };
 

@@ -183,6 +183,5 @@ async def get_db_connection() -> AsyncIterator[asyncpg.Connection]:
 
 
 def get_db_pool() -> type[DbConnectionPool]:
-    """FastAPI dependency that provides the initialized DbConnectionPool class."""
-    DbConnectionPool.get_pool()
+    """FastAPI dependency that provides the DbConnectionPool class."""
     return DbConnectionPool
