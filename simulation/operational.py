@@ -145,6 +145,9 @@ class OperationalSimulator:
             self.sim_tick = 0
             self.base_time = base_time if base_time is not None else datetime.now(timezone.utc)
             self._wall_reference = time.monotonic()
+            self._synced_trips_idx = 0
+            self._synced_downtime_idx = 0
+            self._synced_heartbeats_idx = 0
             self.heartbeats.append({"timestamp": self._now(), "status": "UP"})
 
     def _now(self) -> datetime:
@@ -971,6 +974,223 @@ class OperationalSimulator:
                     "active_incidents": len(active_incidents),
                     "fleet_available": sum(self._eligible(c) for c in self.cars.values()),
                     "fleet_count": len(self.cars), "events_count": len(self.events)}
+
+    async def sync_to_db(self, conn: object) -> None:
+        """Asynchronously sync operational state (hall_calls, trips, car_calls, incidents, heartbeats, downtime) to PostgreSQL."""
+        if conn is None:
+            return
+        try:
+            with self._lock:
+                hall_calls_snapshot = list(self.hall_calls.values())
+                car_calls_snapshot = list(self.car_calls.values())
+                trips_to_sync = list(self.trips[self._synced_trips_idx:])
+                incidents_snapshot = list(self.incidents.values())
+                downtime_to_sync = list(self.downtime_intervals[self._synced_downtime_idx:])
+                heartbeats_to_sync = list(self.heartbeats[self._synced_heartbeats_idx:])
+                current_trips_len = len(self.trips)
+                current_downtime_len = len(self.downtime_intervals)
+                current_heartbeats_len = len(self.heartbeats)
+
+            # 1. Hall Calls
+            for r in hall_calls_snapshot:
+                valid_status = r.status if r.status in ('RECEIVED', 'QUEUED', 'ASSIGNED', 'APPROACHING', 'ARRIVED', 'COMPLETED', 'CANCELLED', 'FAILED', 'BLOCKED') else 'QUEUED'
+                await conn.execute(  # type: ignore[union-attr]
+                    """
+                    INSERT INTO hall_calls (
+                        call_id, origin_floor, direction, is_freight, assigned_elevator_id,
+                        status, created_at, assigned_at, approaching_at, arrived_at, completed_at,
+                        wait_time_seconds, reassignments_count, no_boarding, cancellation_reason, traffic_profile
+                    )
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+                    ON CONFLICT (call_id) DO UPDATE SET
+                        status = EXCLUDED.status,
+                        assigned_elevator_id = EXCLUDED.assigned_elevator_id,
+                        arrived_at = EXCLUDED.arrived_at,
+                        completed_at = EXCLUDED.completed_at,
+                        wait_time_seconds = EXCLUDED.wait_time_seconds,
+                        reassignments_count = EXCLUDED.reassignments_count,
+                        no_boarding = EXCLUDED.no_boarding,
+                        cancellation_reason = EXCLUDED.cancellation_reason;
+                    """,
+                    r.request_id,
+                    r.origin_floor,
+                    r.direction or "UP",
+                    r.call_type == "FREIGHT",
+                    r.assigned_car,
+                    valid_status,
+                    r.accepted_at,
+                    r.accepted_at if r.assigned_car else None,
+                    r.arrived_at if r.status in ('APPROACHING', 'ARRIVED', 'COMPLETED') else None,
+                    r.arrived_at,
+                    r.arrived_at if r.status == 'COMPLETED' else None,
+                    r.wait_seconds,
+                    r.reassignment_count,
+                    r.no_boarding,
+                    None,
+                    r.traffic_profile or "NORMAL"
+                )
+
+            # 2. Trips
+            for t in trips_to_sync:
+                await conn.execute(  # type: ignore[union-attr]
+                    """
+                    INSERT INTO trips (
+                        trip_id, elevator_id, origin_floor, destination_floor,
+                        departure_time, arrival_time, travel_time_seconds, floors_traversed,
+                        motor_starts, traffic_profile, is_service_run, is_estimated
+                    )
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                    ON CONFLICT (trip_id) DO NOTHING;
+                    """,
+                    t["trip_id"],
+                    t["elevator_id"],
+                    t["origin_floor"],
+                    t["destination_floor"],
+                    t["departure_time"],
+                    t["arrival_time"],
+                    float(t["travel_time_seconds"]),
+                    t["floors_traversed"],
+                    t.get("motor_starts", 1),
+                    t.get("traffic_profile") or "NORMAL",
+                    t.get("is_service_run", False),
+                    t.get("is_estimated", False),
+                )
+
+            # 3. Car Calls
+            for c in car_calls_snapshot:
+                valid_car_status = c.status if c.status in ('RECEIVED', 'AUTHORIZATION_CHECK', 'QUEUED', 'IN_TRANSIT', 'COMPLETED', 'REJECTED', 'CANCELLED', 'FAILED', 'BLOCKED') else 'QUEUED'
+                await conn.execute(  # type: ignore[union-attr]
+                    """
+                    INSERT INTO car_calls (
+                        call_id, elevator_id, destination_floor, credential_id,
+                        status, created_at, completed_at, travel_time_seconds, is_service_run, cancellation_reason
+                    )
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                    ON CONFLICT (call_id) DO UPDATE SET
+                        status = EXCLUDED.status,
+                        completed_at = EXCLUDED.completed_at,
+                        travel_time_seconds = EXCLUDED.travel_time_seconds;
+                    """,
+                    c.request_id,
+                    c.elevator_id,
+                    c.destination_floor,
+                    None,
+                    valid_car_status,
+                    c.accepted_at,
+                    c.completed_at,
+                    (c.completed_at - c.accepted_at).total_seconds() if c.completed_at else None,
+                    c.is_service_run,
+                    None
+                )
+
+            # 4. Incidents
+            kind_map = {
+                "HELP": "HELP_REQUEST",
+                "MEDICAL": "MEDICAL_EMERGENCY",
+                "STUCK_CAR": "STUCK_CAR",
+                "FIRE": "FIRE",
+                "POWER_FAILURE": "POWER_FAILURE",
+                "DOOR_OBSTRUCTION": "DOOR_OBSTRUCTION",
+                "COMMUNICATION_FAILURE": "COMMUNICATION_FAILURE",
+                "BLOCKING_FAULT": "STUCK_CAR",
+                "REPEATED_EMERGENCY": "REPEATED_EMERGENCY",
+                "REPEATED_EMPTY_CALLS": "REPEATED_EMPTY_CALLS",
+            }
+            severity_map = {
+                "LOW": "LOW",
+                "MEDIUM": "MEDIUM",
+                "HIGH": "HIGH",
+                "CRITICAL": "CRITICAL",
+                "WARNING": "MEDIUM",
+            }
+            status_map = {
+                "OPEN": "OPEN",
+                "ACKNOWLEDGED": "ACKNOWLEDGED",
+                "RESOLVED": "RESOLVED",
+                "CLOSED": "CLOSED",
+            }
+            for inc in incidents_snapshot:
+                await conn.execute(  # type: ignore[union-attr]
+                    """
+                    INSERT INTO incidents (
+                        incident_id, incident_type, elevator_id, floor, status, severity,
+                        details, created_at, acknowledged_at, resolved_at, resolved_by, rescue_car_id
+                    )
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                    ON CONFLICT (incident_id) DO UPDATE SET
+                        status = EXCLUDED.status,
+                        resolved_at = EXCLUDED.resolved_at,
+                        resolved_by = EXCLUDED.resolved_by,
+                        rescue_car_id = EXCLUDED.rescue_car_id;
+                    """,
+                    inc.incident_id,
+                    kind_map.get(inc.kind, "HELP_REQUEST"),
+                    inc.elevator_id,
+                    inc.floor,
+                    status_map.get(inc.status, "OPEN"),
+                    severity_map.get(inc.severity, "LOW"),
+                    inc.details,
+                    inc.created_at,
+                    None,
+                    inc.resolved_at,
+                    inc.resolved_by,
+                    inc.rescue_car_id,
+                )
+
+            # 5. Downtime
+            state_map = {
+                "FAULT": "FAULT",
+                "MAINTENANCE": "MAINTENANCE",
+                "EMERGENCY_UNAVAILABLE": "EMERGENCY_UNAVAILABLE",
+                "STALE": "STALE",
+            }
+            for di in downtime_to_sync:
+                await conn.execute(  # type: ignore[union-attr]
+                    """
+                    INSERT INTO car_downtime_intervals (
+                        interval_id, elevator_id, state, cause, started_at, ended_at,
+                        duration_seconds, is_ongoing, technician_id
+                    )
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                    ON CONFLICT (interval_id) DO UPDATE SET
+                        ended_at = EXCLUDED.ended_at,
+                        duration_seconds = EXCLUDED.duration_seconds,
+                        is_ongoing = EXCLUDED.is_ongoing;
+                    """,
+                    di["interval_id"],
+                    di["elevator_id"],
+                    state_map.get(di["state"], "FAULT"),
+                    di.get("reason"),
+                    di["started_at"],
+                    di.get("ended_at"),
+                    di.get("duration_seconds"),
+                    di.get("ended_at") is None,
+                    di.get("technician_id"),
+                )
+
+            # 6. Heartbeats
+            for hb in heartbeats_to_sync:
+                await conn.execute(  # type: ignore[union-attr]
+                    """
+                    INSERT INTO system_heartbeats (
+                        timestamp, status, active_elevators_count, active_requests_count, active_incidents_count
+                    )
+                    VALUES ($1, $2, $3, $4, $5);
+                    """,
+                    hb["timestamp"],
+                    hb.get("status", "UP"),
+                    sum(self._eligible(c) for c in self.cars.values()),
+                    sum(r.status not in TERMINAL_STATUSES for r in self.hall_calls.values()),
+                    sum(i.status not in ("RESOLVED", "CLOSED") for i in self.incidents.values()),
+                )
+
+            with self._lock:
+                self._synced_trips_idx = current_trips_len
+                self._synced_downtime_idx = current_downtime_len
+                self._synced_heartbeats_idx = current_heartbeats_len
+        except Exception as exc:
+            import logging
+            logging.getLogger("srems.sync").debug("DB sync skipped or failed: %s", exc)
 
 
 # The singleton drives demo API views; instantiate a new simulator for isolated tests.

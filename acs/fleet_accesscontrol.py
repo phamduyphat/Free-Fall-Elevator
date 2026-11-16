@@ -292,6 +292,34 @@ class FleetAccessControl:
                         credential_id=payload.credential_id,
                     )
 
+                from simulation.operational import operational_simulator
+
+                car_state = operational_simulator.cars.get(str(payload.rescue_car_id))
+                if car_state is not None and car_state.availability == "MAINTENANCE":
+                    await Logging.write_audit(
+                        [
+                            AuditEntry(
+                                timestamp=ts,
+                                actor_id=payload.credential_id,
+                                actor_role=role,
+                                action_type=AuditActionType.COMMAND_CONFLICT_REJECTED,
+                                target_id=str(payload.rescue_car_id),
+                                event_payload={
+                                    "attempted_command": AuditActionType.RESCUE_CAR_DISPATCHED.value,
+                                    "rescue_car_id": str(payload.rescue_car_id),
+                                    "incident_id": payload.incident_id,
+                                    "conflict_reason": "CAR_IN_MAINTENANCE",
+                                },
+                            )
+                        ],
+                        db_pool=db_pool,
+                    )
+                    return AuthorizationResult.deny(
+                        DenialReason.COMMAND_CONFLICT_REJECTED,
+                        message=f"Rescue dispatch rejected: car {payload.rescue_car_id} is in MAINTENANCE.",
+                        credential_id=payload.credential_id,
+                    )
+
                 if not (1 <= payload.dwell_wait_seconds <= 600):
                     return AuthorizationResult.deny(
                         DenialReason.MALFORMED_MSG_REJECTED,

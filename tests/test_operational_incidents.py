@@ -127,6 +127,21 @@ class TestIncidentsAndRecovery(unittest.TestCase):
         self.sim.advance(60)
         self.assertTrue(any(i.escalated for i in self.sim.incidents.values()))
 
+    def test_rescue_dispatch_excludes_maintenance_cars(self):
+        incident = self.sim.phone_medical_incident(5)
+        # Put E1, E2, E3 in maintenance
+        self.sim.isolate("E1", "MAINTENANCE")
+        self.sim.isolate("E2", "MAINTENANCE")
+        self.sim.isolate("E3", "MAINTENANCE")
+        # E4 should be selected
+        result = self.sim.dispatch_rescue(incident["incident_id"], confirmed_empty=True, wait_seconds=60)
+        self.assertEqual(result["rescue_car_id"], "E4")
+        # Now put E4 in maintenance as well - should raise OperationalError (no eligible rescue car)
+        self.sim.isolate("E4", "MAINTENANCE")
+        incident2 = self.sim.phone_medical_incident(10)
+        with self.assertRaisesRegex(OperationalError, "No eligible, confirmed-empty rescue car"):
+            self.sim.dispatch_rescue(incident2["incident_id"], confirmed_empty=True, wait_seconds=60)
+
     def test_metrics_are_aggregates_labelled_as_stub(self):
         self.sim.submit_hall_call(origin_floor=3, direction="UP")
         self.sim.advance(2)

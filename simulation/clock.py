@@ -129,6 +129,9 @@ class SimulationClock:
 
         operational_simulator.step_from_clock(max(1, int(sim_dt)))
 
+        if db_conn is not None and not db_conn.is_closed():
+            await operational_simulator.sync_to_db(db_conn)
+
         if hook is not None:
             hook(next_time, next_tick)
 

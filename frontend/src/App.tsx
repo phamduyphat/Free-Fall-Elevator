@@ -676,7 +676,32 @@ function Security({ token, role, refreshFleet }: { token: string; role: string; 
   </>;
 }
 
-function Analytics({ summary }: { summary: Summary | null }) {
+function Analytics({ summary, token, role }: { summary: Summary | null; token?: string; role?: string }) {
+  const [dbData, setDbData] = useState<Record<string, unknown> | null>(null);
+  const [dbError, setDbError] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  const fetchDbAnalytics = async () => {
+    if (!token || role !== "ADMIN") return;
+    setLoading(true);
+    setDbError("");
+    try {
+      const now = new Date();
+      const yesterday = new Date(now.getTime() - 24 * 3600 * 1000);
+      const startIso = yesterday.toISOString();
+      const endIso = now.toISOString();
+      const [wait, sec] = await Promise.all([
+        authorizedApi<Record<string, unknown>>(`/api/v1/analytics/wait-times?start_time=${encodeURIComponent(startIso)}&end_time=${encodeURIComponent(endIso)}`, token),
+        authorizedApi<Record<string, unknown>>(`/api/v1/analytics/security?start_time=${encodeURIComponent(startIso)}&end_time=${encodeURIComponent(endIso)}`, token),
+      ]);
+      setDbData({ wait, sec });
+    } catch (err) {
+      setDbError(err instanceof Error ? err.message : "Failed to query database analytics");
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const values: { title: string; value: string; unit: string }[] = [
     { title: "Mean hall wait", value: summary?.mean_wait_seconds == null ? "—" : summary.mean_wait_seconds.toFixed(1), unit: "seconds" },
     { title: "Median hall wait", value: summary?.median_wait_seconds == null ? "—" : summary.median_wait_seconds.toFixed(1), unit: "seconds" },
@@ -685,9 +710,11 @@ function Analytics({ summary }: { summary: Summary | null }) {
     { title: "Completed car calls", value: String(summary?.completed_car_calls ?? "—"), unit: "requests" },
     { title: "Available cars", value: String(summary?.fleet_available ?? "—"), unit: "out of 5" },
   ];
-  return <><PageHeader eyebrow="Mode 5 · test-stub aggregates" title="Analytics" detail="These measurements are derived from process-local hall calls. They are not the persisted PostgreSQL analytics and do not support traffic profiles." />
+  return <><PageHeader eyebrow="Mode 5 · Analytics & Reporting" title="Analytics" detail="Real-time operational indicators and persisted PostgreSQL analytics." action={token && role === "ADMIN" ? <button className="button secondary" disabled={loading} onClick={() => { void fetchDbAnalytics(); }}>Query PostgreSQL analytics</button> : undefined} />
+    {dbError && <p className="error-banner" role="alert">{dbError}</p>}
     <div className="kpi-grid">{values.map(({ title, value, unit }) => <article className="kpi-card" key={title}><span>{title}</span><strong>{value}</strong><small>{unit}</small></article>)}</div>
-    <section className="panel section"><h2>Measurement definition</h2><p>Hall wait time measures accepted hall call to car arrival. P95 uses the nearest-rank percentile. No values are shown when the stub has not completed a hall call. Restarting the API clears these measurements.</p></section>
+    {dbData && <section className="panel section"><div className="table-heading"><strong>PostgreSQL Analytics (ANA-5.2 &amp; ANA-5.6)</strong><span>Database-backed</span></div><pre className="event-row">{JSON.stringify(dbData, null, 2)}</pre></section>}
+    <section className="panel section"><h2>Measurement definition</h2><p>Hall wait time measures accepted hall call to car arrival. P95 uses the nearest-rank percentile. Live simulator events sync automatically to PostgreSQL when database connectivity is established.</p></section>
   </>;
 }
 
@@ -758,7 +785,7 @@ function App() {
     catch { /* Clear client session even when the server has expired it. */ }
     setToken(""); setRole("");
   };
-  const page = view === "overview" ? <Overview fleet={fleet} summary={summary} token={token} /> : view === "simulation" ? <Simulation fleet={fleet} onFleetRefresh={onFleetRefresh} /> : view === "elevators" ? <Elevators fleet={fleet} refresh={onFleetRefresh} /> : view === "credentials" ? <Credentials token={token} role={role} /> : view === "security" ? <Security token={token} role={role} refreshFleet={onFleetRefresh} /> : view === "analytics" ? <Analytics summary={summary} /> : <Audit token={token} role={role} />;
+  const page = view === "overview" ? <Overview fleet={fleet} summary={summary} token={token} /> : view === "simulation" ? <Simulation fleet={fleet} onFleetRefresh={onFleetRefresh} /> : view === "elevators" ? <Elevators fleet={fleet} refresh={onFleetRefresh} /> : view === "credentials" ? <Credentials token={token} role={role} /> : view === "security" ? <Security token={token} role={role} refreshFleet={onFleetRefresh} /> : view === "analytics" ? <Analytics summary={summary} token={token} role={role} /> : <Audit token={token} role={role} />;
   return <div className="app-shell">
     <aside className="sidebar"><div className="brand"><span className="brand-mark">S</span><div><strong>SREMS</strong><span>Operations</span></div></div><nav aria-label="Primary navigation">{navigation.map((item) => <button className={`nav-item ${item.id === view ? "active" : ""}`} key={item.id} onClick={() => setView(item.id)}><span className="nav-icon">{item.icon}</span>{item.label}</button>)}</nav><div className="sidebar-footer"><span className="status-dot" /> {error ? "API unavailable" : fleet ? "Test stub connected" : "Connecting"}</div></aside>
     <main className="content"><header className="topbar"><div><p className="eyebrow">Building operations</p><div className="breadcrumb">SREMS / {active.label}</div></div><div className="operator">{token ? <><span className="avatar">{role.slice(0, 1)}</span><span><strong>{role}</strong><small>ACS session</small></span><button className="button secondary" onClick={() => { void logout(); }}>Log out</button></> : <><label className="login-field">Dashboard card<input aria-label="Dashboard card" value={credential} onChange={(event) => setCredential(event.target.value)} /></label><button className="button secondary" onClick={() => { void login(); }}>Sign in</button></>}</div></header>{loginError && <div className="error-banner" role="alert">{loginError}</div>}{error && <div className="error-banner" role="alert">{error}</div>}<div className="page-content">{page}</div></main>

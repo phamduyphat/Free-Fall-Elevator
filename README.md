@@ -17,11 +17,20 @@ The repository is also known as **Free-Fall-Elevator**.
 - PostgreSQL with the `pgcrypto` extension
 - `asyncpg`, `fastapi`, and `uvicorn`
 
-The repository includes a `requirements.txt` file. Install the runtime
-dependencies before starting the application:
+Install the runtime dependencies from `requirements.txt`:
 
 ```powershell
-python -m pip install -r requirements.txt
+pip install -r requirements.txt
+```
+
+### (Optional) Using a virtual environment
+
+To isolate dependencies in a virtual environment:
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
 ```
 
 ## Database setup
@@ -54,15 +63,32 @@ using the system outside a local development environment.
 Start the FastAPI application with:
 
 ```powershell
-python -m uvicorn api:app --reload
-```
-or via `main.py`:
-```powershell
 python main.py
+```
+or via uvicorn:
+```powershell
+python -m uvicorn api:app --reload
 ```
 
 The application listens on `http://127.0.0.1:8000`. FastAPI's interactive
 documentation is available at `/docs` when routes are registered.
+
+To run the visual React frontend (see [frontend/README.md](frontend/README.md)):
+
+```powershell
+cd frontend
+npm install
+npm run dev
+```
+
+### Running the simulation
+
+1. Start the backend with `python main.py`.
+2. In a separate terminal, start the frontend with `cd frontend; npm run dev`.
+3. Open `http://localhost:5173` and click **"Simulator (stub)"** in the sidebar:
+   - **Shaft view:** Real-time animated elevator movement for cars `E1`–`E5` across B1 and Floors 1–30.
+   - **Car Operating Panel (COP):** Swipe simulated cards (e.g. `ADMIN-CARD-0001`), select destination floors, and trigger `HELP` or `MEDICAL` emergencies.
+   - **Hall panel:** Submit up/down hall calls or dispatch `E5` freight from any floor.
 
 The application initializes the shared `DbConnectionPool` during startup and
 closes it during shutdown. The pool can also be used directly by other
@@ -109,6 +135,6 @@ test stub** and not a physical elevator controller or safety-certified product.
 
 To run its independent tests without PostgreSQL:
 
-```bash
-python -m unittest discover -s tests -p test_operational.py -v
+```powershell
+python -m unittest discover tests
 ```

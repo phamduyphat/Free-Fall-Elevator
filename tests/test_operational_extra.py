@@ -56,6 +56,26 @@ class AdditionalOperationalTests(unittest.TestCase):
         self.assertEqual(report["car"]["active_fault"], "DOOR_SENSOR")
         self.assertFalse(report["recovery_ready"])
 
+    def test_sync_to_db_persists_simulation_events(self):
+        import asyncio
+
+        class MockConn:
+            def __init__(self):
+                self.calls = []
+
+            async def execute(self, query, *args):
+                self.calls.append((query.strip().split()[0].upper(), args))
+
+        conn = MockConn()
+        req, _ = self.sim.submit_hall_call(origin_floor=5, direction="UP")
+        self.sim.advance(4)  # Car moves and arrives, completes hall call, generates trip
+        self.sim.trigger_emergency("E1", "HELP")
+        self.sim.isolate("E2", "MAINTENANCE")
+
+        asyncio.run(self.sim.sync_to_db(conn))
+        self.assertTrue(len(conn.calls) >= 3)
+        self.assertTrue(all(c[0] == "INSERT" for c in conn.calls))
+
 
 if __name__ == "__main__":
     unittest.main()

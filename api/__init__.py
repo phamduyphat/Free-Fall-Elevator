@@ -11,7 +11,13 @@ from db import DbConnectionPool
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Manage application-level lifecycle: database connection pool initialization and cleanup."""
-    await DbConnectionPool.init_pool()
+    try:
+        await DbConnectionPool.init_pool()
+    except OSError as exc:
+        import logging
+        logging.getLogger("srems").warning(
+            "Could not connect to PostgreSQL — starting without a database: %s", exc
+        )
     try:
         yield
     finally:
