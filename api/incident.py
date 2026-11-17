@@ -661,6 +661,30 @@ async def inject_communication_loss(
     }
 
 
+@router.post("/stub/command-timeout")
+async def arm_command_timeout_stub(
+    body: ObstructionInput,
+    session_token: str = Depends(extract_bearer_token),
+    db_pool: type[DbConnectionPool] = Depends(get_db_pool),
+) -> Any:
+    """Test-stub hook to arm/clear a simulated command timeout on the next command (COM-3)."""
+    session, error = await _staff(DashboardOperationType.MAINTENANCE_CONTROL, session_token, db_pool)
+    if error is not None:
+        return error
+    if not ElevatorId.has_value(body.elevator_id):
+        denied = await reject_malformed_msg(
+            timestamp=session.timestamp,
+            target_id=str(body.elevator_id),
+            source="ObstructionInput",
+            payload_details={"elevator_id": body.elevator_id, "active": body.active},
+            message="Invalid elevator_id.",
+            credential_id=session.credential_id,
+            db_pool=db_pool,
+        )
+        return auth_result_response(denied)
+    return _perform(operational_simulator.arm_command_timeout, body.elevator_id, body.active)
+
+
 @router.post("/stub/reconcile")
 async def reconcile_after_connection_loss(
     body: CarInput,

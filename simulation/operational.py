@@ -251,6 +251,10 @@ class OperationalSimulator:
             self._synced_downtime_idx = 0
             self._synced_closed_downtime_ids: set[str] = set()
             self._synced_heartbeats_idx = 0
+            self._pending_service_run_end_audits: list[dict] = []
+            self.commands: list[dict] = []
+            self._synced_commands_idx = 0
+            self._timeout_armed: set[str] = set()
             self.heartbeats.append({"timestamp": self._now(), "status": "UP"})
 
     def _now(self) -> datetime:
@@ -339,15 +343,20 @@ class OperationalSimulator:
                 raise OperationalError("Hall floor must be B1 (-1) or 1..30")
             if call_type == "FREIGHT":
                 if origin_floor == -1:
+                    self._record_command("HALL_CALL", "E5", "REJECTED", "E5 does not serve B1")
                     raise OperationalError("E5 does not serve B1")
                 if direction is not None:
+                    self._record_command("HALL_CALL", "E5", "REJECTED", "Freight calls do not specify UP/DOWN")
                     raise OperationalError("Freight calls do not specify UP/DOWN")
                 if not self._eligible(self.cars["E5"]):
+                    self._record_command("HALL_CALL", "E5", "REJECTED", "E5 unavailable for freight")
                     raise OperationalError("E5 is unavailable; freight call rejected, not queued")
             else:
                 if direction not in ("UP", "DOWN"):
+                    self._record_command("HALL_CALL", None, "REJECTED", "Missing UP/DOWN direction")
                     raise OperationalError("Ordinary hall calls require UP or DOWN")
                 if (origin_floor == -1 and direction != "UP") or (origin_floor == 30 and direction != "DOWN"):
+                    self._record_command("HALL_CALL", None, "REJECTED", f"Invalid direction {direction} at floor {origin_floor}")
                     raise OperationalError("Invalid travel direction for endpoint floor")
 
             for previous in self.hall_calls.values():
@@ -371,17 +380,72 @@ class OperationalSimulator:
             self._event("HALL_CALL", None, f"{call_type} hall call at {origin_floor}")
             request.transition("QUEUED")
             self._assign_request(request)
+            self._record_command(
+                "HALL_CALL",
+                request.assigned_car,
+                "ACKNOWLEDGED",
+                f"{call_type} floor={origin_floor} dir={direction}",
+            )
             self._check_backlog_event()
             return self._serialize_request(request), False
+
+    def _record_command(
+        self,
+        command_type: str,
+        elevator_id: str | None,
+        status: Literal["ACKNOWLEDGED", "REJECTED", "TIMED_OUT", "UNKNOWN"],
+        detail: str = "",
+    ) -> dict:
+        rec = {
+            "command_id": str(uuid4()),
+            "command_type": command_type,
+            "elevator_id": elevator_id,
+            "status": status,
+            "detail": detail,
+            "created_at": self._now(),
+        }
+        self.commands.append(rec)
+        return rec
+
+    def _consume_timeout_if_armed(self, elevator_id: str, command_type: str, detail: str) -> None:
+        if elevator_id in self._timeout_armed:
+            self._timeout_armed.discard(elevator_id)
+            self._record_command(command_type, elevator_id, "TIMED_OUT", detail)
+            car = self._car(elevator_id)
+            affected_reqs = [s.request_id for s in car.stops]
+            self.isolate(elevator_id, "STALE")
+            self._create_incident(
+                "COMMUNICATION_LOSS",
+                elevator_id,
+                f"Command {command_type} timed out; reconciliation required",
+                floor=car.current_floor,
+                direction=None,
+                trigger_source="TIMEOUT",
+                related_requests=affected_reqs,
+            )
+            raise OperationalError(f"Command {command_type} timed out awaiting acknowledgement")
+
+    def arm_command_timeout(self, elevator_id: str, active: bool = True) -> dict:
+        """Test-stub helper to simulate a command timeout on the next command to `elevator_id` (COM-3)."""
+        with self._lock:
+            self._car(elevator_id)
+            if active:
+                self._timeout_armed.add(elevator_id)
+            else:
+                self._timeout_armed.discard(elevator_id)
+            return {"source": "labelled-test-stub", "elevator_id": elevator_id, "timeout_armed": active}
 
     def submit_car_call(self, elevator_id: str, destination_floor: int) -> dict:
         """Call ONLY after ACS has granted this destination (SEC-2.6)."""
         with self._lock:
             self._update_auto()
             car = self._car(elevator_id)
+            self._consume_timeout_if_armed(elevator_id, "CAR_CALL", f"floor={destination_floor}")
             if not self._valid_floor(elevator_id, destination_floor):
+                self._record_command("CAR_CALL", elevator_id, "REJECTED", f"Invalid floor {destination_floor}")
                 raise OperationalError("Invalid destination or E5-to-B1 is forbidden")
             if not self._eligible(car):
+                self._record_command("CAR_CALL", elevator_id, "REJECTED", f"Unavailable ({car.availability})")
                 raise OperationalError("Elevator is unavailable for a destination request")
             request = CarRequest(
                 str(uuid4()),
@@ -391,6 +455,7 @@ class OperationalSimulator:
                 origin_floor=car.current_floor,
             )
             self.car_calls[request.request_id] = request
+            self._record_command("CAR_CALL", elevator_id, "ACKNOWLEDGED", f"floor={destination_floor}")
             self._event("CAR_CALL", elevator_id, f"Authorized destination {destination_floor}")
             car.stops.append(Stop(destination_floor, "CAR", request.request_id))
             self._check_backlog_event()
@@ -401,9 +466,12 @@ class OperationalSimulator:
         with self._lock:
             self._update_auto()
             car = self.cars["E5"]
+            self._consume_timeout_if_armed("E5", "E5_SERVICE_RUN", f"floor={destination_floor}")
             if not self._eligible(car) or car.stops:
+                self._record_command("E5_SERVICE_RUN", "E5", "REJECTED", "E5 busy or unavailable")
                 raise OperationalError("E5 has active commitments or is unavailable")
             if not self._valid_floor("E5", destination_floor):
+                self._record_command("E5_SERVICE_RUN", "E5", "REJECTED", f"Invalid floor {destination_floor}")
                 raise OperationalError("Invalid E5 service-run destination")
             car.availability = "OCCUPIED"
             request = CarRequest(
@@ -416,6 +484,7 @@ class OperationalSimulator:
             )
             self.car_calls[request.request_id] = request
             car.stops.append(Stop(destination_floor, "SERVICE", request.request_id))
+            self._record_command("E5_SERVICE_RUN", "E5", "ACKNOWLEDGED", f"floor={destination_floor}")
             return asdict(request)
 
     def _car(self, elevator_id: str) -> Car:
@@ -480,12 +549,14 @@ class OperationalSimulator:
             if availability not in ("IN_SERVICE", "MAINTENANCE", "FAULT", "EMERGENCY_UNAVAILABLE", "STALE"):
                 raise OperationalError("Unsupported operational state")
             if car.availability == "EMERGENCY_UNAVAILABLE" and availability in ("MAINTENANCE", "FAULT"):
+                self._record_command("ISOLATE", elevator_id, "REJECTED", f"Cannot downgrade EMERGENCY_UNAVAILABLE to {availability}")
                 raise OperationalError("Emergency state cannot be downgraded to maintenance or fault")
             if availability == "IN_SERVICE":
                 recovered_snapshot = (car.availability == "STALE" and car.connected
                                       and self.sim_tick - car.last_seen_tick <= 5
                                       and car.active_fault is None and car.door_state != "OBSTRUCTED")
                 if not (self.recoverable(elevator_id) or recovered_snapshot):
+                    self._record_command("RETURN_TO_SERVICE", elevator_id, "REJECTED", "Recovery checks failed")
                     raise OperationalError("Recovery checks failed: stale, fault, door or movement state")
                 if any(
                     i.status not in ("RESOLVED", "CLOSED", "FALSE_ALARM")
@@ -498,6 +569,7 @@ class OperationalSimulator:
                     )
                     for i in self.incidents.values()
                 ):
+                    self._record_command("RETURN_TO_SERVICE", elevator_id, "REJECTED", "Unresolved incident")
                     raise OperationalError("Unresolved incident prevents return to service")
             now = self._now()
             if availability != "IN_SERVICE":
@@ -538,6 +610,12 @@ class OperationalSimulator:
                 car.door_state = "CLOSED"
             if availability == "STALE":
                 car.connected = False
+            self._record_command(
+                "RETURN_TO_SERVICE" if availability == "IN_SERVICE" else "ISOLATE",
+                elevator_id,
+                "ACKNOWLEDGED",
+                f"state={availability}",
+            )
             self._reassign_pending()
 
     def recoverable(self, elevator_id: str) -> bool:
@@ -886,7 +964,9 @@ class OperationalSimulator:
             self._update_auto()
             request = self.hall_calls.get(request_id)
             if request is None or request.status in TERMINAL_STATUSES:
+                self._record_command("HALL_CALL_CANCEL", None, "REJECTED", f"Unknown or terminal {request_id}")
                 raise OperationalError("Unknown or terminal hall call")
+            target_car = request.assigned_car
             if request.assigned_car:
                 car = self.cars[request.assigned_car]
                 car.stops = [stop for stop in car.stops if stop.request_id != request_id]
@@ -894,6 +974,7 @@ class OperationalSimulator:
             request.cancelled_by = actor
             request.cancellation_reason = reason
             request.transition("CANCELLED")
+            self._record_command("HALL_CALL_CANCEL", target_car, "ACKNOWLEDGED", f"{request_id} by {actor}")
             self._event("HALL_CANCELLED", None, f"{request_id} by {actor}: {reason}")
             return self._serialize_request(request)
 
@@ -906,6 +987,7 @@ class OperationalSimulator:
                     "recovery_ready": self.can_return_to_service(elevator_id),
                     "incidents": [asdict(i) for i in self.incidents.values()
                                   if i.elevator_id == elevator_id],
+                    "commands": [c for c in self.commands if c["elevator_id"] == elevator_id][-20:],
                     "recent_events": [e for e in self.events if e["elevator_id"] == elevator_id][-20:]}
 
     def _escalate_incidents(self) -> None:
@@ -953,6 +1035,7 @@ class OperationalSimulator:
                 if car.connected and not active_building and car.active_fault is None:
                     car.medical_run = True
                     car.stops.append(Stop(1, "MEDICAL", incident.incident_id))
+                    self._record_command("MEDICAL_RUN", elevator_id, "ACKNOWLEDGED", f"Nonstop to Floor 1 ({incident.incident_id})")
                     self._event("MEDICAL_RESPONDER_RUN", elevator_id,
                                 "Nonstop run to Floor 1 scheduled in the stub")
             return asdict(incident)
@@ -1047,20 +1130,27 @@ class OperationalSimulator:
             self._update_auto()
             car = self._car(elevator_id)
             if action not in ("OPEN", "CLOSE"):
+                self._record_command("DOOR_COMMAND", elevator_id, "REJECTED", f"Invalid action {action}")
                 raise OperationalError("Door action must be OPEN or CLOSE")
+            self._consume_timeout_if_armed(elevator_id, "DOOR_COMMAND", f"action={action}")
             if not car.connected or car.availability not in ("IN_SERVICE", "OCCUPIED"):
+                self._record_command("DOOR_COMMAND", elevator_id, "REJECTED", f"Unavailable ({car.availability})")
                 raise OperationalError("Door operation prohibited in current car state")
             if car.direction != "IDLE" and car.stops:
+                self._record_command("DOOR_COMMAND", elevator_id, "REJECTED", "Car moving")
                 raise OperationalError("Door operation prohibited while car is moving")
             if action == "CLOSE" and (car.door_state == "OBSTRUCTED" or car.obstruction_started is not None):
+                self._record_command("DOOR_COMMAND", elevator_id, "REJECTED", "Obstruction active")
                 raise OperationalError("Door close prohibited while obstruction is active")
             if car.rescue_active and action == "CLOSE":
+                self._record_command("DOOR_COMMAND", elevator_id, "REJECTED", "Rescue wait active")
                 raise OperationalError("Door close prohibited during active rescue wait")
             car.door_state = "OPEN" if action == "OPEN" else "CLOSED"
             if car.rescue_active and action == "OPEN":
                 car.dwell_remaining = max(car.dwell_remaining, car.rescue_wait_remaining)
             else:
                 car.dwell_remaining = 2 if action == "OPEN" else 0
+            self._record_command("DOOR_COMMAND", elevator_id, "ACKNOWLEDGED", f"action={action}")
             self._event("DOOR_COMMAND", elevator_id, action)
             return self.fleet_status()
 
@@ -1069,6 +1159,13 @@ class OperationalSimulator:
             self._update_auto()
             car = self._car(elevator_id)
             affected_reqs = [s.request_id for s in car.stops]
+            if affected_reqs:
+                self._record_command(
+                    "IN_FLIGHT_OPERATION",
+                    elevator_id,
+                    "UNKNOWN",
+                    f"Communication lost with {len(affected_reqs)} pending stop(s)",
+                )
             self.isolate(elevator_id, "STALE", technician_id=actor)
             return asdict(
                 self._create_incident(
@@ -1186,13 +1283,16 @@ class OperationalSimulator:
             )
             incident = self._incident(incident_id)
             car = self._car(chosen_id)
+            self._consume_timeout_if_armed(chosen_id, "RESCUE_DISPATCH", f"incident={incident_id}")
             if chosen_id == "E5" or chosen_id == incident.elevator_id or not self._eligible(car) or not all(s.kind == "HALL" for s in car.stops):
+                self._record_command("RESCUE_DISPATCH", chosen_id, "REJECTED", "Selected rescue car is ineligible or busy")
                 raise OperationalError("Selected rescue car is ineligible or busy")
             self._release_car_hall_calls(car)
             car.rescue_active = True
             car.rescue_wait_remaining = wait_seconds
             car.stops.append(Stop(floor, "RESCUE", incident.incident_id))
             incident.rescue_car_id = car.elevator_id
+            self._record_command("RESCUE_DISPATCH", car.elevator_id, "ACKNOWLEDGED", f"floor={floor} wait={wait_seconds}s")
             self._event("RESCUE_DISPATCH", car.elevator_id, f"Incident {incident_id}, wait {wait_seconds}s")
             self._reassign_pending()
             return {"incident": asdict(incident), "rescue_car_id": car.elevator_id,
@@ -1204,6 +1304,7 @@ class OperationalSimulator:
             self._update_auto()
             incident = self._incident(incident_id)
             if not incident.rescue_car_id:
+                self._record_command("RESCUE_CANCEL", None, "REJECTED", f"No active rescue car on {incident_id}")
                 raise OperationalError("Incident has no active rescue car")
             car = self._car(incident.rescue_car_id)
             car.stops = [s for s in car.stops if not (s.kind == "RESCUE" and s.request_id == incident_id)]
@@ -1215,6 +1316,7 @@ class OperationalSimulator:
             car.message = "Rescue cancelled by Admin; returned to normal dispatch"
             released_car = car.elevator_id
             incident.rescue_car_id = None
+            self._record_command("RESCUE_CANCEL", released_car, "ACKNOWLEDGED", f"Cancelled by {actor}")
             self._event("RESCUE_RELEASE", released_car, f"Cancelled by {actor} for {incident_id}")
             self._reassign_pending()
             return asdict(incident)
@@ -1224,9 +1326,11 @@ class OperationalSimulator:
             self._update_auto()
             incident = self._incident(incident_id)
             if incident.kind != "MEDICAL" or not incident.rescue_car_id:
+                self._record_command("RESCUE_BOARDING", incident.rescue_car_id, "REJECTED", "Not a medical rescue")
                 raise OperationalError("Only a medical rescue can confirm boarding")
             car = self.cars[incident.rescue_car_id]
             if not car.rescue_active or car.stops or car.door_state != "OPEN":
+                self._record_command("RESCUE_BOARDING", car.elevator_id, "REJECTED", "Rescue car not waiting with doors open")
                 raise OperationalError("Rescue car must be waiting with doors open")
             car.rescue_active = False
             car.rescue_wait_remaining = 0
@@ -1237,6 +1341,7 @@ class OperationalSimulator:
             car.medical_run = True
             car.stops.append(Stop(1, "MEDICAL", incident_id))
             incident.history.append("RESCUE_BOARDED")
+            self._record_command("RESCUE_BOARDING", car.elevator_id, "ACKNOWLEDGED", f"Medical run to Floor 1 ({incident_id})")
             self._event("RESCUE_BOARDING", car.elevator_id, "Medical responder-floor run")
             return asdict(incident)
 
@@ -1454,9 +1559,11 @@ class OperationalSimulator:
                     or di["interval_id"] not in self._synced_closed_downtime_ids
                 ]
                 heartbeats_to_sync = list(self.heartbeats[self._synced_heartbeats_idx:])
+                commands_to_sync = list(self.commands[self._synced_commands_idx:])
                 current_trips_len = len(self.trips)
                 current_downtime_len = len(self.downtime_intervals)
                 current_heartbeats_len = len(self.heartbeats)
+                current_commands_len = len(self.commands)
 
             def _aware(dt: datetime | None) -> datetime | None:
                 return _normalize_utc(dt) if dt is not None else None
@@ -1684,6 +1791,31 @@ class OperationalSimulator:
                     for row in hb_rows:
                         await conn.execute(hb_sql, *row)  # type: ignore[union-attr]
 
+            if commands_to_sync:
+                cmd_sql = """
+                    INSERT INTO elevator_commands (
+                        command_id, command_type, elevator_id, status, detail, created_at
+                    )
+                    VALUES ($1, $2, $3, $4, $5, $6)
+                    ON CONFLICT (command_id) DO NOTHING;
+                    """
+                cmd_rows = [
+                    (
+                        cmd["command_id"],
+                        cmd["command_type"],
+                        cmd["elevator_id"],
+                        cmd["status"],
+                        cmd.get("detail"),
+                        _aware(cmd["created_at"]),
+                    )
+                    for cmd in commands_to_sync
+                ]
+                if hasattr(conn, "executemany"):
+                    await conn.executemany(cmd_sql, cmd_rows)  # type: ignore[union-attr]
+                else:
+                    for row in cmd_rows:
+                        await conn.execute(cmd_sql, *row)  # type: ignore[union-attr]
+
             with self._lock:
                 self._synced_trips_idx = current_trips_len
                 self._synced_downtime_idx = current_downtime_len
@@ -1693,6 +1825,7 @@ class OperationalSimulator:
                     if di.get("ended_at") is not None
                 )
                 self._synced_heartbeats_idx = current_heartbeats_len
+                self._synced_commands_idx = current_commands_len
         except Exception as exc:
             import logging
             logging.getLogger("srems.sync").debug("DB sync skipped or failed: %s", exc)
@@ -1775,12 +1908,22 @@ class OperationalSimulator:
                     """
                 )
             ]
+            command_rows = [
+                dict(r)
+                for r in await conn.fetch(  # type: ignore[union-attr]
+                    """
+                    SELECT command_id, command_type, elevator_id, status, detail, created_at
+                    FROM elevator_commands
+                    ORDER BY created_at ASC
+                    """
+                )
+            ]
         except Exception as exc:
             import logging
             logging.getLogger("srems.sync").debug("DB load skipped or failed: %s", exc)
             return False
 
-        if not (hall_rows or trip_rows or car_call_rows or incident_rows or downtime_rows or heartbeat_rows):
+        if not (hall_rows or trip_rows or car_call_rows or incident_rows or downtime_rows or heartbeat_rows or command_rows):
             return False
 
         reverse_kind_map = {
@@ -2058,6 +2201,20 @@ class OperationalSimulator:
             else:
                 self.heartbeats = [{"timestamp": now_utc, "status": "UP"}]
                 self._synced_heartbeats_idx = 0
+
+            # 7. Elevator commands (COM-3)
+            self.commands = [
+                {
+                    "command_id": str(row["command_id"]),
+                    "command_type": str(row["command_type"]),
+                    "elevator_id": row.get("elevator_id"),
+                    "status": str(row["status"]),
+                    "detail": row.get("detail") or "",
+                    "created_at": _normalize_utc(row["created_at"]),
+                }
+                for row in command_rows
+            ]
+            self._synced_commands_idx = len(self.commands)
 
             for car in self.cars.values():
                 if car.connected:

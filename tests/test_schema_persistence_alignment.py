@@ -63,6 +63,7 @@ class _FakeDbConn:
             "incidents": [],
             "car_downtime_intervals": [],
             "system_heartbeats": [],
+            "elevator_commands": [],
             "access_authorization_events": [],
             "security_alerts": [],
             "audit_log_chain": [],
@@ -167,6 +168,16 @@ class _FakeDbConn:
                     "active_incidents_count": args[4],
                 }
             )
+        elif q.startswith("INSERT INTO elevator_commands"):
+            row = {
+                "command_id": args[0],
+                "command_type": args[1],
+                "elevator_id": args[2],
+                "status": args[3],
+                "detail": args[4],
+                "created_at": args[5],
+            }
+            self._upsert("elevator_commands", "command_id", row)
         return "INSERT 0 1"
 
     def _upsert(self, table: str, key: str, row: dict) -> None:
@@ -249,6 +260,8 @@ class _FakeDbConn:
                     }
                 )
             return rows
+        if "FROM elevator_commands" in q:
+            return list(self.tables["elevator_commands"])
         return []
 
     async def fetchrow(self, query: str, *args) -> dict | None:
@@ -280,7 +293,7 @@ class TestSchemaAndPersistenceAlignment(unittest.TestCase):
 
         seed_tables = _parse_seed_tables(seed_sql)
         sync_inserts = _extract_sync_inserts(operational_py)
-        self.assertEqual(len(sync_inserts), 6)
+        self.assertEqual(len(sync_inserts), 7)
 
         for table_name, cols in sync_inserts:
             self.assertIn(table_name, seed_tables, f"Missing table {table_name} in seed.sql")
@@ -377,6 +390,8 @@ class TestSchemaAndPersistenceAlignment(unittest.TestCase):
         self.assertEqual(restored_inc.notification_status, "NOTIFIED")
         self.assertEqual(restored_inc.direction, "IDLE")
         self.assertEqual(restored_inc.history, ["OPEN"])
+        self.assertEqual(len(restored.commands), len(sim.commands))
+        self.assertEqual(restored._synced_commands_idx, len(restored.commands))
         self.assertEqual(len(restored.trips), len(sim.trips))
         self.assertEqual(len(restored.downtime_intervals), len(sim.downtime_intervals))
         self.assertEqual(len(restored.heartbeats), len(sim.heartbeats) + 1)

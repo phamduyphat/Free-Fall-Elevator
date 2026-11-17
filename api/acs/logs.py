@@ -161,6 +161,57 @@ async def search_security_alerts(
     return {"items": items, "count": len(items)}
 
 
+@router.get("/commands", response_model=None)
+async def search_elevator_commands(
+    elevator_id: Optional[ElevatorId | str] = None,
+    command_type: Optional[str] = None,
+    command_status: Optional[str] = Query(default=None, alias="status"),
+    start_time: Optional[datetime] = None,
+    end_time: Optional[datetime] = None,
+    limit: int = Query(default=100, ge=1, le=10000),
+    session_token: str = Depends(extract_bearer_token),
+    db_pool: type[DbConnectionPool] = Depends(get_db_pool),
+) -> dict[str, Any] | JSONResponse:
+    """Search `elevator_commands` (`COM-3`: ACKNOWLEDGED/REJECTED/TIMED_OUT/UNKNOWN, `ADMIN` only)."""
+    auth_res, session = await authorize_dashboard_op(
+        DashboardOperationType.VIEW_AUDIT_LOGS, session_token, db_pool
+    )
+    if session is None:
+        return auth_denial_response(auth_res)
+
+    clauses: list[str] = []
+    params: list[Any] = []
+    if elevator_id is not None:
+        params.append(str(elevator_id))
+        clauses.append(f"elevator_id = ${len(params)}")
+    if command_type is not None:
+        params.append(str(command_type))
+        clauses.append(f"command_type = ${len(params)}")
+    if command_status is not None:
+        params.append(str(command_status))
+        clauses.append(f"status = ${len(params)}")
+    if start_time is not None:
+        params.append(Logging.normalize_timestamp(start_time))
+        clauses.append(f"created_at >= ${len(params)}")
+    if end_time is not None:
+        params.append(Logging.normalize_timestamp(end_time))
+        clauses.append(f"created_at <= ${len(params)}")
+
+    where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    params.append(limit)
+    query = f"""
+        SELECT command_id, command_type, elevator_id, status, detail, created_at
+        FROM elevator_commands
+        {where_sql}
+        ORDER BY created_at DESC
+        LIMIT ${len(params)}
+    """
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch(query, *params)
+        items = [dict(row) for row in rows]
+    return {"items": items, "count": len(items)}
+
+
 @router.patch("/alerts/{alert_id}")
 async def update_security_alert_status(
     alert_id: str,

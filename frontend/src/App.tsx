@@ -1259,7 +1259,7 @@ function SearchSelect({
   );
 }
 
-type AuditTab = "audit" | "auth" | "incidents" | "alerts";
+type AuditTab = "audit" | "auth" | "incidents" | "alerts" | "commands";
 
 function Audit({ token, role }: { token: string; role: string }) {
   const [tab, setTab] = useState<AuditTab>("audit");
@@ -1322,6 +1322,12 @@ function Audit({ token, role }: { token: string; role: string }) {
         { group: "Operational", options: ["HELP_REQUEST", "DOOR_OBSTRUCTION", "COMMUNICATION_FAILURE", "REPEATED_EMPTY_CALLS"] },
       ];
     }
+    if (tab === "commands") {
+      return [
+        { group: "Passenger & Service", options: ["HALL_CALL", "HALL_CALL_CANCEL", "CAR_CALL", "E5_SERVICE_RUN", "DOOR_COMMAND"] },
+        { group: "Safety & Fleet", options: ["RESCUE_DISPATCH", "RESCUE_CANCEL", "RESCUE_BOARDING", "MEDICAL_RUN", "ISOLATE", "RETURN_TO_SERVICE", "IN_FLIGHT_OPERATION"] },
+      ];
+    }
     return [
       { group: "Alert Types", options: ["REPEATED_FAILURES", "CLONED_CREDENTIAL", "CARD_SCANNING", "LOST_CARD_USAGE", "REVOKED_CARD_USAGE", "DOOR_OBSTRUCTION"] },
     ];
@@ -1331,6 +1337,7 @@ function Audit({ token, role }: { token: string; role: string }) {
     if (tab === "auth") return [{ group: "Outcome", options: ["ALLOWED", "DENIED"] }];
     if (tab === "incidents") return [{ group: "Incident Status", options: ["OPEN", "ACKNOWLEDGED", "IN_PROGRESS", "RESOLVED", "CLOSED"] }];
     if (tab === "alerts") return [{ group: "Alert Status", options: ["OPEN", "ACKNOWLEDGED", "RESOLVED"] }];
+    if (tab === "commands") return [{ group: "Command Status (COM-3)", options: ["ACKNOWLEDGED", "REJECTED", "TIMED_OUT", "UNKNOWN"] }];
     return [];
   }, [tab]);
 
@@ -1361,6 +1368,11 @@ function Audit({ token, role }: { token: string; role: string }) {
         endpoint = "/api/v1/acs/logs/incidents";
         if (statusFilter.trim()) params.set("status", statusFilter.trim());
         if (typeFilter.trim()) params.set("emergency_type", typeFilter.trim());
+        if (carFilter.trim()) params.set("elevator_id", carFilter.trim());
+      } else if (tab === "commands") {
+        endpoint = "/api/v1/acs/logs/commands";
+        if (statusFilter.trim()) params.set("status", statusFilter.trim());
+        if (typeFilter.trim()) params.set("command_type", typeFilter.trim());
         if (carFilter.trim()) params.set("elevator_id", carFilter.trim());
       } else {
         endpoint = "/api/v1/acs/logs/alerts";
@@ -1400,18 +1412,19 @@ function Audit({ token, role }: { token: string; role: string }) {
           <button className={`button ${tab === "auth" ? "primary" : "secondary"}`} onClick={() => switchTab("auth")}>Authorization Events</button>
           <button className={`button ${tab === "incidents" ? "primary" : "secondary"}`} onClick={() => switchTab("incidents")}>Incidents (DB)</button>
           <button className={`button ${tab === "alerts" ? "primary" : "secondary"}`} onClick={() => switchTab("alerts")}>Security Alerts (DB)</button>
+          <button className={`button ${tab === "commands" ? "primary" : "secondary"}`} onClick={() => switchTab("commands")}>Command Status</button>
         </div>
         <div className="hall-controls" style={{ marginTop: "12px" }}>
-          <SearchSelect label={tab === "audit" ? "Actor / Card" : "Credential"} value={actorFilter} onChange={setActorFilter} groups={actorGroups} placeholder="Search or type ID..." disabled={tab === "incidents"} />
+          <SearchSelect label={tab === "audit" ? "Actor / Card" : "Credential"} value={actorFilter} onChange={setActorFilter} groups={actorGroups} placeholder="Search or type ID..." disabled={tab === "incidents" || tab === "commands"} />
           <SearchSelect label={tab === "audit" ? "Target / Car" : "Elevator"} value={carFilter} onChange={setCarFilter} groups={targetGroups} placeholder="E1..E5 or target..." disabled={tab === "alerts"} />
-          <SearchSelect label={tab === "audit" ? "Action Type" : tab === "auth" ? "Denial Reason" : tab === "incidents" ? "Emergency Type" : "Alert Type"} value={typeFilter} onChange={setTypeFilter} groups={typeGroups} placeholder="Search type..." />
+          <SearchSelect label={tab === "audit" ? "Action Type" : tab === "auth" ? "Denial Reason" : tab === "incidents" ? "Emergency Type" : tab === "commands" ? "Command Type" : "Alert Type"} value={typeFilter} onChange={setTypeFilter} groups={typeGroups} placeholder="Search type..." />
           <SearchSelect label={tab === "auth" ? "Outcome" : "Status"} value={statusFilter} onChange={setStatusFilter} groups={statusGroups} placeholder={tab === "audit" ? "N/A for Audit Chain" : "Select status..."} disabled={tab === "audit"} />
           <label>Start time (local)<input type="datetime-local" step={1} value={startFilter} onChange={(e) => setStartFilter(e.target.value)} /></label>
           <label>End time (local)<input type="datetime-local" step={1} value={endFilter} onChange={(e) => setEndFilter(e.target.value)} /></label>
           <button className="button primary" onClick={() => { void refresh(); }}>Search logs</button>
         </div>
       </section>
-      <section className="panel section"><div className="table-heading"><strong>{tab === "audit" ? "ACS audit records" : tab === "auth" ? "Access authorization events" : tab === "incidents" ? "Persisted incidents" : "Security alerts"} · database</strong><span>{logs.length} shown</span></div>{logs.map((item, i) => <pre className="event-row" key={i}>{JSON.stringify({ ...item, ...(typeof item.timestamp === "string" ? { timestamp: formatLocalTime(item.timestamp) } : {}), ...(typeof item.created_at === "string" ? { created_at: formatLocalTime(item.created_at) } : {}) })}</pre>)}{!logs.length && <EmptyState title="No matching records loaded" detail="Adjust filters or verify PostgreSQL connectivity." />}</section>
+      <section className="panel section"><div className="table-heading"><strong>{tab === "audit" ? "ACS audit records" : tab === "auth" ? "Access authorization events" : tab === "incidents" ? "Persisted incidents" : tab === "commands" ? "Elevator command statuses (COM-3)" : "Security alerts"} · database</strong><span>{logs.length} shown</span></div>{logs.map((item, i) => <pre className="event-row" key={i}>{JSON.stringify({ ...item, ...(typeof item.timestamp === "string" ? { timestamp: formatLocalTime(item.timestamp) } : {}), ...(typeof item.created_at === "string" ? { created_at: formatLocalTime(item.created_at) } : {}) })}</pre>)}{!logs.length && <EmptyState title="No matching records loaded" detail="Adjust filters or verify PostgreSQL connectivity." />}</section>
       <section className="panel section"><div className="table-heading"><strong>Simulator event trace · not tamper-evident</strong><span>{stubEvents.length} shown</span></div>{stubEvents.map((event, i) => <p className="event-row" key={i}>{formatLocalTime(event.timestamp)} · {event.event_type} · {event.elevator_id ?? "Building"} · {event.detail}</p>)}</section>
     </>}
   </>;

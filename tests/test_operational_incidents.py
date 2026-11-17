@@ -235,6 +235,22 @@ class TestIncidentsAndRecovery(unittest.TestCase):
         self.assertEqual(self.sim.cars[rescue_id].availability, "IN_SERVICE")
         self.assertEqual(self.sim.cars[rescue_id].stops, [])
 
+    def test_com3_command_statuses_acknowledged_rejected_timed_out_unknown(self):
+        # 1. ACKNOWLEDGED
+        self.sim.submit_car_call("E1", 5)
+        # 2. REJECTED
+        with self.assertRaises(OperationalError):
+            self.sim.submit_car_call("E5", -1)
+        # 3. UNKNOWN (in-flight command when comm loss occurs)
+        self.sim.communication_loss("E1", actor="TECH-1")
+        # 4. TIMED_OUT (armed timeout on E2)
+        self.sim.arm_command_timeout("E2", True)
+        with self.assertRaisesRegex(OperationalError, "timed out"):
+            self.sim.submit_car_call("E2", 7)
+        self.assertEqual(self.sim.cars["E2"].availability, "STALE")
+        statuses = {c["status"] for c in self.sim.commands}
+        self.assertEqual(statuses, {"ACKNOWLEDGED", "REJECTED", "UNKNOWN", "TIMED_OUT"})
+
 
 if __name__ == "__main__":
     unittest.main()

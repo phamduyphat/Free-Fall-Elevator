@@ -362,6 +362,19 @@ CREATE INDEX IF NOT EXISTS idx_incidents_created_at ON incidents (created_at);
 CREATE INDEX IF NOT EXISTS idx_incidents_elevator_id ON incidents (elevator_id);
 CREATE INDEX IF NOT EXISTS idx_incidents_incident_type ON incidents (incident_type);
 
+CREATE TABLE IF NOT EXISTS elevator_commands (
+    command_id   VARCHAR(36) PRIMARY KEY DEFAULT gen_random_uuid()::text,
+    command_type VARCHAR(40) NOT NULL,
+    elevator_id  VARCHAR(5)  NULL CHECK (elevator_id IS NULL OR elevator_id IN ('E1', 'E2', 'E3', 'E4', 'E5')),
+    status       VARCHAR(20) NOT NULL CHECK (status IN ('ACKNOWLEDGED', 'REJECTED', 'TIMED_OUT', 'UNKNOWN')),
+    detail       TEXT        NULL,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_elevator_commands_created_at ON elevator_commands (created_at);
+CREATE INDEX IF NOT EXISTS idx_elevator_commands_status ON elevator_commands (status);
+CREATE INDEX IF NOT EXISTS idx_elevator_commands_elevator_id ON elevator_commands (elevator_id);
+
 -- Idempotent schema alignment for existing databases created with earlier seed.sql revisions
 DO $$
 BEGIN
