@@ -126,16 +126,22 @@ class _FakeDbConn:
             row = {
                 "incident_id": args[0],
                 "incident_type": args[1],
-                "elevator_id": args[2],
-                "floor": args[3],
-                "status": args[4],
-                "severity": args[5],
-                "details": args[6],
-                "created_at": args[7],
-                "acknowledged_at": args[8],
-                "resolved_at": args[9],
-                "resolved_by": args[10],
-                "rescue_car_id": args[11],
+                "scope": args[2],
+                "elevator_id": args[3],
+                "floor": args[4],
+                "trigger_source": args[5],
+                "status": args[6],
+                "severity": args[7],
+                "details": args[8],
+                "created_at": args[9],
+                "acknowledged_at": args[10],
+                "resolved_at": args[11],
+                "resolved_by": args[12],
+                "rescue_car_id": args[13],
+                "direction": args[14],
+                "notification_status": args[15],
+                "related_requests": args[16],
+                "resolution_history": args[17],
             }
             self._upsert("incidents", "incident_id", row)
         elif q.startswith("INSERT INTO car_downtime_intervals"):
@@ -364,7 +370,13 @@ class TestSchemaAndPersistenceAlignment(unittest.TestCase):
         self.assertIn(cc["request_id"], restored.car_calls)
         self.assertEqual(restored.car_calls[cc["request_id"]].status, "COMPLETED")
         self.assertIn(inc["incident_id"], restored.incidents)
-        self.assertEqual(restored.incidents[inc["incident_id"]].kind, "HELP")
+        restored_inc = restored.incidents[inc["incident_id"]]
+        self.assertEqual(restored_inc.kind, "HELP")
+        self.assertEqual(restored_inc.scope, "CAR_SPECIFIC")
+        self.assertEqual(restored_inc.trigger_source, "PASSENGER_HELP")
+        self.assertEqual(restored_inc.notification_status, "NOTIFIED")
+        self.assertEqual(restored_inc.direction, "IDLE")
+        self.assertEqual(restored_inc.history, ["OPEN"])
         self.assertEqual(len(restored.trips), len(sim.trips))
         self.assertEqual(len(restored.downtime_intervals), len(sim.downtime_intervals))
         self.assertEqual(len(restored.heartbeats), len(sim.heartbeats) + 1)

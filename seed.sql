@@ -350,7 +350,11 @@ CREATE TABLE IF NOT EXISTS incidents (
     acknowledged_at TIMESTAMPTZ NULL,
     resolved_at     TIMESTAMPTZ NULL,
     resolved_by     VARCHAR(64) NULL,
-    rescue_car_id   VARCHAR(5)  NULL CHECK (rescue_car_id IS NULL OR rescue_car_id IN ('E1', 'E2', 'E3', 'E4', 'E5'))
+    rescue_car_id   VARCHAR(5)  NULL CHECK (rescue_car_id IS NULL OR rescue_car_id IN ('E1', 'E2', 'E3', 'E4', 'E5')),
+    direction       VARCHAR(10) NULL CHECK (direction IS NULL OR direction IN ('UP', 'DOWN', 'IDLE')),
+    notification_status VARCHAR(25) NOT NULL DEFAULT 'NOTIFIED',
+    related_requests JSONB NOT NULL DEFAULT '[]'::jsonb,
+    resolution_history JSONB NOT NULL DEFAULT '[]'::jsonb
 );
 
 CREATE INDEX IF NOT EXISTS idx_incidents_status ON incidents (status);
@@ -383,6 +387,21 @@ BEGIN
     END IF;
     IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'car_downtime_intervals' AND column_name = 'cause') THEN
         ALTER TABLE car_downtime_intervals ADD COLUMN cause TEXT NULL;
+    END IF;
+
+    -- incidents EMR-3.4 alignment
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'incidents' AND column_name = 'direction') THEN
+        ALTER TABLE incidents ADD COLUMN direction VARCHAR(10) NULL CHECK (direction IS NULL OR direction IN ('UP', 'DOWN', 'IDLE'));
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'incidents' AND column_name = 'notification_status') THEN
+        ALTER TABLE incidents ADD COLUMN notification_status VARCHAR(25) NOT NULL DEFAULT 'NOTIFIED';
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'incidents' AND column_name = 'related_requests') THEN
+        ALTER TABLE incidents ADD COLUMN related_requests JSONB NOT NULL DEFAULT '[]'::jsonb;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'incidents' AND column_name = 'resolution_history') THEN
+        ALTER TABLE incidents ADD COLUMN resolution_history JSONB NOT NULL DEFAULT '[]'::jsonb;
+    END IF;
     ELSE
         ALTER TABLE car_downtime_intervals ALTER COLUMN cause DROP NOT NULL;
     END IF;

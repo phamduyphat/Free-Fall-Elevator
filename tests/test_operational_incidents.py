@@ -196,6 +196,45 @@ class TestIncidentsAndRecovery(unittest.TestCase):
         )
         self.assertIsNotNone(second_dispatch["rescue_car_id"])
 
+    def test_emr34_incident_fields_populated(self):
+        hc, _ = self.sim.submit_hall_call(origin_floor=6, direction="UP")
+        assigned_car = hc["assigned_car"]
+        med_inc = self.sim.trigger_emergency(assigned_car, "MEDICAL")
+        self.assertEqual(med_inc["scope"], "CAR_SPECIFIC")
+        self.assertEqual(med_inc["trigger_source"], "PASSENGER_MEDICAL")
+        self.assertEqual(med_inc["notification_status"], "NOTIFIED")
+        self.assertIn(med_inc["direction"], ("UP", "DOWN", "IDLE"))
+        self.assertIn(hc["request_id"], med_inc["related_requests"])
+        self.assertEqual(med_inc["history"], ["OPEN"])
+
+        phone_inc = self.sim.phone_medical_incident(4)
+        self.assertEqual(phone_inc["scope"], "CAR_SPECIFIC")
+        self.assertEqual(phone_inc["trigger_source"], "ADMIN_MANUAL")
+        self.assertIsNone(phone_inc["direction"])
+
+    def test_stuck_car_rescue_targets_stopped_floor_and_releases_on_resolve(self):
+        self.sim.submit_hall_call(origin_floor=10, direction="UP")
+        help_inc = self.sim.trigger_emergency("E1", "HELP")
+        self.assertEqual(help_inc["floor"], 1)
+        self.sim.advance(5)  # E1 moves to floor 6 while still serving
+        stuck = self.sim.confirm_help_as_stuck(help_inc["incident_id"], actor="ADMIN-1")
+        self.assertEqual(stuck["floor"], 6)
+        dispatched = self.sim.dispatch_rescue(
+            help_inc["incident_id"], confirmed_empty=True, wait_seconds=120
+        )
+        rescue_id = dispatched["rescue_car_id"]
+        self.assertTrue(self.sim.cars[rescue_id].rescue_active)
+        self.sim.advance(2)
+        self.sim.incident_action(
+            help_inc["incident_id"],
+            "RESOLVE",
+            actor="ADMIN-1",
+            technician_confirmation=True,
+        )
+        self.assertFalse(self.sim.cars[rescue_id].rescue_active)
+        self.assertEqual(self.sim.cars[rescue_id].availability, "IN_SERVICE")
+        self.assertEqual(self.sim.cars[rescue_id].stops, [])
+
 
 if __name__ == "__main__":
     unittest.main()

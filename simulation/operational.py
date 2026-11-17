@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
+import json
 import os
 from statistics import mean, median
 import threading
@@ -139,6 +140,11 @@ class Incident:
     confirmed: bool = False
     escalated: bool = False
     acknowledged_at: datetime | None = None
+    scope: str = "CAR_SPECIFIC"
+    direction: str | None = None
+    trigger_source: str = "SENSOR_TRIP"
+    notification_status: str = "NOTIFIED"
+    related_requests: list[str] = field(default_factory=list)
     history: list[str] = field(default_factory=lambda: ["OPEN"])
 
 
@@ -799,10 +805,42 @@ class OperationalSimulator:
                             "timestamp": self._now().isoformat(), "event_type": event_type,
                             "elevator_id": elevator_id, "detail": detail})
 
-    def _create_incident(self, kind: str, elevator_id: str | None,
-                         details: str, severity: str = "HIGH", floor: int | None = None) -> Incident:
-        incident = Incident(str(uuid4()), kind, elevator_id, "OPEN", severity,
-                            self._now(), details, floor=floor)
+    def _create_incident(
+        self,
+        kind: str,
+        elevator_id: str | None,
+        details: str,
+        severity: str = "HIGH",
+        floor: int | None = None,
+        *,
+        scope: str | None = None,
+        direction: str | None = None,
+        trigger_source: str = "SENSOR_TRIP",
+        related_requests: list[str] | None = None,
+    ) -> Incident:
+        resolved_scope = scope or (
+            "BUILDING_WIDE" if kind in ("FIRE", "POWER_FAILURE") else "CAR_SPECIFIC"
+        )
+        resolved_dir = direction
+        if resolved_dir is None and elevator_id and elevator_id in self.cars:
+            car = self.cars[elevator_id]
+            if car.connected and car.availability != "STALE":
+                resolved_dir = car.direction
+        incident = Incident(
+            str(uuid4()),
+            kind,
+            elevator_id,
+            "OPEN",
+            severity,
+            self._now(),
+            details,
+            floor=floor,
+            scope=resolved_scope,
+            direction=resolved_dir,
+            trigger_source=trigger_source,
+            notification_status="NOTIFIED",
+            related_requests=list(related_requests) if related_requests else [],
+        )
         self.incidents[incident.incident_id] = incident
         self._event("INCIDENT_OPEN", elevator_id, f"{kind}: {incident.incident_id}")
         return incident
@@ -875,6 +913,7 @@ class OperationalSimulator:
             if (incident.status not in ("RESOLVED", "CLOSED") and not incident.escalated
                     and (self._now() - incident.created_at).total_seconds() >= 60):
                 incident.escalated = True
+                incident.notification_status = "ESCALATED"
                 incident.history.append("ESCALATED")
                 self._event("INCIDENT_ESCALATION", incident.elevator_id,
                             f"Repeat security notification: {incident.incident_id}")
@@ -886,9 +925,18 @@ class OperationalSimulator:
             car = self._car(elevator_id)
             if kind not in ("HELP", "MEDICAL"):
                 raise OperationalError("Emergency option must be HELP or MEDICAL")
-            incident = self._create_incident(kind, elevator_id,
+            car_dir = car.direction if car.connected and car.availability != "STALE" else None
+            affected_reqs = [s.request_id for s in car.stops]
+            incident = self._create_incident(
+                kind,
+                elevator_id,
                 "Passenger requested assistance from inside the simulated car",
-                "CRITICAL" if kind == "MEDICAL" else "HIGH", car.current_floor)
+                "CRITICAL" if kind == "MEDICAL" else "HIGH",
+                car.current_floor,
+                direction=car_dir,
+                trigger_source="PASSENGER_MEDICAL" if kind == "MEDICAL" else "PASSENGER_HELP",
+                related_requests=affected_reqs,
+            )
             triggers = self._emergency_triggers.setdefault(elevator_id, [])
             triggers[:] = [tick for tick in triggers if self.sim_tick - tick <= 60]
             triggers.append(self.sim_tick)
@@ -915,6 +963,11 @@ class OperationalSimulator:
             incident = self._incident(incident_id)
             if incident.kind != "HELP" or incident.status in ("RESOLVED", "CLOSED", "FALSE_ALARM"):
                 raise OperationalError("Only an open HELP request can be confirmed as stuck")
+            if incident.elevator_id and incident.elevator_id in self.cars:
+                stopped_car = self.cars[incident.elevator_id]
+                incident.floor = stopped_car.current_floor
+                if stopped_car.connected and stopped_car.availability != "STALE":
+                    incident.direction = stopped_car.direction
             incident.kind = "STUCK_CAR"
             incident.confirmed = True
             incident.history.append("CONFIRMED_STUCK")
@@ -927,8 +980,16 @@ class OperationalSimulator:
             self._update_auto()
             if kind not in ("FIRE", "POWER_FAILURE"):
                 raise OperationalError("Building event must be FIRE or POWER_FAILURE")
-            incident = self._create_incident(kind, None,
-                "Simulated building-wide event. Ordinary dispatch suspended; no recall.", "CRITICAL")
+            affected_reqs = [s.request_id for c in self.cars.values() for s in c.stops]
+            incident = self._create_incident(
+                kind,
+                None,
+                "Simulated building-wide event. Ordinary dispatch suspended; no recall.",
+                "CRITICAL",
+                scope="BUILDING_WIDE",
+                trigger_source="ADMIN_MANUAL" if actor else "SENSOR_TRIP",
+                related_requests=affected_reqs,
+            )
             for elevator_id in self.ELEVATOR_IDS:
                 self.isolate(elevator_id, "EMERGENCY_UNAVAILABLE", technician_id=actor)
                 self.cars[elevator_id].message = f"{kind} reported: wait for staff instructions"
@@ -943,9 +1004,21 @@ class OperationalSimulator:
             if not fault_code.strip() or len(fault_code) > 80:
                 raise OperationalError("Fault code must contain 1..80 characters")
             car.active_fault = fault_code.strip()
+            car_dir = car.direction if car.connected and car.availability != "STALE" else None
+            affected_reqs = [s.request_id for s in car.stops]
             if car.availability != "EMERGENCY_UNAVAILABLE":
                 self.isolate(elevator_id, "FAULT", technician_id=actor)
-            return asdict(self._create_incident("BLOCKING_FAULT", elevator_id, fault_code.strip()))
+            return asdict(
+                self._create_incident(
+                    "BLOCKING_FAULT",
+                    elevator_id,
+                    fault_code.strip(),
+                    floor=car.current_floor,
+                    direction=car_dir,
+                    trigger_source="SENSOR_TRIP",
+                    related_requests=affected_reqs,
+                )
+            )
 
     def clear_fault(self, elevator_id: str) -> dict:
         """Simulated fault-clear sensor event; does not itself restore service."""
@@ -994,9 +1067,20 @@ class OperationalSimulator:
     def communication_loss(self, elevator_id: str, *, actor: str | None = None) -> dict:
         with self._lock:
             self._update_auto()
+            car = self._car(elevator_id)
+            affected_reqs = [s.request_id for s in car.stops]
             self.isolate(elevator_id, "STALE", technician_id=actor)
-            return asdict(self._create_incident("COMMUNICATION_LOSS", elevator_id,
-                "Connection lost; outstanding commands require reconciliation"))
+            return asdict(
+                self._create_incident(
+                    "COMMUNICATION_LOSS",
+                    elevator_id,
+                    "Connection lost; outstanding commands require reconciliation",
+                    floor=car.current_floor,
+                    direction=None,
+                    trigger_source="TIMEOUT",
+                    related_requests=affected_reqs,
+                )
+            )
 
     def can_reconcile_connection(self, elevator_id: str) -> None:
         with self._lock:
@@ -1034,8 +1118,17 @@ class OperationalSimulator:
             self._update_auto()
             if type(floor) is not int or not 1 <= floor <= 30:
                 raise OperationalError("Medical rescue floor must be 1..30")
-            return asdict(self._create_incident("MEDICAL", None,
-                             "Admin-reported medical emergency by telephone", "CRITICAL", floor))
+            return asdict(
+                self._create_incident(
+                    "MEDICAL",
+                    None,
+                    "Admin-reported medical emergency by telephone",
+                    "CRITICAL",
+                    floor,
+                    scope="CAR_SPECIFIC",
+                    trigger_source="ADMIN_MANUAL",
+                )
+            )
 
     def select_rescue_candidate(
         self,
@@ -1212,6 +1305,7 @@ class OperationalSimulator:
                 if incident.status != "OPEN":
                     raise OperationalError("Only OPEN incidents can be acknowledged")
                 incident.status = "ACKNOWLEDGED"
+                incident.notification_status = "ACKNOWLEDGED"
                 incident.acknowledged_by = actor
                 incident.acknowledged_at = self._now()
             elif action == "RESOLVE":
@@ -1227,8 +1321,21 @@ class OperationalSimulator:
                         if not self.recoverable(incident.elevator_id):
                             raise OperationalError("Recovery checks not satisfied")
                 incident.status = "RESOLVED"
+                incident.notification_status = "RESOLVED"
                 incident.resolved_at = self._now()
                 incident.resolved_by = actor
+                if incident.rescue_car_id and incident.rescue_car_id in self.cars:
+                    rcar = self.cars[incident.rescue_car_id]
+                    if rcar.rescue_active:
+                        rcar.stops = [s for s in rcar.stops if s.kind != "RESCUE"]
+                        rcar.rescue_active = False
+                        rcar.rescue_wait_remaining = 0
+                        rcar.dwell_remaining = 0
+                        rcar.door_state = "CLOSED"
+                        rcar.direction = "IDLE"
+                        rcar.message = "Rescue released on incident resolution"
+                        incident.history.append("RESCUE_RELEASED")
+                        self._event("RESCUE_RELEASE", rcar.elevator_id, incident_id)
                 if incident.kind in ("FIRE", "POWER_FAILURE"):
                     if not any(i is not incident and i.kind in ("FIRE", "POWER_FAILURE")
                                and i.status not in ("RESOLVED", "CLOSED", "FALSE_ALARM") for i in self.incidents.values()):
@@ -1255,8 +1362,21 @@ class OperationalSimulator:
                 if incident.elevator_id and self.cars[incident.elevator_id].rescue_active:
                     raise OperationalError("Rescue car still active")
                 incident.status = "FALSE_ALARM"
+                incident.notification_status = "RESOLVED"
                 incident.resolved_at = self._now()
                 incident.resolved_by = actor
+                if incident.rescue_car_id and incident.rescue_car_id in self.cars:
+                    rcar = self.cars[incident.rescue_car_id]
+                    if rcar.rescue_active:
+                        rcar.stops = [s for s in rcar.stops if s.kind != "RESCUE"]
+                        rcar.rescue_active = False
+                        rcar.rescue_wait_remaining = 0
+                        rcar.dwell_remaining = 0
+                        rcar.door_state = "CLOSED"
+                        rcar.direction = "IDLE"
+                        rcar.message = "Rescue released on false-alarm closure"
+                        incident.history.append("RESCUE_RELEASED")
+                        self._event("RESCUE_RELEASE", rcar.elevator_id, incident_id)
                 if incident.elevator_id:
                     car = self.cars[incident.elevator_id]
                     if car.availability in ("EMERGENCY_UNAVAILABLE", "FAULT", "MAINTENANCE") and self.recoverable(incident.elevator_id):
@@ -1468,21 +1588,28 @@ class OperationalSimulator:
                 await conn.execute(  # type: ignore[union-attr]
                     """
                     INSERT INTO incidents (
-                        incident_id, incident_type, elevator_id, floor, status, severity,
-                        details, created_at, acknowledged_at, resolved_at, resolved_by, rescue_car_id
+                        incident_id, incident_type, scope, elevator_id, floor, trigger_source,
+                        status, severity, details, created_at, acknowledged_at, resolved_at,
+                        resolved_by, rescue_car_id, direction, notification_status,
+                        related_requests, resolution_history
                     )
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17::jsonb, $18::jsonb)
                     ON CONFLICT (incident_id) DO UPDATE SET
                         status = EXCLUDED.status,
                         acknowledged_at = COALESCE(EXCLUDED.acknowledged_at, incidents.acknowledged_at),
                         resolved_at = EXCLUDED.resolved_at,
                         resolved_by = EXCLUDED.resolved_by,
-                        rescue_car_id = EXCLUDED.rescue_car_id;
+                        rescue_car_id = EXCLUDED.rescue_car_id,
+                        notification_status = EXCLUDED.notification_status,
+                        related_requests = EXCLUDED.related_requests,
+                        resolution_history = EXCLUDED.resolution_history;
                     """,
                     inc.incident_id,
                     kind_map.get(inc.kind, "HELP_REQUEST"),
+                    inc.scope,
                     inc.elevator_id,
                     inc.floor,
+                    inc.trigger_source,
                     status_map.get(inc.status, "OPEN"),
                     severity_map.get(inc.severity, "LOW"),
                     inc.details,
@@ -1491,6 +1618,10 @@ class OperationalSimulator:
                     _aware(inc.resolved_at),
                     inc.resolved_by,
                     inc.rescue_car_id,
+                    inc.direction,
+                    inc.notification_status,
+                    json.dumps(inc.related_requests),
+                    json.dumps(inc.history),
                 )
 
             # 5. Downtime
@@ -1614,8 +1745,10 @@ class OperationalSimulator:
                 dict(r)
                 for r in await conn.fetch(  # type: ignore[union-attr]
                     """
-                    SELECT incident_id, incident_type, elevator_id, floor, status,
-                           severity, details, created_at, resolved_at, resolved_by, rescue_car_id
+                    SELECT incident_id, incident_type, scope, elevator_id, floor, trigger_source,
+                           status, severity, details, created_at, acknowledged_at, resolved_at,
+                           resolved_by, rescue_car_id, direction, notification_status,
+                           related_requests, resolution_history
                     FROM incidents
                     ORDER BY created_at ASC
                     """
@@ -1791,6 +1924,17 @@ class OperationalSimulator:
                     if row.get("resolved_at") is not None
                     else None
                 )
+                raw_related = row.get("related_requests")
+                if isinstance(raw_related, str):
+                    raw_related = json.loads(raw_related)
+                raw_history = row.get("resolution_history")
+                if isinstance(raw_history, str):
+                    raw_history = json.loads(raw_history)
+                ack_ts = (
+                    _normalize_utc(row["acknowledged_at"])
+                    if row.get("acknowledged_at") is not None
+                    else None
+                )
                 inc = Incident(
                     incident_id=str(row["incident_id"]),
                     kind=kind,
@@ -1803,7 +1947,13 @@ class OperationalSimulator:
                     resolved_by=row.get("resolved_by"),
                     resolved_at=resolved_ts,
                     rescue_car_id=row.get("rescue_car_id"),
-                    history=["OPEN"] if status == "OPEN" else ["OPEN", status],
+                    acknowledged_at=ack_ts,
+                    scope=str(row.get("scope") or ("BUILDING_WIDE" if kind in ("FIRE", "POWER_FAILURE") else "CAR_SPECIFIC")),
+                    direction=row.get("direction"),
+                    trigger_source=str(row.get("trigger_source") or "SENSOR_TRIP"),
+                    notification_status=str(row.get("notification_status") or "NOTIFIED"),
+                    related_requests=[str(x) for x in raw_related] if isinstance(raw_related, list) else [],
+                    history=[str(x) for x in raw_history] if isinstance(raw_history, list) and raw_history else (["OPEN"] if status == "OPEN" else ["OPEN", status]),
                 )
                 self.incidents[inc.incident_id] = inc
                 timestamps.append(inc.created_at)

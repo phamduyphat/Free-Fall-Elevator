@@ -24,6 +24,12 @@ export type ApiResult = {
     details: string;
     history: string[];
     rescue_car_id: string | null;
+    scope?: string;
+    direction?: string | null;
+    trigger_source?: string;
+    notification_status?: string;
+    related_requests?: string[];
+    created_at?: string;
   };
   session_token?: string;
   details?: {

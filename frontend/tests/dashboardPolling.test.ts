@@ -72,4 +72,8 @@ test("App.tsx wires MNT-4.2/4.3/4.5, SEC-2.14 search, and FR-1.13 E5 service run
   assert.match(appSource, /RESCUE_BOARDED/);
   assert.match(appSource, /isEmergencyCar/);
   assert.match(appSource, /EMERGENCY RESCUE/);
+  assert.match(appSource, /incident\.notification_status/);
+  assert.match(appSource, /incident\.trigger_source/);
+  assert.match(appSource, /incident\.related_requests/);
+  assert.match(appSource, /\/api\/v1\/operational\/incidents\/rescue\/cancel/);
 });
