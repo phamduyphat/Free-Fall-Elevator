@@ -14,6 +14,8 @@ import threading
 import time
 from typing import Literal
 from uuid import uuid4
+from db import DbConnectionPool
+import asyncio
 
 CarAvailability = Literal["IN_SERVICE", "OCCUPIED", "MAINTENANCE", "FAULT", "EMERGENCY_UNAVAILABLE", "STALE"]
 HallDirection = Literal["UP", "DOWN"]
@@ -32,6 +34,13 @@ def _position(floor: int) -> int:
 
 def _floor_from_position(position: int) -> int:
     return -1 if position == 0 else position
+
+
+def _normalize_utc(ts: datetime) -> datetime:
+    """Normalize naive or tz-aware datetimes to offset-aware UTC to match SimulationClock and TIMESTAMPTZ."""
+    if ts.tzinfo is None:
+        return ts.replace(tzinfo=timezone.utc)
+    return ts.astimezone(timezone.utc)
 
 
 @dataclass
@@ -143,7 +152,11 @@ class OperationalSimulator:
             self.heartbeats: list[dict] = []
             self._emergency_triggers: dict[str, list[int]] = {}
             self.sim_tick = 0
-            self.base_time = base_time if base_time is not None else datetime.now(timezone.utc)
+            self.base_time = (
+                _normalize_utc(base_time)
+                if base_time is not None
+                else datetime.now(timezone.utc)
+            )
             self._wall_reference = time.monotonic()
             self._synced_trips_idx = 0
             self._synced_downtime_idx = 0
@@ -571,6 +584,9 @@ class OperationalSimulator:
 
     def advance(self, seconds: int = 1) -> dict:
         """Deterministic stepping for tests, without a hardware control command."""
+
+        
+
         if type(seconds) is not int or not (0 <= seconds <= 10000):
             raise OperationalError("seconds must be an integer between 0 and 10000")
         with self._lock:
@@ -991,9 +1007,14 @@ class OperationalSimulator:
                 current_downtime_len = len(self.downtime_intervals)
                 current_heartbeats_len = len(self.heartbeats)
 
+            def _aware(dt: datetime | None) -> datetime | None:
+                return _normalize_utc(dt) if dt is not None else None
+
             # 1. Hall Calls
             for r in hall_calls_snapshot:
                 valid_status = r.status if r.status in ('RECEIVED', 'QUEUED', 'ASSIGNED', 'APPROACHING', 'ARRIVED', 'COMPLETED', 'CANCELLED', 'FAILED', 'BLOCKED') else 'QUEUED'
+                accepted_at = _aware(r.accepted_at)
+                arrived_at = _aware(r.arrived_at)
                 await conn.execute(  # type: ignore[union-attr]
                     """
                     INSERT INTO hall_calls (
@@ -1018,11 +1039,11 @@ class OperationalSimulator:
                     r.call_type == "FREIGHT",
                     r.assigned_car,
                     valid_status,
-                    r.accepted_at,
-                    r.accepted_at if r.assigned_car else None,
-                    r.arrived_at if r.status in ('APPROACHING', 'ARRIVED', 'COMPLETED') else None,
-                    r.arrived_at,
-                    r.arrived_at if r.status == 'COMPLETED' else None,
+                    accepted_at,
+                    accepted_at if r.assigned_car else None,
+                    arrived_at if r.status in ('APPROACHING', 'ARRIVED', 'COMPLETED') else None,
+                    arrived_at,
+                    arrived_at if r.status == 'COMPLETED' else None,
                     r.wait_seconds,
                     r.reassignment_count,
                     r.no_boarding,
@@ -1046,8 +1067,8 @@ class OperationalSimulator:
                     t["elevator_id"],
                     t["origin_floor"],
                     t["destination_floor"],
-                    t["departure_time"],
-                    t["arrival_time"],
+                    _aware(t["departure_time"]),
+                    _aware(t["arrival_time"]),
                     float(t["travel_time_seconds"]),
                     t["floors_traversed"],
                     t.get("motor_starts", 1),
@@ -1059,6 +1080,8 @@ class OperationalSimulator:
             # 3. Car Calls
             for c in car_calls_snapshot:
                 valid_car_status = c.status if c.status in ('RECEIVED', 'AUTHORIZATION_CHECK', 'QUEUED', 'IN_TRANSIT', 'COMPLETED', 'REJECTED', 'CANCELLED', 'FAILED', 'BLOCKED') else 'QUEUED'
+                c_accepted = _aware(c.accepted_at)
+                c_completed = _aware(c.completed_at)
                 await conn.execute(  # type: ignore[union-attr]
                     """
                     INSERT INTO car_calls (
@@ -1076,9 +1099,9 @@ class OperationalSimulator:
                     c.destination_floor,
                     None,
                     valid_car_status,
-                    c.accepted_at,
-                    c.completed_at,
-                    (c.completed_at - c.accepted_at).total_seconds() if c.completed_at else None,
+                    c_accepted,
+                    c_completed,
+                    (c_completed - c_accepted).total_seconds() if c_completed and c_accepted else None,
                     c.is_service_run,
                     None
                 )
@@ -1130,9 +1153,9 @@ class OperationalSimulator:
                     status_map.get(inc.status, "OPEN"),
                     severity_map.get(inc.severity, "LOW"),
                     inc.details,
-                    inc.created_at,
+                    _aware(inc.created_at),
                     None,
-                    inc.resolved_at,
+                    _aware(inc.resolved_at),
                     inc.resolved_by,
                     inc.rescue_car_id,
                 )
@@ -1161,8 +1184,8 @@ class OperationalSimulator:
                     di["elevator_id"],
                     state_map.get(di["state"], "FAULT"),
                     di.get("reason"),
-                    di["started_at"],
-                    di.get("ended_at"),
+                    _aware(di["started_at"]),
+                    _aware(di.get("ended_at")),
                     di.get("duration_seconds"),
                     di.get("ended_at") is None,
                     di.get("technician_id"),
@@ -1177,7 +1200,7 @@ class OperationalSimulator:
                     )
                     VALUES ($1, $2, $3, $4, $5);
                     """,
-                    hb["timestamp"],
+                    _aware(hb["timestamp"]),
                     hb.get("status", "UP"),
                     sum(self._eligible(c) for c in self.cars.values()),
                     sum(r.status not in TERMINAL_STATUSES for r in self.hall_calls.values()),

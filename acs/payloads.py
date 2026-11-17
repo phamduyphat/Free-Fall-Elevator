@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Optional
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
 
 from acs.enums import (
     AuditActionType,
@@ -75,7 +79,7 @@ class CardSwipePayload:
 
     elevator_id: Optional[ElevatorId | str] = None
     credential_id: str = ""
-    timestamp: datetime = field(default_factory=datetime.now)
+    timestamp: datetime = field(default_factory=_utc_now)
     origin_floor: int = 1
     is_dashboard_access: bool = False
 
@@ -86,7 +90,7 @@ class DashboardOperationPayload:
 
     session_token: str
     op_type: DashboardOperationType | str
-    timestamp: datetime = field(default_factory=datetime.now)
+    timestamp: datetime = field(default_factory=_utc_now)
     details: dict[str, Any] = field(default_factory=dict)
 
 
@@ -97,7 +101,7 @@ class CarDestinationRequestPayload:
     elevator_id: ElevatorId | str
     origin_floor: int
     requested_floor: int
-    timestamp: datetime = field(default_factory=datetime.now)
+    timestamp: datetime = field(default_factory=_utc_now)
 
 
 @dataclass
@@ -107,7 +111,7 @@ class E5ServiceRunPayload:
     elevator_id: ElevatorId | str
     destination_floor: int
     purpose: str
-    timestamp: datetime = field(default_factory=datetime.now)
+    timestamp: datetime = field(default_factory=_utc_now)
 
 
 @dataclass
@@ -117,7 +121,7 @@ class MaintenanceOperationPayload:
     credential_id: str
     elevator_id: ElevatorId | str
     operation_type: MaintenanceOperationType | str
-    timestamp: datetime = field(default_factory=datetime.now)
+    timestamp: datetime = field(default_factory=_utc_now)
 
 
 @dataclass
@@ -127,7 +131,7 @@ class ReturnToServicePayload:
     credential_id: str
     elevator_id: ElevatorId | str
     technician_confirmation: bool
-    timestamp: datetime = field(default_factory=datetime.now)
+    timestamp: datetime = field(default_factory=_utc_now)
 
 
 @dataclass
@@ -139,7 +143,7 @@ class EmergencyOverridePayload:
     target_car_id: Optional[ElevatorId | str]
     incident_id: Optional[str]
     reason: str
-    timestamp: datetime = field(default_factory=datetime.now)
+    timestamp: datetime = field(default_factory=_utc_now)
 
 
 @dataclass
@@ -151,7 +155,7 @@ class RescueCarDispatchPayload:
     rescue_car_id: ElevatorId | str
     incident_floor: int
     dwell_wait_seconds: int = 120
-    timestamp: datetime = field(default_factory=datetime.now)
+    timestamp: datetime = field(default_factory=_utc_now)
 
 
 @dataclass
@@ -163,7 +167,7 @@ class CredentialManagementPayload:
     target_user_id: Optional[str] = None
     target_credential_id: Optional[str] = None
     payload_details: dict[str, Any] = field(default_factory=dict)
-    timestamp: datetime = field(default_factory=datetime.now)
+    timestamp: datetime = field(default_factory=_utc_now)
 
 
 @dataclass
@@ -174,7 +178,7 @@ class RevokeAndReissuePayload:
     lost_credential_id: str
     replacement_credential_id: str
     reason: str = "LOST_AND_REPLACED"
-    timestamp: datetime = field(default_factory=datetime.now)
+    timestamp: datetime = field(default_factory=_utc_now)
 
 
 @dataclass

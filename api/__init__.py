@@ -6,13 +6,14 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from api.routes import router as api_router
 from db import DbConnectionPool
-
+from simulation import SimulationClock
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Manage application-level lifecycle: database connection pool initialization and cleanup."""
     try:
         await DbConnectionPool.init_pool()
+        SimulationClock.start()
     except OSError as exc:
         import logging
         logging.getLogger("srems").warning(
@@ -21,6 +22,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     try:
         yield
     finally:
+        SimulationClock.stop()
         await DbConnectionPool.close_pool()
 
 

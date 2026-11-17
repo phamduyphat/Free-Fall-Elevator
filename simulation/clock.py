@@ -12,21 +12,21 @@ import asyncpg
 from acs.credential_accesscontrol import CredentialAccessControl
 from db import DEFAULT_DSN
 
-DEFAULT_BASE_TIME: datetime = datetime(2026, 1, 1, 0, 0, 0)
-MORNING_PEAK_BASE_TIME: datetime = datetime(2026, 1, 1, 7, 0, 0)
-EVENING_PEAK_BASE_TIME: datetime = datetime(2026, 1, 1, 17, 0, 0)
-OFF_PEAK_BASE_TIME: datetime = datetime(2026, 1, 1, 22, 0, 0)
+DEFAULT_BASE_TIME: datetime = datetime(2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
+MORNING_PEAK_BASE_TIME: datetime = datetime(2026, 1, 1, 7, 0, 0, tzinfo=timezone.utc)
+EVENING_PEAK_BASE_TIME: datetime = datetime(2026, 1, 1, 17, 0, 0, tzinfo=timezone.utc)
+OFF_PEAK_BASE_TIME: datetime = datetime(2026, 1, 1, 22, 0, 0, tzinfo=timezone.utc)
 
 DEFAULT_SIM_SECONDS_PER_TICK: float = 1.0
 DEFAULT_TICK_INTERVAL_SECONDS: float = 1.0
 
 
-def _normalize_utc_naive(ts: datetime | str) -> datetime:
-    """Normalize ISO strings or tz-aware datetimes to naive UTC to match DB TIMESTAMP columns."""
+def _normalize_utc(ts: datetime | str) -> datetime:
+    """Normalize ISO strings or datetimes to offset-aware UTC to match DB TIMESTAMPTZ columns."""
     parsed = datetime.fromisoformat(ts) if isinstance(ts, str) else ts
-    if parsed.tzinfo is not None:
-        return parsed.astimezone(timezone.utc).replace(tzinfo=None)
-    return parsed
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 @dataclass(frozen=True)
@@ -52,11 +52,11 @@ class SimulationClock:
     """
 
     _lock: threading.Lock = threading.Lock()
-    _base_time: datetime = DEFAULT_BASE_TIME
+    _base_time: datetime = datetime.now(timezone.utc)
     _tick: int = 0
     _sim_seconds_per_tick: float = DEFAULT_SIM_SECONDS_PER_TICK
     _tick_interval_seconds: Optional[float] = DEFAULT_TICK_INTERVAL_SECONDS
-    current_time: datetime = DEFAULT_BASE_TIME
+    current_time: datetime = _base_time
 
     _thread: Optional[threading.Thread] = None
     _stop_event: Optional[threading.Event] = None
@@ -65,7 +65,7 @@ class SimulationClock:
 
     @classmethod
     def now(cls) -> datetime:
-        """Return the current virtual simulation timestamp (naive UTC)."""
+        """Return the current virtual simulation timestamp (offset-aware UTC)."""
         with cls._lock:
             return cls.current_time
 
@@ -128,9 +128,7 @@ class SimulationClock:
         from simulation.operational import operational_simulator
 
         operational_simulator.step_from_clock(max(1, int(sim_dt)))
-
-        if db_conn is not None and not db_conn.is_closed():
-            await operational_simulator.sync_to_db(db_conn)
+        await operational_simulator.sync_to_db(db_conn)
 
         if hook is not None:
             hook(next_time, next_tick)
@@ -205,12 +203,20 @@ class SimulationClock:
     @classmethod
     def start(cls) -> bool:
         """Start the background daemon ticker thread if an interval > 0 is configured."""
+        from simulation.operational import operational_simulator
+
         with cls._lock:
             interval = cls._tick_interval_seconds
             if interval is None or interval <= 0:
                 return False
             if cls._thread is not None and cls._thread.is_alive():
                 return True
+            if cls._tick == 0 and operational_simulator.sim_tick == 0:
+                with operational_simulator._lock:
+                    operational_simulator.base_time = cls._base_time
+                    operational_simulator.heartbeats = [
+                        {"timestamp": cls._base_time, "status": "UP"}
+                    ]
             stop_event = threading.Event()
             thread = threading.Thread(
                 target=cls._run_loop,
@@ -227,7 +233,7 @@ class SimulationClock:
     def reset(
         cls,
         *,
-        base_time: datetime | str = DEFAULT_BASE_TIME,
+        base_time: Optional[datetime | str] = None,
         sim_seconds_per_tick: float = DEFAULT_SIM_SECONDS_PER_TICK,
         tick_interval_seconds: Optional[float] = DEFAULT_TICK_INTERVAL_SECONDS,
         start_loop: bool = True,
@@ -239,7 +245,11 @@ class SimulationClock:
             raise ValueError("tick_interval_seconds cannot be negative.")
 
         cls.stop()
-        normalized_base = _normalize_utc_naive(base_time)
+        normalized_base = (
+            _normalize_utc(base_time)
+            if base_time is not None
+            else datetime.now(timezone.utc)
+        )
 
         with cls._lock:
             cls._base_time = normalized_base
@@ -256,7 +266,7 @@ class SimulationClock:
 
         with operational_simulator._lock:
             operational_simulator.base_time = normalized_base
-            operational_simulator.sim_time_seconds = 0
+            operational_simulator.sim_tick = 0
             operational_simulator.heartbeats = [
                 {"timestamp": normalized_base, "status": "UP"}
             ]

@@ -76,6 +76,36 @@ class AdditionalOperationalTests(unittest.TestCase):
         self.assertTrue(len(conn.calls) >= 3)
         self.assertTrue(all(c[0] == "INSERT" for c in conn.calls))
 
+    def test_timestamps_are_aware_utc_for_clock_and_db_sync(self):
+        import asyncio
+        from datetime import datetime, timezone
+
+        # Default reset and naive base_time both normalize to offset-aware UTC
+        self.assertEqual(self.sim.base_time.tzinfo, timezone.utc)
+        self.sim.reset(base_time=datetime(2026, 6, 1, 12, 0, 0))
+        self.assertEqual(self.sim.base_time.tzinfo, timezone.utc)
+        self.assertEqual(self.sim.base_time, datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc))
+
+        # Even if a naive timestamp is injected manually, sync_to_db normalizes it to aware UTC
+        self.sim.submit_hall_call(origin_floor=3, direction="UP")
+        self.sim.advance(5)
+        self.sim.submit_car_call("E1", 6)
+        self.sim.advance(5)
+        for c in self.sim.car_calls.values():
+            c.accepted_at = c.accepted_at.replace(tzinfo=None)
+            if c.completed_at is not None:
+                c.completed_at = c.completed_at.replace(tzinfo=None)
+
+        recorded_args = []
+
+        class CaptureConn:
+            async def execute(self, query, *args):
+                recorded_args.extend(a for a in args if isinstance(a, datetime))
+
+        asyncio.run(self.sim.sync_to_db(CaptureConn()))
+        self.assertTrue(recorded_args)
+        self.assertTrue(all(dt.tzinfo == timezone.utc for dt in recorded_args))
+
 
 if __name__ == "__main__":
     unittest.main()

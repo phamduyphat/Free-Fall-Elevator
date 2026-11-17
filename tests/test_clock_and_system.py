@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import threading
 import time
 
@@ -35,10 +35,10 @@ from tests.conftest import (
 
 
 def test_simulation_clock_constants_and_sequential_thread_loop() -> None:
-    assert DEFAULT_BASE_TIME == datetime(2026, 1, 1, 0, 0, 0)
-    assert MORNING_PEAK_BASE_TIME == datetime(2026, 1, 1, 7, 0, 0)
-    assert EVENING_PEAK_BASE_TIME == datetime(2026, 1, 1, 17, 0, 0)
-    assert OFF_PEAK_BASE_TIME == datetime(2026, 1, 1, 22, 0, 0)
+    assert DEFAULT_BASE_TIME == datetime(2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
+    assert MORNING_PEAK_BASE_TIME == datetime(2026, 1, 1, 7, 0, 0, tzinfo=timezone.utc)
+    assert EVENING_PEAK_BASE_TIME == datetime(2026, 1, 1, 17, 0, 0, tzinfo=timezone.utc)
+    assert OFF_PEAK_BASE_TIME == datetime(2026, 1, 1, 22, 0, 0, tzinfo=timezone.utc)
     assert DEFAULT_SIM_SECONDS_PER_TICK == 1.0
     assert DEFAULT_TICK_INTERVAL_SECONDS == 1.0
 

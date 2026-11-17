@@ -32,12 +32,12 @@ class Logging:
 
     @staticmethod
     def normalize_timestamp(ts: datetime | str) -> datetime:
-        """Normalize a timestamp to a naive datetime suitable for PostgreSQL TIMESTAMP columns."""
+        """Normalize a timestamp to an offset-aware UTC datetime suitable for PostgreSQL TIMESTAMPTZ columns."""
         if isinstance(ts, str):
             ts = datetime.fromisoformat(ts)
-        if ts.tzinfo is not None:
-            return ts.astimezone(timezone.utc).replace(tzinfo=None)
-        return ts
+        if ts.tzinfo is None:
+            return ts.replace(tzinfo=timezone.utc)
+        return ts.astimezone(timezone.utc)
 
     @staticmethod
     def format_timestamp(ts: datetime | str) -> str:
@@ -454,7 +454,7 @@ class Logging:
             await Logging.write_audit(
                 [
                     AuditEntry(
-                        timestamp=timestamp or datetime.now(),
+                        timestamp=timestamp or datetime.now(timezone.utc),
                         actor_id=admin_credential_id,
                         actor_role=admin_role,
                         action_type=AuditActionType.INTEGRITY_CHECK_RUN,
@@ -631,41 +631,68 @@ class Logging:
         limit: int = 100,
         db_pool: type[DbConnectionPool] = DbConnectionPool,
     ) -> list[dict[str, Any]]:
-        """Query `incidents` from `operational_simulator` in-memory state (`ANA-5.7, SEC-2.14, EMR-3.4`)."""
-        from simulation.operational import operational_simulator
+        """Query `incidents` with optional filters (`ANA-5.7, SEC-2.14, EMR-3.4`)."""
+        kind_alias_map = {
+            "HELP": "HELP_REQUEST",
+            "MEDICAL": "MEDICAL_EMERGENCY",
+            "BLOCKING_FAULT": "STUCK_CAR",
+            "COMMUNICATION_LOSS": "COMMUNICATION_FAILURE",
+        }
+        clauses: list[str] = []
+        params: list[Any] = []
 
-        st = Logging.normalize_timestamp(start_time) if start_time is not None else None
-        et = Logging.normalize_timestamp(end_time) if end_time is not None else None
-        results: list[dict[str, Any]] = []
-        with operational_simulator._lock:
-            for inc in operational_simulator.incidents.values():
-                inc_ts = Logging.normalize_timestamp(inc.created_at)
-                if st is not None and inc_ts < st:
-                    continue
-                if et is not None and inc_ts > et:
-                    continue
-                if status is not None and str(inc.status) != str(status):
-                    continue
-                if emergency_type is not None and str(inc.kind) != str(emergency_type):
-                    continue
-                if elevator_id is not None and inc.elevator_id != str(elevator_id):
-                    continue
-                results.append(
-                    {
-                        "incident_id": inc.incident_id,
-                        "emergency_type": inc.kind,
-                        "kind": inc.kind,
-                        "status": inc.status,
-                        "elevator_id": inc.elevator_id,
-                        "incident_floor": inc.floor,
-                        "floor": inc.floor,
-                        "description": inc.details,
-                        "details": inc.details,
-                        "created_at": inc.created_at,
-                        "resolved_at": inc.resolved_at,
-                    }
-                )
-        results.sort(key=lambda r: Logging.normalize_timestamp(r["created_at"]), reverse=True)
-        return results[: max(1, min(limit, 500))]
+        if status is not None:
+            params.append(str(status))
+            clauses.append(f"status = ${len(params)}")
+        if emergency_type is not None:
+            raw_type = str(emergency_type)
+            mapped_type = kind_alias_map.get(raw_type, raw_type)
+            if mapped_type != raw_type:
+                params.append(raw_type)
+                p_raw = len(params)
+                params.append(mapped_type)
+                p_mapped = len(params)
+                clauses.append(f"(incident_type = ${p_raw} OR incident_type = ${p_mapped})")
+            else:
+                params.append(raw_type)
+                clauses.append(f"incident_type = ${len(params)}")
+        if elevator_id is not None:
+            params.append(str(elevator_id))
+            clauses.append(f"elevator_id = ${len(params)}")
+        if start_time is not None:
+            params.append(Logging.normalize_timestamp(start_time))
+            clauses.append(f"created_at >= ${len(params)}")
+        if end_time is not None:
+            params.append(Logging.normalize_timestamp(end_time))
+            clauses.append(f"created_at <= ${len(params)}")
+
+        where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        params.append(max(1, min(limit, 500)))
+        query = f"""
+            SELECT
+                incident_id,
+                incident_type,
+                incident_type AS emergency_type,
+                incident_type AS kind,
+                elevator_id,
+                floor,
+                floor AS incident_floor,
+                status,
+                severity,
+                details,
+                details AS description,
+                created_at,
+                acknowledged_at,
+                resolved_at,
+                resolved_by,
+                rescue_car_id
+            FROM incidents
+            {where_sql}
+            ORDER BY created_at DESC
+            LIMIT ${len(params)}
+        """
+        async with db_pool.acquire() as conn:
+            rows = await conn.fetch(query, *params)
+            return [dict(row) for row in rows]
 
     search_audit_records = search_audit_logs

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import Body, APIRouter, Depends, status
@@ -14,7 +14,6 @@ from api.helpers import auth_denial_response, authorize_dashboard_op, extract_be
 from db import DbConnectionPool, get_db_pool
 from simulation.operational import operational_simulator
 from simulation.clock import (
-    DEFAULT_BASE_TIME,
     DEFAULT_SIM_SECONDS_PER_TICK,
     DEFAULT_TICK_INTERVAL_SECONDS,
     ClockSnapshot,
@@ -27,7 +26,7 @@ router = APIRouter()
 class SystemResetRequest(BaseModel):
     """Parameters for resetting simulation databases, ACS state, and the virtual clock."""
 
-    base_time: datetime = DEFAULT_BASE_TIME
+    base_time: Optional[datetime] = None
     sim_seconds_per_tick: float = Field(default=DEFAULT_SIM_SECONDS_PER_TICK, gt=0)
     tick_interval_seconds: Optional[float] = Field(
         default=DEFAULT_TICK_INTERVAL_SECONDS, ge=0
@@ -90,12 +89,13 @@ async def reset_system(
 
     SimulationClock.stop()
     await db_pool.reset_database_tables()
-    operational_simulator.reset()
+    target_base = body.base_time if body.base_time is not None else datetime.now(timezone.utc)
+    operational_simulator.reset(base_time=target_base)
     CabAccessControl.reset_in_memory_state()
     DashboardAccessControl.reset_in_memory_state()
 
     snapshot = SimulationClock.reset(
-        base_time=body.base_time,
+        base_time=target_base,
         sim_seconds_per_tick=body.sim_seconds_per_tick,
         tick_interval_seconds=body.tick_interval_seconds,
         start_loop=body.start_loop,
