@@ -15,9 +15,9 @@ const apiSource = fs.readFileSync(
 );
 
 test("App.tsx polls fleet/summary and Security alerts under 1s (PERF-3)", () => {
-  // Global fleet/summary polling at 750ms
+  // Global fleet/summary polling at 500ms
   assert.match(appSource, /onFleetRefresh\(\)\.finally/);
-  assert.match(appSource, /750/);
+  assert.match(appSource, /500/);
 
   // Security view polls both incidents and database security alerts
   assert.match(appSource, /\/api\/v1\/operational\/incidents/);
@@ -67,4 +67,6 @@ test("App.tsx wires MNT-4.2/4.3/4.5, SEC-2.14 search, and FR-1.13 E5 service run
   }
   assert.match(appSource, /car\.active_fault/);
   assert.match(appSource, /mismatch_index/);
+  assert.match(appSource, /function SearchSelect/);
+  assert.match(appSource, /role="combobox"/);
 });

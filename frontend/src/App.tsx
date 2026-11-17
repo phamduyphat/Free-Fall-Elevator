@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { authorizedApi, postApi, requestCabDestination, swipeCabCard } from "./api.ts";
 import type { ApiResult } from "./api.ts";
@@ -227,7 +227,7 @@ function Elevators({ fleet, refresh, token, role }: { fleet: FleetResponse | nul
       if (isStaff && diagCar) tasks.push(loadDiagnostics(diagCar, false));
       void Promise.all(tasks).finally(() => { inFlight = false; });
     };
-    const timer = window.setInterval(poll, 750);
+    const timer = window.setInterval(poll, 500);
     return () => { alive = false; window.clearInterval(timer); };
   }, [refresh, isStaff, diagCar, loadDiagnostics]);
 
@@ -275,21 +275,21 @@ function Elevators({ fleet, refresh, token, role }: { fleet: FleetResponse | nul
     }
   };
 
-  return <><PageHeader eyebrow="Fleet management" title="Elevators" detail="Live polling (750 ms), maintenance isolation, return-to-service clearance, and diagnostics for E1 to E5." action={<button className="button secondary" onClick={() => { void refresh(); }}>Refresh snapshot</button>} />
+  return <><PageHeader eyebrow="Fleet management" title="Elevators" detail="Live polling (500 ms), maintenance isolation, return-to-service clearance, and diagnostics for E1 to E5." action={<button className="button secondary" onClick={() => { void refresh(); }}>Refresh snapshot</button>} />
     {feedback && <p className="authorization-feedback">{feedback}</p>}
     {error && <p className="error-banner" role="alert">{error}</p>}
     <FleetCards fleet={fleet} renderActions={isStaff ? (car) => (
       <div style={{ marginTop: "12px", paddingTop: "10px", borderTop: "1px solid #edf0f4", display: "grid", gap: "8px" }}>
-        <div style={{ display: "flex", gap: "6px", flexWrap: "wrap" }}>
-          <button className="button secondary" style={{ padding: "6px 9px", fontSize: "11px" }} disabled={busy} onClick={() => { void loadDiagnostics(car.elevator_id); }}>View Diagnostics</button>
-          <button className="button secondary" style={{ padding: "6px 9px", fontSize: "11px" }} disabled={busy || car.state === "MAINTENANCE"} onClick={() => { void enterMaintenance(car.elevator_id); }}>Enter Maintenance</button>
+        <div style={{ display: "grid", gap: "8px" }}>
+          <button className="button secondary" style={{ width: "100%" }} disabled={busy} onClick={() => { void loadDiagnostics(car.elevator_id); }}>View Diagnostics</button>
+          <button className="button secondary" style={{ width: "100%" }} disabled={busy || car.state === "MAINTENANCE"} onClick={() => { void enterMaintenance(car.elevator_id); }}>Enter Maintenance</button>
         </div>
-        <div style={{ paddingTop: "8px", borderTop: "1px dashed #dfe6ef", display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px", flexWrap: "wrap" }}>
-          <label style={{ display: "flex", alignItems: "center", gap: "5px", fontSize: "11px", fontWeight: 600, color: "#354156" }}>
+        <div style={{ paddingTop: "8px", borderTop: "1px dashed #dfe6ef", display: "grid", gap: "8px" }}>
+          <label style={{ display: "flex", alignItems: "center", gap: "6px", fontSize: "12px", fontWeight: 600, color: "#354156" }}>
             <input type="checkbox" checked={Boolean(confirmedByCar[car.elevator_id])} onChange={(e) => setConfirmedByCar((prev) => ({ ...prev, [car.elevator_id]: e.target.checked }))} />
             Safety check confirmed
           </label>
-          <button className="button primary" style={{ padding: "6px 9px", fontSize: "11px" }} disabled={busy || !confirmedByCar[car.elevator_id]} onClick={() => { void returnToService(car.elevator_id); }}>Return to Service</button>
+          <button className="button primary" style={{ width: "100%" }} disabled={busy || !confirmedByCar[car.elevator_id]} onClick={() => { void returnToService(car.elevator_id); }}>Return to Service</button>
         </div>
       </div>
     ) : undefined} />
@@ -338,7 +338,7 @@ function Simulation({ fleet, onFleetRefresh }: { fleet: FleetResponse | null; on
       }
     };
     void refresh();
-    const timer = window.setInterval(() => { void refresh(); }, 750);
+    const timer = window.setInterval(() => { void refresh(); }, 500);
     return () => { alive = false; window.clearInterval(timer); };
   }, [updating]);
 
@@ -798,7 +798,7 @@ function Security({ token, role, refreshFleet }: { token: string; role: string; 
       if (!alive || inFlight) return;
       inFlight = true;
       void refresh().finally(() => { inFlight = false; });
-    }, 750);
+    }, 500);
     return () => { alive = false; window.clearInterval(timer); };
   }, [refresh, token]);
   const act = async (path: string, body: object, method: "POST" | "PATCH" = "POST") => {
@@ -811,7 +811,7 @@ function Security({ token, role, refreshFleet }: { token: string; role: string; 
     } catch (reason) { setError(reason instanceof Error ? reason.message : "Operation failed"); }
     finally { setBusy(false); }
   };
-  return <><PageHeader eyebrow="Mode 3 · software test stub" title="Incidents and emergency response" detail="Polls incidents and ACS security alerts every 750 ms (PERF-3)." action={<button className="button secondary" disabled={!token} onClick={() => { void refresh(); }}>Refresh incidents</button>} />
+  return <><PageHeader eyebrow="Mode 3 · software test stub" title="Incidents and emergency response" detail="Polls incidents and ACS security alerts every 500 ms (PERF-3)." action={<button className="button secondary" disabled={!token} onClick={() => { void refresh(); }}>Refresh incidents</button>} />
     {!token ? <EmptyState title="Dashboard sign-in required" detail="Present an Admin or Technician credential in the header to inspect and resolve simulated incidents." /> : <>
       {error && <p className="authorization-feedback" role="alert">{error}</p>}
       {role === "ADMIN" && <section className="panel section"><div className="section-heading"><h2>Admin demo controls</h2></div><div className="hall-controls"><label>Telephone medical floor<input type="number" min={1} max={30} value={medicalFloor} onChange={(e) => setMedicalFloor(e.target.value)} /></label><button className="button secondary" disabled={busy} onClick={() => { void act("/api/v1/operational/incidents/phone-medical", { floor: Number(medicalFloor) }); }}>Record medical call</button><button className="button emergency-button" disabled={busy} onClick={() => { void act("/api/v1/operational/stub/building-event", { kind: "FIRE" }); }}>Inject fire (stub)</button></div></section>}
@@ -1129,12 +1129,130 @@ function Analytics({ summary, token, role }: { summary: Summary | null; token?: 
   </>;
 }
 
+type SelectGroup = { group: string; options: string[] };
+
+function SearchSelect({
+  label,
+  value,
+  onChange,
+  groups,
+  placeholder,
+  disabled = false,
+}: {
+  label: string;
+  value: string;
+  onChange: (next: string) => void;
+  groups: SelectGroup[];
+  placeholder?: string;
+  disabled?: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const [activeIdx, setActiveIdx] = useState(0);
+  const containerRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    const onDocClick = (event: MouseEvent) => {
+      if (containerRef.current && !containerRef.current.contains(event.target as Node)) {
+        setOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", onDocClick);
+    return () => document.removeEventListener("mousedown", onDocClick);
+  }, []);
+
+  const query = value.trim().toLowerCase();
+  const filteredGroups = useMemo(
+    () =>
+      groups
+        .map((g) => ({
+          group: g.group,
+          options: g.options.filter((opt) => !query || opt.toLowerCase().includes(query)),
+        }))
+        .filter((g) => g.options.length > 0),
+    [groups, query],
+  );
+  const flatOptions = useMemo(() => filteredGroups.flatMap((g) => g.options), [filteredGroups]);
+
+  const handleKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
+    if (disabled) return;
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      setOpen(true);
+      setActiveIdx((idx) => (flatOptions.length ? (idx + 1) % flatOptions.length : 0));
+    } else if (event.key === "ArrowUp") {
+      event.preventDefault();
+      setOpen(true);
+      setActiveIdx((idx) => (flatOptions.length ? (idx - 1 + flatOptions.length) % flatOptions.length : 0));
+    } else if (event.key === "Enter" && open && flatOptions[activeIdx]) {
+      event.preventDefault();
+      onChange(flatOptions[activeIdx]);
+      setOpen(false);
+    } else if (event.key === "Escape") {
+      setOpen(false);
+    }
+  };
+
+  let optionCursor = -1;
+  return (
+    <div className="search-select" ref={containerRef}>
+      <span>{label}</span>
+      <div className="search-select-box">
+        <input
+          role="combobox"
+          aria-expanded={open}
+          aria-autocomplete="list"
+          disabled={disabled}
+          value={value}
+          placeholder={placeholder}
+          onFocus={() => { if (!disabled) { setOpen(true); setActiveIdx(0); } }}
+          onChange={(e) => { onChange(e.target.value); setOpen(true); setActiveIdx(0); }}
+          onKeyDown={handleKeyDown}
+        />
+        {value && !disabled && (
+          <button type="button" className="search-select-clear" aria-label={`Clear ${label}`} onClick={() => { onChange(""); setOpen(true); }}>×</button>
+        )}
+        <button type="button" className="search-select-toggle" disabled={disabled} aria-label={`Toggle ${label} options`} onClick={() => setOpen((prev) => !prev)}>▾</button>
+      </div>
+      {open && !disabled && (
+        <div className="search-select-menu" role="listbox">
+          {filteredGroups.length === 0 ? (
+            <div className="search-select-empty">No preset match — custom value will be used</div>
+          ) : (
+            filteredGroups.map((group) => (
+              <div key={group.group}>
+                <div className="search-select-group">{group.group}</div>
+                {group.options.map((opt) => {
+                  optionCursor += 1;
+                  const idx = optionCursor;
+                  return (
+                    <button
+                      type="button"
+                      role="option"
+                      aria-selected={value === opt}
+                      key={`${group.group}-${opt}`}
+                      className={`search-select-option ${idx === activeIdx ? "active" : ""}`}
+                      onMouseDown={(e) => { e.preventDefault(); onChange(opt); setOpen(false); }}
+                    >
+                      {opt}
+                    </button>
+                  );
+                })}
+              </div>
+            ))
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 type AuditTab = "audit" | "auth" | "incidents" | "alerts";
 
 function Audit({ token, role }: { token: string; role: string }) {
   const [tab, setTab] = useState<AuditTab>("audit");
   const [logs, setLogs] = useState<Record<string, unknown>[]>([]);
   const [stubEvents, setStubEvents] = useState<StubEvent[]>([]);
+  const [knownCards, setKnownCards] = useState<string[]>(["ADMIN-CARD-0001"]);
   const [integrity, setIntegrity] = useState<string>("");
   const [error, setError] = useState<string>("");
   const [actorFilter, setActorFilter] = useState("");
@@ -1143,6 +1261,71 @@ function Audit({ token, role }: { token: string; role: string }) {
   const [statusFilter, setStatusFilter] = useState("");
   const [startFilter, setStartFilter] = useState("");
   const [endFilter, setEndFilter] = useState("");
+
+  useEffect(() => {
+    if (!token || role !== "ADMIN") return;
+    let alive = true;
+    void authorizedApi<{ items: { credential_id: string }[] }>("/api/v1/acs/credentials?limit=200", token)
+      .then((res) => {
+        if (alive && Array.isArray(res.items)) {
+          const ids = Array.from(new Set(res.items.map((item) => item.credential_id).filter(Boolean)));
+          if (ids.length > 0) setKnownCards(ids);
+        }
+      })
+      .catch(() => { /* keep default card suggestions */ });
+    return () => { alive = false; };
+  }, [token, role]);
+
+  const actorGroups: SelectGroup[] = useMemo(() => [
+    ...(tab === "audit" ? [{ group: "System & Roles", options: ["SYSTEM", "ADMIN", "TECHNICIAN"] }] : []),
+    { group: "Registered Credentials", options: knownCards },
+  ], [tab, knownCards]);
+
+  const targetGroups: SelectGroup[] = useMemo(() => [
+    { group: "Elevators", options: ["E1", "E2", "E3", "E4", "E5"] },
+    ...(tab === "audit" ? [{ group: "System & Scopes", options: ["SREMS", "HALL_PANEL", "BUILDING"] }] : []),
+  ], [tab]);
+
+  const typeGroups: SelectGroup[] = useMemo(() => {
+    if (tab === "audit") {
+      return [
+        { group: "Access & Auth", options: ["ADMIN_LOGIN", "ADMIN_LOGOUT", "ACCESS_DENIAL", "ONE_TAP_VIOLATION"] },
+        { group: "Credentials", options: ["CREDENTIAL_ISSUED", "CREDENTIAL_SUSPENDED", "CREDENTIAL_REINSTATED", "CREDENTIAL_REVOKED", "CREDENTIAL_REPLACED", "VISITOR_PASS_ISSUED", "VISITOR_PASS_EXPIRED"] },
+        { group: "Fleet & Maintenance", options: ["MAINTENANCE_ENTER", "DIAGNOSTIC_QUERY", "RETURN_TO_SERVICE", "CALL_CANCELLED_BY_ADMIN", "E5_SERVICE_RUN_START", "E5_SERVICE_RUN_END"] },
+        { group: "Incidents & Rescue", options: ["EMERGENCY_OVERRIDE", "RESCUE_CAR_DISPATCHED", "RESCUE_CAR_BOARDED", "RESCUE_CAR_RELEASED", "INCIDENT_ACKNOWLEDGED", "INCIDENT_RESOLVED", "INCIDENT_CLOSED", "FALSE_ALARM_CLOSED"] },
+        { group: "System & Governance", options: ["SYSTEM_STARTUP", "SYSTEM_SHUTDOWN", "INTEGRITY_CHECK_RUN", "REPORT_EXPORTED", "MALFORMED_MSG_REJECTED", "COMMAND_CONFLICT_REJECTED", "UNAUTHORIZED_CMD_REJECTED", "POLICY_CHANGED"] },
+      ];
+    }
+    if (tab === "auth") {
+      return [
+        { group: "Card & Session", options: ["UNREGISTERED_CARD", "CARD_SUSPENDED", "CARD_REVOKED", "CARD_EXPIRED", "NO_ACTIVE_CREDENTIAL", "SESSION_INVALID", "SESSION_EXPIRED"] },
+        { group: "Access & Rules", options: ["UNAUTHORIZED_FLOOR", "E5_B1_FORBIDDEN", "ONE_TAP_LIMIT_EXCEEDED", "TOKEN_WINDOW_EXPIRED", "UNAUTHORIZED_ROLE", "DASHBOARD_ACCESS_DENIED", "PEER_ADMIN_REQUIRED", "CONFIRMATION_REQUIRED"] },
+        { group: "System & Commands", options: ["DB_FAIL_CLOSED", "MALFORMED_MSG_REJECTED", "UNAUTHORIZED_CMD_REJECTED", "COMMAND_CONFLICT_REJECTED", "INVALID_STATE_TRANSITION", "CREDENTIAL_ALREADY_EXISTS", "REPLACEMENT_ID_IN_USE"] },
+      ];
+    }
+    if (tab === "incidents") {
+      return [
+        { group: "Emergency", options: ["FIRE", "MEDICAL_EMERGENCY", "POWER_FAILURE", "STUCK_CAR"] },
+        { group: "Operational", options: ["HELP_REQUEST", "DOOR_OBSTRUCTION", "COMMUNICATION_FAILURE", "REPEATED_EMPTY_CALLS"] },
+      ];
+    }
+    return [
+      { group: "Alert Types", options: ["REPEATED_FAILURES", "CLONED_CREDENTIAL", "CARD_SCANNING", "LOST_CARD_USAGE", "REVOKED_CARD_USAGE", "DOOR_OBSTRUCTION"] },
+    ];
+  }, [tab]);
+
+  const statusGroups: SelectGroup[] = useMemo(() => {
+    if (tab === "auth") return [{ group: "Outcome", options: ["ALLOWED", "DENIED"] }];
+    if (tab === "incidents") return [{ group: "Incident Status", options: ["OPEN", "ACKNOWLEDGED", "IN_PROGRESS", "RESOLVED", "CLOSED"] }];
+    if (tab === "alerts") return [{ group: "Alert Status", options: ["OPEN", "ACKNOWLEDGED", "RESOLVED"] }];
+    return [];
+  }, [tab]);
+
+  const switchTab = (nextTab: AuditTab) => {
+    setTab(nextTab);
+    setTypeFilter("");
+    setStatusFilter("");
+  };
 
   const refresh = useCallback(async () => {
     if (!token || role !== "ADMIN") { setLogs([]); setStubEvents([]); return; }
@@ -1200,16 +1383,16 @@ function Audit({ token, role }: { token: string; role: string }) {
       {integrity && <p className="authorization-feedback">{integrity}</p>}{error && <p className="error-banner" role="alert">{error}</p>}
       <section className="panel section">
         <div className="hall-controls">
-          <button className={`button ${tab === "audit" ? "primary" : "secondary"}`} onClick={() => setTab("audit")}>Audit Chain</button>
-          <button className={`button ${tab === "auth" ? "primary" : "secondary"}`} onClick={() => setTab("auth")}>Authorization Events</button>
-          <button className={`button ${tab === "incidents" ? "primary" : "secondary"}`} onClick={() => setTab("incidents")}>Incidents (DB)</button>
-          <button className={`button ${tab === "alerts" ? "primary" : "secondary"}`} onClick={() => setTab("alerts")}>Security Alerts (DB)</button>
+          <button className={`button ${tab === "audit" ? "primary" : "secondary"}`} onClick={() => switchTab("audit")}>Audit Chain</button>
+          <button className={`button ${tab === "auth" ? "primary" : "secondary"}`} onClick={() => switchTab("auth")}>Authorization Events</button>
+          <button className={`button ${tab === "incidents" ? "primary" : "secondary"}`} onClick={() => switchTab("incidents")}>Incidents (DB)</button>
+          <button className={`button ${tab === "alerts" ? "primary" : "secondary"}`} onClick={() => switchTab("alerts")}>Security Alerts (DB)</button>
         </div>
         <div className="hall-controls" style={{ marginTop: "12px" }}>
-          <label>Actor / Card<input value={actorFilter} onChange={(e) => setActorFilter(e.target.value)} placeholder="ADMIN-CARD-0001" /></label>
-          <label>Elevator / Target<input value={carFilter} onChange={(e) => setCarFilter(e.target.value)} placeholder="E1..E5 or ID" /></label>
-          <label>Action / Type / Reason<input value={typeFilter} onChange={(e) => setTypeFilter(e.target.value)} placeholder="e.g. FIRE, DENIED" /></label>
-          <label>Status / Outcome<input value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} placeholder="e.g. ALLOWED, OPEN" /></label>
+          <SearchSelect label={tab === "audit" ? "Actor / Card" : "Credential"} value={actorFilter} onChange={setActorFilter} groups={actorGroups} placeholder="Search or type ID..." disabled={tab === "incidents"} />
+          <SearchSelect label={tab === "audit" ? "Target / Car" : "Elevator"} value={carFilter} onChange={setCarFilter} groups={targetGroups} placeholder="E1..E5 or target..." disabled={tab === "alerts"} />
+          <SearchSelect label={tab === "audit" ? "Action Type" : tab === "auth" ? "Denial Reason" : tab === "incidents" ? "Emergency Type" : "Alert Type"} value={typeFilter} onChange={setTypeFilter} groups={typeGroups} placeholder="Search type..." />
+          <SearchSelect label={tab === "auth" ? "Outcome" : "Status"} value={statusFilter} onChange={setStatusFilter} groups={statusGroups} placeholder={tab === "audit" ? "N/A for Audit Chain" : "Select status..."} disabled={tab === "audit"} />
           <label>Start time (local)<input type="datetime-local" step={1} value={startFilter} onChange={(e) => setStartFilter(e.target.value)} /></label>
           <label>End time (local)<input type="datetime-local" step={1} value={endFilter} onChange={(e) => setEndFilter(e.target.value)} /></label>
           <button className="button primary" onClick={() => { void refresh(); }}>Search logs</button>
@@ -1251,7 +1434,7 @@ function App() {
       if (!alive || inFlight) return;
       inFlight = true;
       void onFleetRefresh().finally(() => { inFlight = false; });
-    }, 750);
+    }, 500);
     return () => { alive = false; window.clearInterval(timer); };
   }, [onFleetRefresh]);
 
