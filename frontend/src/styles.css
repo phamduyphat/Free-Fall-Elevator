@@ -55,10 +55,11 @@ h1, h2 { margin: 0; color: #172033; } h1 { font-size: 28px; } h2 { font-size: 20
 .simulation-notice { display: flex; gap: 10px; align-items: center; padding: 13px 16px; border: 1px solid #cce4f7; border-radius: 9px; background: #eef8ff; color: #41617e; font-size: 12px; margin-bottom: 20px; flex-wrap: wrap; }
 .simulation-notice strong { color: #147aca; } .simulation-layout { display: grid; grid-template-columns: minmax(520px, 1.4fr) minmax(320px, .8fr); gap: 20px; }
 .srs-tag { margin-left: auto; border-radius: 999px; padding: 4px 8px; background: #d7efff; color: #147aca; font-size: 10px; font-weight: 800; text-transform: uppercase; letter-spacing: .08em; }
-.simulation-toolbar { display: flex; align-items: end; gap: 14px; margin-bottom: 18px; flex-wrap: wrap; }
+.simulation-toolbar { display: flex; align-items: end; gap: 10px; margin: 16px 0 0; flex-wrap: wrap; }
 .simulation-toolbar label, .hall-controls label { display: grid; gap: 6px; color: #6f7c92; font-size: 10px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
-.simulation-toolbar input, .simulation-toolbar select, .hall-controls select { min-width: 130px; border: 1px solid #dfe6ef; border-radius: 7px; padding: 10px; color: #354156; background: #fff; font: inherit; font-size: 12px; text-transform: none; letter-spacing: normal; }
-.simulation-toolbar input { min-width: 190px; } .authorization-status { padding: 10px 0; color: #6f7c92; font-size: 12px; } .authorization-status strong { color: #2f9d68; }
+.simulation-toolbar input, .simulation-toolbar select, .hall-controls select { min-width: 84px; border: 1px solid #dfe6ef; border-radius: 7px; padding: 10px; color: #354156; background: #fff; font: inherit; font-size: 12px; text-transform: none; letter-spacing: normal; }
+.simulation-toolbar .card-reader-field { flex: 1; min-width: 140px; }
+.simulation-toolbar input { width: 100%; min-width: 140px; } .authorization-status { padding: 10px 0; color: #6f7c92; font-size: 12px; } .authorization-status strong { color: #2f9d68; }
 .shaft-panel { min-height: 610px; display: flex; background: #10243f; border-radius: 13px; padding: 24px 20px; box-shadow: 0 10px 24px #153d5d22; }
 .shaft-labels { width: 58px; display: flex; flex-direction: column; justify-content: space-between; padding: 4px 8px 4px 0; color: #9fb6cc; font-size: 10px; text-align: right; }
 .shaft-grid { position: relative; flex: 1; overflow: hidden; border-left: 1px solid #55718b; border-right: 1px solid #55718b; }
