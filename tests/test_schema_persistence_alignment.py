@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import re
 import unittest
@@ -174,6 +174,8 @@ class _FakeDbConn:
     async def fetch(self, query: str, *args) -> list[dict]:
         q = " ".join(query.split())
         if "FROM hall_calls" in q:
+            if not args:
+                return list(self.tables["hall_calls"])
             st, et = args[0], args[1]
             rows = [r for r in self.tables["hall_calls"] if st <= r["created_at"] <= et]
             if len(args) > 2:
@@ -181,9 +183,13 @@ class _FakeDbConn:
                 rows = [r for r in rows if r["traffic_profile"] in (None, prof)]
             return rows
         if "FROM trips" in q:
+            if not args:
+                return list(self.tables["trips"])
             st, et = args[0], args[1]
             return [r for r in self.tables["trips"] if st <= r["departure_time"] <= et]
         if "FROM car_calls" in q:
+            if not args:
+                return list(self.tables["car_calls"])
             st, et = args[0], args[1]
             return [
                 {
@@ -202,6 +208,8 @@ class _FakeDbConn:
                 if st <= r["created_at"] <= et
             ]
         if "FROM car_downtime_intervals" in q:
+            if not args:
+                return list(self.tables["car_downtime_intervals"])
             st, et = args[0], args[1]
             return [
                 {**r, "reason": r["cause"]}
@@ -209,6 +217,8 @@ class _FakeDbConn:
                 if r["started_at"] <= et and (r["ended_at"] is None or r["ended_at"] >= st)
             ]
         if "FROM system_heartbeats" in q:
+            if not args:
+                return list(self.tables["system_heartbeats"])
             st, et = args[0], args[1]
             return [r for r in self.tables["system_heartbeats"] if st <= r["timestamp"] <= et]
         if "FROM incidents" in q and "GROUP BY incident_type" in q:
@@ -323,6 +333,47 @@ class TestSchemaAndPersistenceAlignment(unittest.TestCase):
         self.assertEqual(len(inc_list), 1)
         self.assertEqual(inc_list[0]["incident_type"], "HELP_REQUEST")
         self.assertEqual(export_res.record_count, 2)
+
+    def test_load_from_db_restores_simulator_state(self) -> None:
+        base = datetime(2026, 1, 1, 7, 0, 0)
+        sim = OperationalSimulator(auto_advance=False, load_from_db=False)
+        sim.reset(base_time=base)
+
+        hc, _ = sim.submit_hall_call(origin_floor=4, direction="UP", traffic_profile="PEAK")
+        cc = sim.submit_car_call("E1", 10)
+        sim.advance(20)
+        inc = sim.trigger_emergency("E1", "HELP")
+        sim.isolate("E3", "MAINTENANCE")
+        sim.advance(10)
+
+        conn = _FakeDbConn()
+        asyncio.run(sim.sync_to_db(conn))
+
+        restored = OperationalSimulator(auto_advance=False, load_from_db=False)
+        before_load = datetime.now(timezone.utc)
+        loaded = asyncio.run(restored.load_from_db(conn))
+        after_load = datetime.now(timezone.utc)
+        self.assertTrue(loaded)
+        self.assertGreaterEqual(restored.base_time, before_load)
+        self.assertLessEqual(restored.base_time, after_load)
+        self.assertEqual(restored.sim_tick, 0)
+        self.assertEqual(restored.cars["E1"].current_floor, 10)
+        self.assertEqual(restored.cars["E3"].availability, "MAINTENANCE")
+        self.assertIn(hc["request_id"], restored.hall_calls)
+        self.assertEqual(restored.hall_calls[hc["request_id"]].status, "COMPLETED")
+        self.assertIn(cc["request_id"], restored.car_calls)
+        self.assertEqual(restored.car_calls[cc["request_id"]].status, "COMPLETED")
+        self.assertIn(inc["incident_id"], restored.incidents)
+        self.assertEqual(restored.incidents[inc["incident_id"]].kind, "HELP")
+        self.assertEqual(len(restored.trips), len(sim.trips))
+        self.assertEqual(len(restored.downtime_intervals), len(sim.downtime_intervals))
+        self.assertEqual(len(restored.heartbeats), len(sim.heartbeats) + 1)
+        self.assertEqual(restored._synced_trips_idx, len(restored.trips))
+        self.assertEqual(restored._synced_heartbeats_idx, len(sim.heartbeats))
+
+        empty_conn = _FakeDbConn()
+        fresh = OperationalSimulator(auto_advance=False, load_from_db=False)
+        self.assertFalse(asyncio.run(fresh.load_from_db(empty_conn)))
 
 
 if __name__ == "__main__":

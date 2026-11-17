@@ -1,5 +1,6 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -7,12 +8,20 @@ from fastapi.middleware.cors import CORSMiddleware
 from api.routes import router as api_router
 from db import DbConnectionPool
 from simulation import SimulationClock
+from simulation.operational import operational_simulator
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Manage application-level lifecycle: database connection pool initialization and cleanup."""
+    now_utc = datetime.now(timezone.utc)
+    with SimulationClock._lock:
+        SimulationClock._base_time = now_utc
+        SimulationClock._tick = 0
+        SimulationClock.current_time = now_utc
     try:
         await DbConnectionPool.init_pool()
+        async with DbConnectionPool.acquire() as conn:
+            await operational_simulator.load_from_db(conn)
         SimulationClock.start()
     except OSError as exc:
         import logging

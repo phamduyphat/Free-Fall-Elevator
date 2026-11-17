@@ -214,9 +214,19 @@ class SimulationClock:
             if cls._tick == 0 and operational_simulator.sim_tick == 0:
                 with operational_simulator._lock:
                     operational_simulator.base_time = cls._base_time
-                    operational_simulator.heartbeats = [
-                        {"timestamp": cls._base_time, "status": "UP"}
-                    ]
+                    if operational_simulator._synced_heartbeats_idx == 0:
+                        operational_simulator.heartbeats = [
+                            {"timestamp": cls._base_time, "status": "UP"}
+                        ]
+                    elif len(operational_simulator.heartbeats) > operational_simulator._synced_heartbeats_idx:
+                        operational_simulator.heartbeats[-1] = {
+                            "timestamp": cls._base_time,
+                            "status": "UP",
+                        }
+                    else:
+                        operational_simulator.heartbeats.append(
+                            {"timestamp": cls._base_time, "status": "UP"}
+                        )
             stop_event = threading.Event()
             thread = threading.Thread(
                 target=cls._run_loop,

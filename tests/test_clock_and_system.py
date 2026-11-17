@@ -305,3 +305,43 @@ def test_bulk_credential_transitions_in_clock_advance_and_loop() -> None:
 
     asyncio.run(scenario())
 
+
+def test_operational_simulator_loads_synced_state_from_db_on_init() -> None:
+    from simulation.operational import OperationalSimulator
+
+    async def scenario() -> None:
+        async with api_test_session(base_time=MORNING_PEAK_BASE_TIME) as client:
+            admin_token = await login_dashboard(client, "ADMIN-CARD-0001")
+            hc_resp = await client.post(
+                "/api/v1/operational/hall-calls",
+                json_body={"origin_floor": 6, "direction": "UP", "call_type": "ORDINARY"},
+            )
+            assert hc_resp.status_code == 201
+            call_id = hc_resp.json()["request"]["request_id"]
+
+            await advance_clock(client, admin_token, 10)
+            maint_resp = await client.post(
+                "/api/v1/acs/fleet/maintenance",
+                headers=bearer(admin_token),
+                json_body={"elevator_id": "E4", "operation_type": "ENTER_MAINTENANCE"},
+            )
+            assert maint_resp.status_code == 200
+            await advance_clock(client, admin_token, 10)
+
+            # With DbConnectionPool active, creating a new OperationalSimulator auto-loads DB state
+            # while initializing base_time to current UTC wall time (sim_tick = 0).
+            from datetime import timezone
+            before_init = datetime.now(timezone.utc)
+            reloaded = OperationalSimulator(auto_advance=False)
+            after_init = datetime.now(timezone.utc)
+            assert call_id in reloaded.hall_calls
+            assert reloaded.hall_calls[call_id].status == "COMPLETED"
+            assert reloaded.cars["E1"].current_floor == 6
+            assert reloaded.cars["E4"].availability == "MAINTENANCE"
+            assert reloaded.sim_tick == 0
+            assert before_init <= reloaded.base_time <= after_init
+            assert len(reloaded.trips) >= 1
+            assert len(reloaded.downtime_intervals) == 1
+
+    asyncio.run(scenario())
+

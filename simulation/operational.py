@@ -134,10 +134,60 @@ class OperationalSimulator:
 
     ELEVATOR_IDS = ("E1", "E2", "E3", "E4", "E5")
 
-    def __init__(self, *, auto_advance: bool = False) -> None:
+    def __init__(self, *, auto_advance: bool = False, load_from_db: bool = True) -> None:
         self._lock = threading.RLock()
         self._auto_advance = auto_advance
         self.reset()
+        if load_from_db:
+            self._load_from_db_on_init()
+
+    def _load_from_db_on_init(self) -> None:
+        """Load persisted operational state if `DbConnectionPool` is already initialized."""
+        import asyncio
+        import os
+
+        try:
+            from db import DEFAULT_DSN, DbConnectionPool
+        except Exception:
+            return
+
+        if DbConnectionPool._pool is None:
+            return
+
+        async def _connect_and_load() -> None:
+            import asyncpg
+
+            dsn = os.getenv("DATABASE_URL", DEFAULT_DSN)
+            conn = await asyncpg.connect(dsn=dsn, timeout=1.0)
+            try:
+                await self.load_from_db(conn)
+            finally:
+                await conn.close()
+
+        try:
+            asyncio.get_running_loop()
+            in_running_loop = True
+        except RuntimeError:
+            in_running_loop = False
+
+        try:
+            if in_running_loop:
+                err: list[BaseException] = []
+
+                def _worker() -> None:
+                    try:
+                        asyncio.run(_connect_and_load())
+                    except BaseException as exc:
+                        err.append(exc)
+
+                thread = threading.Thread(target=_worker, daemon=True)
+                thread.start()
+                thread.join(timeout=2.0)
+            else:
+                asyncio.run(_connect_and_load())
+        except Exception as exc:
+            import logging
+            logging.getLogger("srems.sync").debug("Init DB load skipped or failed: %s", exc)
 
     def reset(self, *, base_time: datetime | None = None) -> None:
         with self._lock:
@@ -1214,6 +1264,342 @@ class OperationalSimulator:
         except Exception as exc:
             import logging
             logging.getLogger("srems.sync").debug("DB sync skipped or failed: %s", exc)
+
+    async def load_from_db(self, conn: object) -> bool:
+        """Load operational state previously persisted by `sync_to_db` from PostgreSQL.
+
+        Returns True if any operational rows were loaded, False otherwise.
+        """
+        if conn is None:
+            return False
+        try:
+            hall_rows = [
+                dict(r)
+                for r in await conn.fetch(  # type: ignore[union-attr]
+                    """
+                    SELECT call_id, origin_floor, direction, is_freight, assigned_elevator_id,
+                           status, created_at, arrived_at, wait_time_seconds,
+                           reassignments_count, no_boarding, traffic_profile
+                    FROM hall_calls
+                    ORDER BY created_at ASC
+                    """
+                )
+            ]
+            trip_rows = [
+                dict(r)
+                for r in await conn.fetch(  # type: ignore[union-attr]
+                    """
+                    SELECT trip_id, elevator_id, origin_floor, destination_floor,
+                           departure_time, arrival_time, travel_time_seconds,
+                           floors_traversed, motor_starts, traffic_profile,
+                           is_service_run, is_estimated
+                    FROM trips
+                    ORDER BY departure_time ASC, arrival_time ASC
+                    """
+                )
+            ]
+            car_call_rows = [
+                dict(r)
+                for r in await conn.fetch(  # type: ignore[union-attr]
+                    """
+                    SELECT call_id, elevator_id, destination_floor, status,
+                           created_at, completed_at, is_service_run
+                    FROM car_calls
+                    ORDER BY created_at ASC
+                    """
+                )
+            ]
+            incident_rows = [
+                dict(r)
+                for r in await conn.fetch(  # type: ignore[union-attr]
+                    """
+                    SELECT incident_id, incident_type, elevator_id, floor, status,
+                           severity, details, created_at, resolved_at, resolved_by, rescue_car_id
+                    FROM incidents
+                    ORDER BY created_at ASC
+                    """
+                )
+            ]
+            downtime_rows = [
+                dict(r)
+                for r in await conn.fetch(  # type: ignore[union-attr]
+                    """
+                    SELECT interval_id, elevator_id, state, cause, started_at, ended_at,
+                           duration_seconds, technician_id
+                    FROM car_downtime_intervals
+                    ORDER BY started_at ASC
+                    """
+                )
+            ]
+            heartbeat_rows = [
+                dict(r)
+                for r in await conn.fetch(  # type: ignore[union-attr]
+                    """
+                    SELECT timestamp, status
+                    FROM system_heartbeats
+                    ORDER BY timestamp ASC, heartbeat_id ASC
+                    """
+                )
+            ]
+        except Exception as exc:
+            import logging
+            logging.getLogger("srems.sync").debug("DB load skipped or failed: %s", exc)
+            return False
+
+        if not (hall_rows or trip_rows or car_call_rows or incident_rows or downtime_rows or heartbeat_rows):
+            return False
+
+        reverse_kind_map = {
+            "HELP_REQUEST": "HELP",
+            "MEDICAL_EMERGENCY": "MEDICAL",
+            "STUCK_CAR": "STUCK_CAR",
+            "FIRE": "FIRE",
+            "FIRE_ALARM": "FIRE",
+            "POWER_FAILURE": "POWER_FAILURE",
+            "DOOR_OBSTRUCTION": "DOOR_OBSTRUCTION",
+            "COMMUNICATION_FAILURE": "COMMUNICATION_FAILURE",
+            "COMMUNICATION_LOSS": "COMMUNICATION_LOSS",
+            "REPEATED_EMERGENCY": "REPEATED_EMERGENCY",
+            "REPEATED_EMPTY_CALLS": "REPEATED_EMPTY_CALLS",
+        }
+
+        with self._lock:
+            self.reset()
+            timestamps: list[datetime] = []
+
+            # 1. Trips
+            loaded_trips: list[dict] = []
+            for row in trip_rows:
+                eid = str(row["elevator_id"])
+                dep_ts = _normalize_utc(row["departure_time"])
+                arr_ts = _normalize_utc(row["arrival_time"])
+                loaded_trips.append(
+                    {
+                        "trip_id": str(row["trip_id"]),
+                        "elevator_id": eid,
+                        "origin_floor": int(row["origin_floor"]),
+                        "destination_floor": int(row["destination_floor"]),
+                        "departure_time": dep_ts,
+                        "arrival_time": arr_ts,
+                        "travel_time_seconds": float(row["travel_time_seconds"]),
+                        "floors_traversed": int(row["floors_traversed"]),
+                        "motor_starts": int(row.get("motor_starts") or 1),
+                        "is_estimated": bool(row.get("is_estimated", False)),
+                        "is_service_run": bool(row.get("is_service_run", False)),
+                        "traffic_profile": row.get("traffic_profile"),
+                    }
+                )
+                if eid in self.cars:
+                    self.cars[eid].current_floor = int(row["destination_floor"])
+                timestamps.extend([dep_ts, arr_ts])
+            self.trips = loaded_trips
+            self._synced_trips_idx = len(self.trips)
+
+            # 2. Hall calls
+            for row in hall_rows:
+                is_freight = bool(row.get("is_freight", False))
+                status = str(row["status"])
+                no_boarding = bool(row.get("no_boarding", False))
+                assigned_car = row.get("assigned_elevator_id")
+                accepted_ts = _normalize_utc(row["created_at"])
+                arrived_ts = (
+                    _normalize_utc(row["arrived_at"])
+                    if row.get("arrived_at") is not None
+                    else None
+                )
+                history = ["RECEIVED"]
+                for step in ("QUEUED", "ASSIGNED", "APPROACHING", "ARRIVED", "COMPLETED"):
+                    if step == status:
+                        history.append(step)
+                        break
+                    if status in ("COMPLETED", "ARRIVED", "APPROACHING", "ASSIGNED"):
+                        history.append(step)
+                if status not in history:
+                    history.append(status)
+
+                req = HallRequest(
+                    request_id=str(row["call_id"]),
+                    origin_floor=int(row["origin_floor"]),
+                    call_type="FREIGHT" if is_freight else "ORDINARY",
+                    direction=None if is_freight else row.get("direction"),
+                    accepted_at=accepted_ts,
+                    status=status,
+                    assigned_car=assigned_car,
+                    arrived_at=arrived_ts,
+                    wait_seconds=(
+                        float(row["wait_time_seconds"])
+                        if row.get("wait_time_seconds") is not None
+                        else None
+                    ),
+                    reassignment_count=int(row.get("reassignments_count") or 0),
+                    boarding_evidence=False if no_boarding else None,
+                    no_boarding=no_boarding,
+                    traffic_profile=row.get("traffic_profile"),
+                    history=history,
+                )
+                self.hall_calls[req.request_id] = req
+                timestamps.append(req.accepted_at)
+                if req.arrived_at is not None:
+                    timestamps.append(req.arrived_at)
+                if status in ("ASSIGNED", "APPROACHING") and assigned_car in self.cars:
+                    self.cars[assigned_car].stops.append(
+                        Stop(req.origin_floor, "HALL", req.request_id)
+                    )
+
+            # 3. Car calls
+            for row in car_call_rows:
+                eid = str(row["elevator_id"])
+                status = str(row["status"])
+                is_service = bool(row.get("is_service_run", False))
+                accepted_ts = _normalize_utc(row["created_at"])
+                completed_ts = (
+                    _normalize_utc(row["completed_at"])
+                    if row.get("completed_at") is not None
+                    else None
+                )
+                car_req = CarRequest(
+                    request_id=str(row["call_id"]),
+                    elevator_id=eid,
+                    destination_floor=int(row["destination_floor"]),
+                    accepted_at=accepted_ts,
+                    status=status,
+                    completed_at=completed_ts,
+                    is_service_run=is_service,
+                )
+                self.car_calls[car_req.request_id] = car_req
+                timestamps.append(car_req.accepted_at)
+                if car_req.completed_at is not None:
+                    timestamps.append(car_req.completed_at)
+                if status in ("QUEUED", "IN_TRANSIT") and eid in self.cars:
+                    stop_kind = "SERVICE" if is_service else "CAR"
+                    self.cars[eid].stops.append(
+                        Stop(car_req.destination_floor, stop_kind, car_req.request_id)
+                    )
+                    if is_service:
+                        self.cars[eid].availability = "OCCUPIED"
+
+            # 4. Incidents
+            open_emergency_cars: set[str] = set()
+            building_emergency_active = False
+            for row in incident_rows:
+                kind = reverse_kind_map.get(str(row["incident_type"]), str(row["incident_type"]))
+                status = str(row["status"])
+                created_ts = _normalize_utc(row["created_at"])
+                resolved_ts = (
+                    _normalize_utc(row["resolved_at"])
+                    if row.get("resolved_at") is not None
+                    else None
+                )
+                inc = Incident(
+                    incident_id=str(row["incident_id"]),
+                    kind=kind,
+                    elevator_id=row.get("elevator_id"),
+                    status=status,
+                    severity=str(row.get("severity") or "LOW"),
+                    created_at=created_ts,
+                    details=str(row.get("details") or ""),
+                    floor=row.get("floor"),
+                    resolved_by=row.get("resolved_by"),
+                    resolved_at=resolved_ts,
+                    rescue_car_id=row.get("rescue_car_id"),
+                    history=["OPEN"] if status == "OPEN" else ["OPEN", status],
+                )
+                self.incidents[inc.incident_id] = inc
+                timestamps.append(inc.created_at)
+                if inc.resolved_at is not None:
+                    timestamps.append(inc.resolved_at)
+                if status not in ("RESOLVED", "CLOSED"):
+                    if kind in ("FIRE", "POWER_FAILURE"):
+                        building_emergency_active = True
+                    elif kind in ("MEDICAL", "STUCK_CAR") and inc.elevator_id:
+                        open_emergency_cars.add(inc.elevator_id)
+                    if inc.rescue_car_id and inc.rescue_car_id in self.cars:
+                        self.cars[inc.rescue_car_id].rescue_active = True
+                    if kind == "DOOR_OBSTRUCTION" and inc.elevator_id in self.cars:
+                        self.cars[inc.elevator_id].obstruction_alerted = True
+
+            # 5. Downtime intervals
+            loaded_downtime: list[dict] = []
+            first_open_idx: int | None = None
+            for idx, row in enumerate(downtime_rows):
+                eid = str(row["elevator_id"])
+                state = str(row["state"])
+                reason = row.get("cause")
+                started_ts = _normalize_utc(row["started_at"])
+                ended_ts = (
+                    _normalize_utc(row["ended_at"])
+                    if row.get("ended_at") is not None
+                    else None
+                )
+                loaded_downtime.append(
+                    {
+                        "interval_id": str(row["interval_id"]),
+                        "elevator_id": eid,
+                        "state": state,
+                        "reason": reason,
+                        "started_at": started_ts,
+                        "ended_at": ended_ts,
+                        "duration_seconds": (
+                            float(row["duration_seconds"])
+                            if row.get("duration_seconds") is not None
+                            else None
+                        ),
+                        "technician_id": row.get("technician_id"),
+                    }
+                )
+                timestamps.append(started_ts)
+                if ended_ts is not None:
+                    timestamps.append(ended_ts)
+                else:
+                    if first_open_idx is None:
+                        first_open_idx = idx
+                    if eid in self.cars:
+                        car = self.cars[eid]
+                        if reason == "COMMUNICATION_LOSS" or state == "STALE":
+                            car.availability = "STALE"
+                            car.connected = False
+                        elif (
+                            state in ("EMERGENCY", "EMERGENCY_UNAVAILABLE")
+                            or reason == "EMERGENCY_UNAVAILABLE"
+                            or building_emergency_active
+                            or eid in open_emergency_cars
+                        ):
+                            car.availability = "EMERGENCY_UNAVAILABLE"
+                        elif state == "MAINTENANCE":
+                            car.availability = "MAINTENANCE"
+                        else:
+                            car.availability = "FAULT"
+                            if reason and reason != "FAULT":
+                                car.active_fault = str(reason)
+
+            self.downtime_intervals = loaded_downtime
+            self._synced_downtime_idx = (
+                first_open_idx if first_open_idx is not None else len(self.downtime_intervals)
+            )
+
+            # 6. Heartbeats
+            now_utc = datetime.now(timezone.utc)
+            self.base_time = now_utc
+            self.sim_tick = 0
+            if heartbeat_rows:
+                self.heartbeats = [
+                    {
+                        "timestamp": _normalize_utc(row["timestamp"]),
+                        "status": str(row["status"]),
+                    }
+                    for row in heartbeat_rows
+                ]
+                self._synced_heartbeats_idx = len(self.heartbeats)
+                self.heartbeats.append({"timestamp": now_utc, "status": "UP"})
+            else:
+                self.heartbeats = [{"timestamp": now_utc, "status": "UP"}]
+                self._synced_heartbeats_idx = 0
+
+            for car in self.cars.values():
+                if car.connected:
+                    car.last_seen_tick = self.sim_tick
+
+        return True
 
 
 # The singleton drives demo API views; instantiate a new simulator for isolated tests.
