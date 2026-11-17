@@ -30,6 +30,8 @@ export type ApiResult = {
     role?: string;
     passed?: boolean;
     total_records_inspected?: number;
+    mismatch_index?: number | null;
+    reason?: string;
   };
 };
 

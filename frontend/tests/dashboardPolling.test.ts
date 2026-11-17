@@ -53,3 +53,18 @@ test("App.tsx Analytics displays queue/backlog and all Mode 5 SRS endpoints + ex
   assert.match(appSource, /type="datetime-local"/);
   assert.match(appSource, /formatLocalTime\(/);
 });
+
+test("App.tsx wires MNT-4.2/4.3/4.5, SEC-2.14 search, and FR-1.13 E5 service run", () => {
+  for (const endpoint of [
+    "/api/v1/acs/fleet/maintenance",
+    "/api/v1/acs/fleet/return-to-service",
+    "/api/v1/operational/diagnostics/",
+    "/api/v1/acs/logs/authorization-events",
+    "/api/v1/acs/logs/incidents",
+    "/api/v1/acs/cab/e5/service-run",
+  ]) {
+    assert.ok(appSource.includes(endpoint), `Missing endpoint ${endpoint}`);
+  }
+  assert.match(appSource, /car\.active_fault/);
+  assert.match(appSource, /mismatch_index/);
+});
