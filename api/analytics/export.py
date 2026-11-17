@@ -25,7 +25,7 @@ class AnalyticsExportRequest(BaseModel):
 
     run_id: str
     export_format: Literal["JSON", "CSV"] = "JSON"
-    include_per_request: bool = False
+    include_per_request: bool = True
     start_time: Optional[datetime] = None
     end_time: Optional[datetime] = None
 

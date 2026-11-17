@@ -35,3 +35,21 @@ test("api.ts supports PATCH in authorizedApi for alert acknowledgement/resolutio
   assert.match(apiSource, /method\?:\s*"GET"\s*\|\s*"POST"\s*\|\s*"PATCH"/);
   assert.match(appSource, /"PATCH"/);
 });
+
+test("App.tsx Analytics displays queue/backlog and all Mode 5 SRS endpoints + export", () => {
+  assert.match(appSource, /Active request queue/);
+  assert.match(appSource, /Backlog status/);
+  for (const endpoint of [
+    "/api/v1/analytics/wait-times",
+    "/api/v1/analytics/travel-times",
+    "/api/v1/analytics/trip-distribution",
+    "/api/v1/analytics/utilization",
+    "/api/v1/analytics/downtime",
+    "/api/v1/analytics/security",
+    "/api/v1/analytics/export",
+  ]) {
+    assert.ok(appSource.includes(endpoint), `Missing analytics endpoint ${endpoint}`);
+  }
+  assert.match(appSource, /type="datetime-local"/);
+  assert.match(appSource, /formatLocalTime\(/);
+});

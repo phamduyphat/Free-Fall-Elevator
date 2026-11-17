@@ -68,6 +68,22 @@ async function getSummary(): Promise<Summary> {
 
 const floorLabel = (floor: number | null): string => floor === null ? "—" : floor === -1 ? "B1" : `F${floor}`;
 
+const formatLocalTime = (value: string | null | undefined): string => {
+  if (!value) return "—";
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleString();
+};
+
+const toLocalDateTimeInput = (date: Date): string => {
+  const pad = (n: number): string => String(n).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+};
+
+const fromLocalDateTimeInput = (value: string): string => {
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? value : parsed.toISOString();
+};
+
 const navigation: { id: View; label: string; icon: string }[] = [
   { id: "overview", label: "Overview", icon: "O" },
   { id: "simulation", label: "Simulator (stub)", icon: "S" },
@@ -161,7 +177,7 @@ function Overview({ fleet, summary, token }: { fleet: FleetResponse | null; summ
             <tbody>
               {events.map((event, idx) => (
                 <tr key={`${event.timestamp}-${event.event_type}-${idx}`}>
-                  <td>{event.timestamp}</td>
+                  <td>{formatLocalTime(event.timestamp)}</td>
                   <td><span className="badge blue">{event.event_type.replaceAll("_", " ")}</span></td>
                   <td><strong>{event.elevator_id ?? "Building"}</strong></td>
                   <td>{event.detail}</td>
@@ -604,7 +620,7 @@ function Credentials({ token, role }: { token: string; role: string }) {
                 </p>
                 <small>
                   Allowed floors: {formatAllowedFloors(rec.allowed_floors)}
-                  {rec.expires_at ? ` · Expires: ${rec.expires_at}` : ""}
+                  {rec.expires_at ? ` · Expires: ${formatLocalTime(rec.expires_at)}` : ""}
                 </small>
                 <div className="incident-actions">
                   {rec.status === "ACTIVE" && (
@@ -678,7 +694,7 @@ function Security({ token, role, refreshFleet }: { token: string; role: string; 
       {role === "ADMIN" && <section className="panel section"><div className="section-heading"><h2>Admin demo controls</h2></div><div className="hall-controls"><label>Telephone medical floor<input type="number" min={1} max={30} value={medicalFloor} onChange={(e) => setMedicalFloor(e.target.value)} /></label><button className="button secondary" disabled={busy} onClick={() => { void act("/api/v1/operational/incidents/phone-medical", { floor: Number(medicalFloor) }); }}>Record medical call</button><button className="button emergency-button" disabled={busy} onClick={() => { void act("/api/v1/operational/stub/building-event", { kind: "FIRE" }); }}>Inject fire (stub)</button></div></section>}
       <section className="panel section"><div className="table-heading"><strong>Security alerts (database)</strong><span>{alerts.length} records</span></div>
         {alerts.length === 0 ? <EmptyState title="No security alerts" detail="Repeated access failures, cloned cards, or card scanning alerts appear here within 1 second." /> : alerts.map((alert) =>
-          <article className="incident-card" key={alert.alert_id}><div><strong>{alert.alert_type}</strong> · {alert.status} · {alert.severity}</div><p>{alert.details}</p><small>{alert.primary_car_id ?? "System"}{alert.secondary_car_id ? ` / ${alert.secondary_car_id}` : ""} · {alert.credential_id ?? "No card"} · {alert.created_at}</small><div className="incident-actions">
+          <article className="incident-card" key={alert.alert_id}><div><strong>{alert.alert_type}</strong> · {alert.status} · {alert.severity}</div><p>{alert.details}</p><small>{alert.primary_car_id ?? "System"}{alert.secondary_car_id ? ` / ${alert.secondary_car_id}` : ""} · {alert.credential_id ?? "No card"} · {formatLocalTime(alert.created_at)}</small><div className="incident-actions">
             {role === "ADMIN" && alert.status === "OPEN" && <button className="button secondary" disabled={busy} onClick={() => { void act(`/api/v1/acs/logs/alerts/${alert.alert_id}`, { new_status: "ACKNOWLEDGED" }, "PATCH"); }}>Acknowledge alert</button>}
             {role === "ADMIN" && alert.status !== "RESOLVED" && <button className="button secondary" disabled={busy} onClick={() => { void act(`/api/v1/acs/logs/alerts/${alert.alert_id}`, { new_status: "RESOLVED" }, "PATCH"); }}>Resolve alert</button>}
           </div></article>
@@ -698,25 +714,146 @@ function Security({ token, role, refreshFleet }: { token: string; role: string; 
   </>;
 }
 
+type WaitTimeReport = {
+  total_calls: number;
+  completed_calls: number;
+  dropped_calls: number;
+  drop_rate_pct: number;
+  mean_wait_seconds: number;
+  median_wait_seconds: number;
+  p90_wait_seconds: number;
+  p95_wait_seconds: number;
+  min_wait_seconds: number;
+  max_wait_seconds: number;
+  reassigned_calls_count: number;
+  no_boarding_count: number;
+  target_met: boolean;
+};
+type TravelTimeReport = {
+  total_trips: number;
+  mean_travel_seconds: number;
+  median_travel_seconds: number;
+  p90_travel_seconds: number;
+  p95_travel_seconds: number;
+  min_travel_seconds: number;
+  max_travel_seconds: number;
+  estimated_trips_count: number;
+  service_runs_count: number;
+};
+type TripDistributionReport = {
+  total_trips: number;
+  up_trips_count: number;
+  up_trips_share_pct: number;
+  down_non_b1_trips_count: number;
+  down_non_b1_trips_share_pct: number;
+  down_to_b1_trips_count: number;
+  down_to_b1_trips_share_pct: number;
+  service_runs_count: number;
+  service_runs_share_pct: number;
+};
+type CarUtilizationReport = {
+  elevator_id: string;
+  trip_count: number;
+  motor_starts: number;
+  floors_traversed: number;
+  distance_meters: number;
+  in_service_seconds: number;
+  fault_seconds: number;
+  maintenance_seconds: number;
+  emergency_seconds: number;
+  occupied_service_seconds: number;
+  stale_seconds: number;
+};
+type DowntimeReport = {
+  total_downtime_seconds: number;
+  per_car_downtime_seconds: Record<string, number>;
+  ongoing_intervals: Record<string, unknown>[];
+  system_availability_pct: number;
+  total_window_seconds: number;
+  unannounced_downtime_seconds: number;
+  announced_maintenance_seconds: number;
+  meets_availability_target: boolean;
+};
+type SecuritySummaryReport = {
+  total_denials: number;
+  denials_by_reason: Record<string, number>;
+  failed_auth_attempts: number;
+  repeated_failure_alerts: number;
+  cloned_credential_alerts: number;
+  card_scanning_alerts: number;
+  door_obstruction_alerts: number;
+  external_validation_failures: number;
+  emergency_incidents_by_type: Record<string, number>;
+  total_incidents: number;
+};
+type DbAnalyticsBundle = {
+  wait: WaitTimeReport;
+  travel: TravelTimeReport;
+  distribution: TripDistributionReport;
+  utilization: Record<string, CarUtilizationReport>;
+  downtime: DowntimeReport;
+  security: SecuritySummaryReport;
+};
+type ExportResponse = {
+  run_id: string;
+  export_format: "JSON" | "CSV";
+  generated_at: string;
+  record_count: number;
+  content: string;
+};
+
 function Analytics({ summary, token, role }: { summary: Summary | null; token?: string; role?: string }) {
-  const [dbData, setDbData] = useState<Record<string, unknown> | null>(null);
+  const [dbData, setDbData] = useState<DbAnalyticsBundle | null>(null);
   const [dbError, setDbError] = useState("");
   const [loading, setLoading] = useState(false);
+  const [startTime, setStartTime] = useState("");
+  const [endTime, setEndTime] = useState("");
+  const [elevatorFilter, setElevatorFilter] = useState("");
+  const [exportStatus, setExportStatus] = useState("");
+
+  const resolveWindow = useCallback(async (): Promise<{ startIso: string; endIso: string }> => {
+    if (startTime.trim() && endTime.trim()) {
+      return {
+        startIso: fromLocalDateTimeInput(startTime.trim()),
+        endIso: fromLocalDateTimeInput(endTime.trim()),
+      };
+    }
+    let anchor = new Date();
+    try {
+      const clockRes = await fetch("/api/v1/system/clock");
+      if (clockRes.ok) {
+        const clockJson = (await clockRes.json()) as { current_sim_time?: string };
+        if (clockJson.current_sim_time) anchor = new Date(clockJson.current_sim_time);
+      }
+    } catch { /* fall back to browser clock */ }
+    const startDefault = new Date(anchor.getTime() - 24 * 3600 * 1000);
+    const localEnd = endTime.trim() || toLocalDateTimeInput(anchor);
+    const localStart = startTime.trim() || toLocalDateTimeInput(startDefault);
+    if (!startTime) setStartTime(localStart);
+    if (!endTime) setEndTime(localEnd);
+    return {
+      startIso: fromLocalDateTimeInput(localStart),
+      endIso: fromLocalDateTimeInput(localEnd),
+    };
+  }, [startTime, endTime]);
 
   const fetchDbAnalytics = async () => {
     if (!token || role !== "ADMIN") return;
     setLoading(true);
     setDbError("");
     try {
-      const now = new Date();
-      const yesterday = new Date(now.getTime() - 24 * 3600 * 1000);
-      const startIso = yesterday.toISOString();
-      const endIso = now.toISOString();
-      const [wait, sec] = await Promise.all([
-        authorizedApi<Record<string, unknown>>(`/api/v1/analytics/wait-times?start_time=${encodeURIComponent(startIso)}&end_time=${encodeURIComponent(endIso)}`, token),
-        authorizedApi<Record<string, unknown>>(`/api/v1/analytics/security?start_time=${encodeURIComponent(startIso)}&end_time=${encodeURIComponent(endIso)}`, token),
+      const { startIso, endIso } = await resolveWindow();
+      const rangeQs = `start_time=${encodeURIComponent(startIso)}&end_time=${encodeURIComponent(endIso)}`;
+      const carQs = elevatorFilter ? `${rangeQs}&elevator_id=${encodeURIComponent(elevatorFilter)}` : rangeQs;
+      const [wait, travel, distribution, utilization, downtime, security] = await Promise.all([
+        authorizedApi<WaitTimeReport>(`/api/v1/analytics/wait-times?${rangeQs}`, token),
+        authorizedApi<TravelTimeReport>(`/api/v1/analytics/travel-times?${carQs}`, token),
+        authorizedApi<TripDistributionReport>(`/api/v1/analytics/trip-distribution?${carQs}`, token),
+        authorizedApi<Record<string, CarUtilizationReport>>(`/api/v1/analytics/utilization?${rangeQs}`, token),
+        authorizedApi<DowntimeReport>(`/api/v1/analytics/downtime?${rangeQs}`, token),
+        authorizedApi<SecuritySummaryReport>(`/api/v1/analytics/security?${rangeQs}`, token),
       ]);
-      setDbData({ wait, sec });
+      setDbData({ wait, travel, distribution, utilization, downtime, security });
     } catch (err) {
       setDbError(err instanceof Error ? err.message : "Failed to query database analytics");
     } finally {
@@ -724,7 +861,41 @@ function Analytics({ summary, token, role }: { summary: Summary | null; token?: 
     }
   };
 
+  const exportReport = async (exportFormat: "JSON" | "CSV") => {
+    if (!token || role !== "ADMIN") return;
+    setLoading(true);
+    setDbError("");
+    setExportStatus("");
+    try {
+      const { startIso, endIso } = await resolveWindow();
+      const payload = await authorizedApi<ExportResponse>("/api/v1/analytics/export", token, {
+        run_id: `ui-export-${Date.now()}`,
+        export_format: exportFormat,
+        include_per_request: true,
+        start_time: startIso,
+        end_time: endIso,
+      });
+      const mime = exportFormat === "CSV" ? "text/csv;charset=utf-8" : "application/json;charset=utf-8";
+      const blob = new Blob([payload.content], { type: mime });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `srems-analytics-${payload.run_id}.${exportFormat.toLowerCase()}`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+      setExportStatus(`Exported ${exportFormat} (${payload.record_count} records at ${formatLocalTime(payload.generated_at)}).`);
+    } catch (err) {
+      setDbError(err instanceof Error ? err.message : "Analytics export failed");
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const values: { title: string; value: string; unit: string }[] = [
+    { title: "Active request queue", value: String(summary?.active_requests ?? "—"), unit: `hall + car (limit ${summary?.backlog_limit ?? 100})` },
+    { title: "Backlog status", value: summary?.backlog_exceeded ? `EXCEEDED (+${summary.backlog_count ?? 0})` : "Normal", unit: summary?.backlog_exceeded ? "PERF-5 threshold > 100" : "within capacity" },
     { title: "Mean hall wait", value: summary?.mean_wait_seconds == null ? "—" : summary.mean_wait_seconds.toFixed(1), unit: "seconds" },
     { title: "Median hall wait", value: summary?.median_wait_seconds == null ? "—" : summary.median_wait_seconds.toFixed(1), unit: "seconds" },
     { title: "P95 hall wait", value: summary?.p95_wait_seconds == null ? "—" : summary.p95_wait_seconds.toFixed(1), unit: "seconds" },
@@ -732,10 +903,105 @@ function Analytics({ summary, token, role }: { summary: Summary | null; token?: 
     { title: "Completed car calls", value: String(summary?.completed_car_calls ?? "—"), unit: "requests" },
     { title: "Available cars", value: String(summary?.fleet_available ?? "—"), unit: "out of 5" },
   ];
-  return <><PageHeader eyebrow="Mode 5 · Analytics & Reporting" title="Analytics" detail="Real-time operational indicators and persisted PostgreSQL analytics." action={token && role === "ADMIN" ? <button className="button secondary" disabled={loading} onClick={() => { void fetchDbAnalytics(); }}>Query PostgreSQL analytics</button> : undefined} />
+
+  return <><PageHeader eyebrow="Mode 5 · Analytics & Reporting" title="Analytics" detail="Real-time operational queue, wait indicators, and persisted PostgreSQL SRS reports." action={token && role === "ADMIN" ? <button className="button secondary" disabled={loading} onClick={() => { void fetchDbAnalytics(); }}>{loading ? "Querying..." : "Query PostgreSQL analytics"}</button> : undefined} />
+    {summary?.backlog_exceeded && <p className="error-banner" role="alert">Request backlog exceeded ({summary.active_requests ?? 0} active requests; {summary.backlog_count ?? 0} over limit of {summary.backlog_limit ?? 100}).</p>}
     {dbError && <p className="error-banner" role="alert">{dbError}</p>}
+    {exportStatus && <p className="authorization-feedback">{exportStatus}</p>}
     <div className="kpi-grid">{values.map(({ title, value, unit }) => <article className="kpi-card" key={title}><span>{title}</span><strong>{value}</strong><small>{unit}</small></article>)}</div>
-    {dbData && <section className="panel section"><div className="table-heading"><strong>PostgreSQL Analytics (ANA-5.2 &amp; ANA-5.6)</strong><span>Database-backed</span></div><pre className="event-row">{JSON.stringify(dbData, null, 2)}</pre></section>}
+    {!token || role !== "ADMIN" ? (
+      <EmptyState title="Admin sign-in required for PostgreSQL reports" detail="Sign in with an Admin credential in the header to query Mode 5 database analytics (ANA-5.2–ANA-5.6) and export JSON/CSV reports (ANA-5.9)." />
+    ) : (
+      <section className="panel section">
+        <div className="table-heading"><strong>PostgreSQL Query &amp; Export Controls</strong><span>ANA-5.2 – ANA-5.9</span></div>
+        <div className="hall-controls" style={{ marginTop: "14px" }}>
+          <label>Start time (local)<input type="datetime-local" step={1} value={startTime} onChange={(e) => setStartTime(e.target.value)} /></label>
+          <label>End time (local)<input type="datetime-local" step={1} value={endTime} onChange={(e) => setEndTime(e.target.value)} /></label>
+          <label>Elevator filter<select value={elevatorFilter} onChange={(e) => setElevatorFilter(e.target.value)}><option value="">All cars (E1–E5)</option>{["E1", "E2", "E3", "E4", "E5"].map((id) => <option key={id} value={id}>{id}</option>)}</select></label>
+        </div>
+        <div className="hall-controls" style={{ marginTop: "12px" }}>
+          <button className="button primary" disabled={loading} onClick={() => { void fetchDbAnalytics(); }}>Refresh all DB metrics</button>
+          <button className="button secondary" disabled={loading} onClick={() => { void exportReport("JSON"); }}>Export JSON</button>
+          <button className="button secondary" disabled={loading} onClick={() => { void exportReport("CSV"); }}>Export CSV</button>
+        </div>
+      </section>
+    )}
+    {dbData && <>
+      <section className="panel section">
+        <div className="table-heading"><strong>Wait &amp; Travel KPIs (ANA-5.2 &amp; ANA-5.3)</strong><span>{dbData.wait.target_met ? "Wait target met" : "Wait target missed"}</span></div>
+        <div className="kpi-grid" style={{ marginTop: "12px" }}>
+          <article className="kpi-card"><span>Hall calls (completed / total)</span><strong>{dbData.wait.completed_calls} / {dbData.wait.total_calls}</strong><small>dropped: {dbData.wait.dropped_calls} ({dbData.wait.drop_rate_pct.toFixed(1)}%)</small></article>
+          <article className="kpi-card"><span>DB wait (mean / median / P90 / P95)</span><strong>{dbData.wait.mean_wait_seconds.toFixed(1)}s</strong><small>med {dbData.wait.median_wait_seconds.toFixed(1)}s · p90 {dbData.wait.p90_wait_seconds.toFixed(1)}s · p95 {dbData.wait.p95_wait_seconds.toFixed(1)}s</small></article>
+          <article className="kpi-card"><span>Wait range &amp; exceptions</span><strong>{dbData.wait.min_wait_seconds.toFixed(1)}–{dbData.wait.max_wait_seconds.toFixed(1)}s</strong><small>reassigned: {dbData.wait.reassigned_calls_count} · no-boarding: {dbData.wait.no_boarding_count}</small></article>
+          <article className="kpi-card"><span>Completed trips (ANA-5.3)</span><strong>{dbData.travel.total_trips}</strong><small>estimated: {dbData.travel.estimated_trips_count} · service runs: {dbData.travel.service_runs_count}</small></article>
+          <article className="kpi-card"><span>Travel (mean / median / P90 / P95)</span><strong>{dbData.travel.mean_travel_seconds.toFixed(1)}s</strong><small>med {dbData.travel.median_travel_seconds.toFixed(1)}s · p90 {dbData.travel.p90_travel_seconds.toFixed(1)}s · p95 {dbData.travel.p95_travel_seconds.toFixed(1)}s</small></article>
+          <article className="kpi-card"><span>Travel range</span><strong>{dbData.travel.min_travel_seconds.toFixed(1)}–{dbData.travel.max_travel_seconds.toFixed(1)}s</strong><small>cab motion legs</small></article>
+        </div>
+      </section>
+      <section className="panel section">
+        <div className="table-heading"><strong>Trip Distribution (OR-10 / BEN-4)</strong><span>{dbData.distribution.total_trips} total trips</span></div>
+        <div className="kpi-grid" style={{ marginTop: "12px" }}>
+          <article className="kpi-card"><span>UP trips</span><strong>{dbData.distribution.up_trips_count}</strong><small>{dbData.distribution.up_trips_share_pct.toFixed(1)}%</small></article>
+          <article className="kpi-card"><span>DOWN (non-B1)</span><strong>{dbData.distribution.down_non_b1_trips_count}</strong><small>{dbData.distribution.down_non_b1_trips_share_pct.toFixed(1)}%</small></article>
+          <article className="kpi-card"><span>DOWN to B1</span><strong>{dbData.distribution.down_to_b1_trips_count}</strong><small>{dbData.distribution.down_to_b1_trips_share_pct.toFixed(1)}%</small></article>
+          <article className="kpi-card"><span>Freight / Service runs</span><strong>{dbData.distribution.service_runs_count}</strong><small>{dbData.distribution.service_runs_share_pct.toFixed(1)}%</small></article>
+        </div>
+      </section>
+      <section className="panel section">
+        <div className="table-heading"><strong>Per-Car Utilization (ANA-5.4)</strong><span>E1–E5</span></div>
+        <div className="table-wrap" style={{ marginTop: "12px" }}>
+          <table className="operations-table">
+            <thead>
+              <tr><th>Car</th><th>Trips</th><th>Starts</th><th>Floors</th><th>Distance (m)</th><th>In Service (s)</th><th>Occupied (s)</th><th>Maint (s)</th><th>Fault (s)</th><th>Emerg (s)</th></tr>
+            </thead>
+            <tbody>
+              {Object.values(dbData.utilization).map((car) => (
+                <tr key={car.elevator_id}>
+                  <td><strong>{car.elevator_id}</strong></td>
+                  <td>{car.trip_count}</td>
+                  <td>{car.motor_starts}</td>
+                  <td>{car.floors_traversed}</td>
+                  <td>{car.distance_meters.toFixed(1)}</td>
+                  <td>{car.in_service_seconds.toFixed(1)}</td>
+                  <td>{car.occupied_service_seconds.toFixed(1)}</td>
+                  <td>{car.maintenance_seconds.toFixed(1)}</td>
+                  <td>{car.fault_seconds.toFixed(1)}</td>
+                  <td>{car.emergency_seconds.toFixed(1)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </section>
+      <section className="panel section">
+        <div className="table-heading"><strong>Availability &amp; Downtime (ANA-5.5 / AVL-1)</strong><span>{dbData.downtime.meets_availability_target ? "Meets >= 99.5% target" : "Below 99.5% target"}</span></div>
+        <div className="kpi-grid" style={{ marginTop: "12px" }}>
+          <article className="kpi-card"><span>System availability</span><strong>{dbData.downtime.system_availability_pct.toFixed(2)}%</strong><small>window: {dbData.downtime.total_window_seconds.toFixed(1)}s</small></article>
+          <article className="kpi-card"><span>Unannounced downtime</span><strong>{dbData.downtime.unannounced_downtime_seconds.toFixed(1)}s</strong><small>host outage</small></article>
+          <article className="kpi-card"><span>Announced maintenance</span><strong>{dbData.downtime.announced_maintenance_seconds.toFixed(1)}s</strong><small>excluded from SLA penalty</small></article>
+          <article className="kpi-card"><span>Total car downtime</span><strong>{dbData.downtime.total_downtime_seconds.toFixed(1)}s</strong><small>ongoing intervals: {dbData.downtime.ongoing_intervals.length}</small></article>
+        </div>
+        {Object.keys(dbData.downtime.per_car_downtime_seconds).length > 0 && (
+          <p className="event-row" style={{ marginTop: "10px" }}>
+            Per-car downtime (s): {Object.entries(dbData.downtime.per_car_downtime_seconds).map(([car, sec]) => `${car}: ${sec.toFixed(1)}s`).join(" · ")}
+          </p>
+        )}
+      </section>
+      <section className="panel section">
+        <div className="table-heading"><strong>Security &amp; Incidents Summary (ANA-5.6)</strong><span>{dbData.security.total_denials} denials · {dbData.security.total_incidents} incidents</span></div>
+        <div className="kpi-grid" style={{ marginTop: "12px" }}>
+          <article className="kpi-card"><span>Access denials</span><strong>{dbData.security.total_denials}</strong><small>failed auth: {dbData.security.failed_auth_attempts}</small></article>
+          <article className="kpi-card"><span>Anomaly alerts</span><strong>{dbData.security.repeated_failure_alerts + dbData.security.cloned_credential_alerts + dbData.security.card_scanning_alerts}</strong><small>repeat {dbData.security.repeated_failure_alerts} · clone {dbData.security.cloned_credential_alerts} · scan {dbData.security.card_scanning_alerts}</small></article>
+          <article className="kpi-card"><span>Operational / external alerts</span><strong>{dbData.security.door_obstruction_alerts + dbData.security.external_validation_failures}</strong><small>obstruction: {dbData.security.door_obstruction_alerts} · ext fail: {dbData.security.external_validation_failures}</small></article>
+          <article className="kpi-card"><span>Emergency incidents</span><strong>{dbData.security.total_incidents}</strong><small>{Object.entries(dbData.security.emergency_incidents_by_type).map(([k, v]) => `${k}: ${v}`).join(", ") || "none"}</small></article>
+        </div>
+        {Object.keys(dbData.security.denials_by_reason).length > 0 && (
+          <p className="event-row" style={{ marginTop: "10px" }}>
+            Denials by reason: {Object.entries(dbData.security.denials_by_reason).map(([reason, count]) => `${reason}: ${count}`).join(" · ")}
+          </p>
+        )}
+      </section>
+    </>}
     <section className="panel section"><h2>Measurement definition</h2><p>Hall wait time measures accepted hall call to car arrival. P95 uses the nearest-rank percentile. Live simulator events sync automatically to PostgreSQL when database connectivity is established.</p></section>
   </>;
 }
@@ -765,8 +1031,8 @@ function Audit({ token, role }: { token: string; role: string }) {
   return <><PageHeader eyebrow="Governance" title="Audit log" detail="Database-backed ACS audit chain and separate, non-tamper-evident simulator event trace." action={<button className="button secondary" disabled={!token || role !== "ADMIN"} onClick={() => { void verify(); }}>Verify ACS hash chain</button>} />
     {!token || role !== "ADMIN" ? <EmptyState title="Admin sign-in required" detail="The real ACS audit log is only accessible to authorized Admins." /> : <>
       {integrity && <p className="authorization-feedback">{integrity}</p>}{error && <p role="alert">{error}</p>}
-      <section className="panel section"><div className="table-heading"><strong>ACS audit records · database</strong><span>{logs.length} shown</span></div>{logs.map((item, i) => <pre className="event-row" key={i}>{JSON.stringify(item)}</pre>)}{!logs.length && <EmptyState title="No ACS audit records loaded" detail="This view requires a connected PostgreSQL database." />}</section>
-      <section className="panel section"><div className="table-heading"><strong>Simulator event trace · not tamper-evident</strong><span>{stubEvents.length} shown</span></div>{stubEvents.map((event, i) => <p className="event-row" key={i}>{event.event_type} · {event.elevator_id ?? "Building"} · {event.detail}</p>)}</section>
+      <section className="panel section"><div className="table-heading"><strong>ACS audit records · database</strong><span>{logs.length} shown</span></div>{logs.map((item, i) => <pre className="event-row" key={i}>{JSON.stringify(typeof item.timestamp === "string" ? { ...item, timestamp: formatLocalTime(item.timestamp) } : item)}</pre>)}{!logs.length && <EmptyState title="No ACS audit records loaded" detail="This view requires a connected PostgreSQL database." />}</section>
+      <section className="panel section"><div className="table-heading"><strong>Simulator event trace · not tamper-evident</strong><span>{stubEvents.length} shown</span></div>{stubEvents.map((event, i) => <p className="event-row" key={i}>{formatLocalTime(event.timestamp)} · {event.event_type} · {event.elevator_id ?? "Building"} · {event.detail}</p>)}</section>
     </>}
   </>;
 }
