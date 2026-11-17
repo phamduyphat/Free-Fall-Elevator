@@ -121,6 +121,16 @@ class CarRequest:
     completed_at: datetime | None = None
     origin_floor: int | None = None
     is_service_run: bool = False
+    credential_id: str | None = None
+    authorized_at: datetime | None = None
+    rejection_reason: str | None = None
+    history: list[str] = field(default_factory=lambda: ["RECEIVED"])
+
+    def transition(self, new_status: str) -> None:
+        if new_status != self.status:
+            self.status = new_status
+            if not self.history or self.history[-1] != new_status:
+                self.history.append(new_status)
 
 
 @dataclass
@@ -435,7 +445,13 @@ class OperationalSimulator:
                 self._timeout_armed.discard(elevator_id)
             return {"source": "labelled-test-stub", "elevator_id": elevator_id, "timeout_armed": active}
 
-    def submit_car_call(self, elevator_id: str, destination_floor: int) -> dict:
+    def submit_car_call(
+        self,
+        elevator_id: str,
+        destination_floor: int,
+        *,
+        credential_id: str | None = None,
+    ) -> dict:
         """Call ONLY after ACS has granted this destination (SEC-2.6)."""
         with self._lock:
             self._update_auto()
@@ -447,13 +463,19 @@ class OperationalSimulator:
             if not self._eligible(car):
                 self._record_command("CAR_CALL", elevator_id, "REJECTED", f"Unavailable ({car.availability})")
                 raise OperationalError("Elevator is unavailable for a destination request")
+            now = self._now()
             request = CarRequest(
                 str(uuid4()),
                 elevator_id,
                 destination_floor,
-                self._now(),
+                now,
+                status="RECEIVED",
                 origin_floor=car.current_floor,
+                credential_id=credential_id,
+                authorized_at=now,
             )
+            request.transition("AUTHORIZATION_CHECK")
+            request.transition("QUEUED")
             self.car_calls[request.request_id] = request
             self._record_command("CAR_CALL", elevator_id, "ACKNOWLEDGED", f"floor={destination_floor}")
             self._event("CAR_CALL", elevator_id, f"Authorized destination {destination_floor}")
@@ -461,7 +483,12 @@ class OperationalSimulator:
             self._check_backlog_event()
             return asdict(request)
 
-    def start_service_run(self, destination_floor: int) -> dict:
+    def start_service_run(
+        self,
+        destination_floor: int,
+        *,
+        credential_id: str | None = None,
+    ) -> dict:
         """Call ONLY after ACS has granted a service trip on E5."""
         with self._lock:
             self._update_auto()
@@ -474,17 +501,53 @@ class OperationalSimulator:
                 self._record_command("E5_SERVICE_RUN", "E5", "REJECTED", f"Invalid floor {destination_floor}")
                 raise OperationalError("Invalid E5 service-run destination")
             car.availability = "OCCUPIED"
+            now = self._now()
             request = CarRequest(
                 str(uuid4()),
                 "E5",
                 destination_floor,
-                self._now(),
+                now,
+                status="RECEIVED",
                 origin_floor=car.current_floor,
                 is_service_run=True,
+                credential_id=credential_id,
+                authorized_at=now,
             )
+            request.transition("AUTHORIZATION_CHECK")
+            request.transition("QUEUED")
             self.car_calls[request.request_id] = request
             car.stops.append(Stop(destination_floor, "SERVICE", request.request_id))
             self._record_command("E5_SERVICE_RUN", "E5", "ACKNOWLEDGED", f"floor={destination_floor}")
+            return asdict(request)
+
+    def record_rejected_car_call(
+        self,
+        elevator_id: str,
+        destination_floor: int,
+        reason: str,
+        *,
+        credential_id: str | None = None,
+        is_service_run: bool = False,
+    ) -> dict:
+        """Record a denied cab destination / E5 service run as REJECTED without moving the car (FR-1.8)."""
+        with self._lock:
+            self._update_auto()
+            car = self._car(elevator_id)
+            now = self._now()
+            request = CarRequest(
+                str(uuid4()),
+                elevator_id,
+                destination_floor,
+                now,
+                status="RECEIVED",
+                origin_floor=car.current_floor,
+                is_service_run=is_service_run,
+                credential_id=credential_id,
+                rejection_reason=str(reason)[:50],
+            )
+            request.transition("AUTHORIZATION_CHECK")
+            request.transition("REJECTED")
+            self.car_calls[request.request_id] = request
             return asdict(request)
 
     def _car(self, elevator_id: str) -> Car:
@@ -1637,7 +1700,12 @@ class OperationalSimulator:
 
             # 3. Car Calls
             for c in car_calls_snapshot:
-                valid_car_status = c.status if c.status in ('RECEIVED', 'AUTHORIZATION_CHECK', 'QUEUED', 'IN_TRANSIT', 'COMPLETED', 'REJECTED', 'CANCELLED', 'FAILED', 'BLOCKED') else 'QUEUED'
+                if c.status == "BLOCKED/REQUIRES_RECONCILIATION":
+                    valid_car_status = "BLOCKED"
+                elif c.status in ('RECEIVED', 'AUTHORIZATION_CHECK', 'QUEUED', 'IN_TRANSIT', 'COMPLETED', 'REJECTED', 'CANCELLED', 'FAILED', 'BLOCKED'):
+                    valid_car_status = c.status
+                else:
+                    valid_car_status = 'QUEUED'
                 c_accepted = _aware(c.accepted_at)
                 c_completed = _aware(c.completed_at)
                 await conn.execute(  # type: ignore[union-attr]
@@ -1650,18 +1718,19 @@ class OperationalSimulator:
                     ON CONFLICT (call_id) DO UPDATE SET
                         status = EXCLUDED.status,
                         completed_at = EXCLUDED.completed_at,
-                        travel_time_seconds = EXCLUDED.travel_time_seconds;
+                        travel_time_seconds = EXCLUDED.travel_time_seconds,
+                        cancellation_reason = EXCLUDED.cancellation_reason;
                     """,
                     c.request_id,
                     c.elevator_id,
                     c.destination_floor,
-                    None,
+                    c.credential_id,
                     valid_car_status,
                     c_accepted,
                     c_completed,
                     (c_completed - c_accepted).total_seconds() if c_completed and c_accepted else None,
                     c.is_service_run,
-                    None
+                    c.rejection_reason,
                 )
 
             # 4. Incidents
@@ -1867,8 +1936,8 @@ class OperationalSimulator:
                 dict(r)
                 for r in await conn.fetch(  # type: ignore[union-attr]
                     """
-                    SELECT call_id, elevator_id, destination_floor, status,
-                           created_at, completed_at, is_service_run
+                    SELECT call_id, elevator_id, destination_floor, credential_id, status,
+                           created_at, authorized_at, completed_at, is_service_run, cancellation_reason
                     FROM car_calls
                     ORDER BY created_at ASC
                     """
@@ -2026,9 +2095,15 @@ class OperationalSimulator:
             # 3. Car calls
             for row in car_call_rows:
                 eid = str(row["elevator_id"])
-                status = str(row["status"])
+                raw_status = str(row["status"])
+                status = "BLOCKED/REQUIRES_RECONCILIATION" if raw_status == "BLOCKED" else raw_status
                 is_service = bool(row.get("is_service_run", False))
                 accepted_ts = _normalize_utc(row["created_at"])
+                authorized_ts = (
+                    _normalize_utc(row["authorized_at"])
+                    if row.get("authorized_at") is not None
+                    else None
+                )
                 completed_ts = (
                     _normalize_utc(row["completed_at"])
                     if row.get("completed_at") is not None
@@ -2042,6 +2117,9 @@ class OperationalSimulator:
                     status=status,
                     completed_at=completed_ts,
                     is_service_run=is_service,
+                    credential_id=row.get("credential_id"),
+                    authorized_at=authorized_ts,
+                    rejection_reason=row.get("cancellation_reason"),
                 )
                 self.car_calls[car_req.request_id] = car_req
                 timestamps.append(car_req.accepted_at)

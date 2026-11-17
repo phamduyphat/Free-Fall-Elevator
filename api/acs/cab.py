@@ -52,13 +52,32 @@ async def select_cab_destination(
     )
     if result.allowed:
         try:
-            trip = operational_simulator.submit_car_call(str(body.elevator_id), body.requested_floor)
+            trip = operational_simulator.submit_car_call(
+                str(body.elevator_id),
+                body.requested_floor,
+                credential_id=result.credential_id,
+            )
             result.details["operational_request_id"] = trip["request_id"]
             result.details["operational_source"] = "labelled-test-stub"
         except OperationalError as exc:
+            operational_simulator.record_rejected_car_call(
+                str(body.elevator_id),
+                body.requested_floor,
+                DenialReason.COMMAND_CONFLICT_REJECTED.value,
+                credential_id=result.credential_id,
+            )
             return auth_result_response(AuthorizationResult.deny(
                 DenialReason.COMMAND_CONFLICT_REJECTED, message=str(exc)
             ))
+    elif ElevatorId.has_value(body.elevator_id) and (
+        body.requested_floor == -1 or 1 <= body.requested_floor <= 30
+    ):
+        operational_simulator.record_rejected_car_call(
+            str(body.elevator_id),
+            body.requested_floor,
+            str(result.reason_code or "DENIED"),
+            credential_id=result.credential_id,
+        )
     return auth_result_response(result)
 
 
@@ -79,12 +98,32 @@ async def start_e5_service_run(
     )
     if result.allowed:
         try:
-            trip = operational_simulator.start_service_run(body.destination_floor)
+            trip = operational_simulator.start_service_run(
+                body.destination_floor,
+                credential_id=result.credential_id,
+            )
             result.details["operational_request_id"] = trip["request_id"]
             result.details["operational_source"] = "labelled-test-stub"
         except OperationalError as exc:
+            operational_simulator.record_rejected_car_call(
+                "E5",
+                body.destination_floor,
+                DenialReason.COMMAND_CONFLICT_REJECTED.value,
+                credential_id=result.credential_id,
+                is_service_run=True,
+            )
             return auth_result_response(AuthorizationResult.deny(
                 DenialReason.COMMAND_CONFLICT_REJECTED, message=str(exc)
             ))
+    elif ElevatorId.has_value(body.elevator_id) and (
+        body.destination_floor == -1 or 1 <= body.destination_floor <= 30
+    ):
+        operational_simulator.record_rejected_car_call(
+            str(body.elevator_id),
+            body.destination_floor,
+            str(result.reason_code or "DENIED"),
+            credential_id=result.credential_id,
+            is_service_run=True,
+        )
     return auth_result_response(result)
 

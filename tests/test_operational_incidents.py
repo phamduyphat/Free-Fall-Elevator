@@ -251,6 +251,23 @@ class TestIncidentsAndRecovery(unittest.TestCase):
         statuses = {c["status"] for c in self.sim.commands}
         self.assertEqual(statuses, {"ACKNOWLEDGED", "REJECTED", "UNKNOWN", "TIMED_OUT"})
 
+    def test_fr18_car_call_lifecycle_blocked_and_rejected(self):
+        cc = self.sim.submit_car_call("E1", 6, credential_id="RES-CARD-06")
+        self.assertEqual(cc["history"], ["RECEIVED", "AUTHORIZATION_CHECK", "QUEUED"])
+        self.assertEqual(cc["credential_id"], "RES-CARD-06")
+        self.assertIsNotNone(cc["authorized_at"])
+        self.sim.communication_loss("E1", actor="TECH-1")
+        self.assertEqual(
+            self.sim.car_calls[cc["request_id"]].status,
+            "BLOCKED/REQUIRES_RECONCILIATION",
+        )
+        rej = self.sim.record_rejected_car_call(
+            "E1", 20, "UNAUTHORIZED_FLOOR", credential_id="RES-CARD-06"
+        )
+        self.assertEqual(rej["status"], "REJECTED")
+        self.assertEqual(rej["history"], ["RECEIVED", "AUTHORIZATION_CHECK", "REJECTED"])
+        self.assertEqual(rej["rejection_reason"], "UNAUTHORIZED_FLOOR")
+
 
 if __name__ == "__main__":
     unittest.main()

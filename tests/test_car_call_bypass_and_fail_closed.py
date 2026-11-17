@@ -180,7 +180,11 @@ def test_acs_blocks_unauthenticated_and_unauthorized_car_calls_without_moving_ca
             assert no_card.json()["allowed"] is False
             assert no_card.json()["reason_code"] == DenialReason.NO_ACTIVE_CREDENTIAL
             assert operational_simulator.cars["E1"].stops == []
-            assert operational_simulator.car_calls == {}
+            assert len(operational_simulator.car_calls) == 1
+            rejected_req = next(iter(operational_simulator.car_calls.values()))
+            assert rejected_req.status == "REJECTED"
+            assert rejected_req.history == ["RECEIVED", "AUTHORIZATION_CHECK", "REJECTED"]
+            assert rejected_req.rejection_reason == DenialReason.NO_ACTIVE_CREDENTIAL.value
 
             # 2. Swipe Resident (floor 10), attempt restricted floor 15 -> 403 UNAUTHORIZED_FLOOR, no stop queued
             swipe_ok = await client.post(
