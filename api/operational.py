@@ -2,69 +2,98 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
-from acs.enums import DashboardOperationType
-from api.helpers import auth_denial_response, authorize_dashboard_op, extract_bearer_token
+from acs.enums import (
+    DashboardOperationType,
+    ElevatorId,
+    EmergencyOverrideType,
+    MaintenanceOperationType,
+)
+from acs.fleet_accesscontrol import FleetAccessControl
+from acs.helpers import reject_malformed_msg
+from acs.payloads import (
+    EmergencyOverridePayload,
+    MaintenanceOperationPayload,
+    ReturnToServicePayload,
+)
+from api.helpers import (
+    auth_denial_response,
+    auth_result_response,
+    authorize_dashboard_op,
+    extract_bearer_token,
+)
 from db import DbConnectionPool, get_db_pool
+from simulation.clock import SimulationClock
 from simulation.operational import OperationalError, operational_simulator
 
 router = APIRouter(prefix="/operational", tags=["operational-test-stub"])
 
+_VALID_STUB_STATES = frozenset(
+    {"IN_SERVICE", "MAINTENANCE", "FAULT", "EMERGENCY_UNAVAILABLE", "STALE"}
+)
+
 
 class HallCallInput(BaseModel):
-    origin_floor: int = Field(ge=-1, le=30)
-    call_type: Literal["ORDINARY", "FREIGHT"] = "ORDINARY"
-    direction: Literal["UP", "DOWN"] | None = None
-    traffic_profile: str | None = None
-
-
-class CarCallInput(BaseModel):
-    elevator_id: Literal["E1", "E2", "E3", "E4", "E5"]
-    destination_floor: int = Field(ge=-1, le=30)
+    origin_floor: int
+    call_type: str = "ORDINARY"
+    direction: Optional[str] = None
+    traffic_profile: Optional[str] = None
 
 
 class StubAdvanceInput(BaseModel):
-    seconds: int = Field(default=1, ge=0, le=10000)
+    seconds: int = 1
 
 
 class StubStateInput(BaseModel):
-    elevator_id: Literal["E1", "E2", "E3", "E4", "E5"]
-    state: Literal["IN_SERVICE", "MAINTENANCE", "FAULT", "EMERGENCY_UNAVAILABLE", "STALE"]
+    elevator_id: str
+    state: str
 
 
 @router.post("/hall-calls", status_code=201)
-async def submit_hall_call(body: HallCallInput) -> dict:
-    """Unauthenticated passenger hall call, with duplicate merging and E5 exceptions."""
+async def submit_hall_call(
+    body: HallCallInput,
+    db_pool: type[DbConnectionPool] = Depends(get_db_pool),
+) -> Any:
+    """Unauthenticated passenger hall call, with duplicate merging, malformed-input audit, and E5 exceptions."""
+    valid_floor = body.origin_floor == -1 or (1 <= body.origin_floor <= 30)
+    valid_type = body.call_type in ("ORDINARY", "FREIGHT")
+    valid_dir = (
+        body.direction in ("UP", "DOWN")
+        if body.call_type == "ORDINARY"
+        else body.direction is None
+    )
+    if not (valid_floor and valid_type and valid_dir):
+        denied = await reject_malformed_msg(
+            timestamp=SimulationClock.now(),
+            target_id="HALL_PANEL",
+            source="HallCallInput",
+            payload_details={
+                "origin_floor": body.origin_floor,
+                "call_type": body.call_type,
+                "direction": body.direction,
+            },
+            message="Invalid hall-call floor, type, or direction.",
+            db_pool=db_pool,
+        )
+        return auth_result_response(denied)
+
     try:
         request, merged = operational_simulator.submit_hall_call(
             origin_floor=body.origin_floor,
-            direction=body.direction,
-            call_type=body.call_type,
-            traffic_profile=getattr(body, "traffic_profile", None),
+            direction=body.direction,  # type: ignore[arg-type]
+            call_type=body.call_type,  # type: ignore[arg-type]
+            traffic_profile=body.traffic_profile,
         )
         return {"request": request, "merged": merged, "source": "labelled-test-stub"}
     except OperationalError as exc:
-        raise HTTPException(status_code=409 if "unavailable" in str(exc) else 422,
-                            detail=str(exc)) from exc
-
-
-@router.post("/car-calls", status_code=201)
-async def submit_car_call(body: CarCallInput) -> dict:
-    """Submit a destination request directly to the operational simulator test stub."""
-    try:
-        trip = operational_simulator.submit_car_call(body.elevator_id, body.destination_floor)
-        return {
-            "source": "labelled-test-stub",
-            "message": f"Destination {body.destination_floor} accepted for {body.elevator_id}.",
-            "trip": trip,
-        }
-    except OperationalError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=409 if "unavailable" in str(exc) else 422,
+            detail=str(exc),
+        ) from exc
 
 
 @router.get("/hall-calls")
@@ -75,7 +104,10 @@ async def list_hall_calls() -> dict:
 @router.get("/hall-calls/{request_id}")
 async def get_hall_call(request_id: str) -> dict:
     try:
-        return {"source": "labelled-test-stub", "request": operational_simulator.hall_call_status(request_id)}
+        return {
+            "source": "labelled-test-stub",
+            "request": operational_simulator.hall_call_status(request_id),
+        }
     except OperationalError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -92,6 +124,17 @@ async def advance_test_stub(
     )
     if session is None:
         return auth_denial_response(authorized)
+    if not (0 <= body.seconds <= 10000):
+        denied = await reject_malformed_msg(
+            timestamp=session.timestamp,
+            target_id="SIMULATOR",
+            source="StubAdvanceInput",
+            payload_details={"seconds": body.seconds},
+            message="seconds must be an integer between 0 and 10000.",
+            credential_id=session.credential_id,
+            db_pool=db_pool,
+        )
+        return auth_result_response(denied)
     return operational_simulator.advance(body.seconds)
 
 
@@ -101,15 +144,70 @@ async def update_test_stub_car(
     session_token: str = Depends(extract_bearer_token),
     db_pool: type[DbConnectionPool] = Depends(get_db_pool),
 ) -> Any:
-    """Admin-only synthetic equipment-state event for testing dispatch exclusions.
-
-    This endpoint does not implement physical interlocks, fault recovery or
-    certified emergency behavior. It is deliberately labelled test-stub.
-    """
+    """Admin-only synthetic equipment-state event routed through FleetAccessControl and audit_log_chain."""
     authorized, session = await authorize_dashboard_op(
         DashboardOperationType.EMERGENCY_OVERRIDE, session_token, db_pool
     )
     if session is None:
         return auth_denial_response(authorized)
-    operational_simulator.isolate(body.elevator_id, body.state)
+
+    if not ElevatorId.has_value(body.elevator_id) or body.state not in _VALID_STUB_STATES:
+        denied = await reject_malformed_msg(
+            timestamp=session.timestamp,
+            target_id=str(body.elevator_id),
+            source="StubStateInput",
+            payload_details={"elevator_id": body.elevator_id, "state": body.state},
+            message="Invalid elevator_id or operational state.",
+            credential_id=session.credential_id,
+            db_pool=db_pool,
+        )
+        return auth_result_response(denied)
+
+    if body.state == "IN_SERVICE":
+        if not operational_simulator.can_return_to_service(body.elevator_id):
+            raise HTTPException(
+                status_code=409,
+                detail="Recovery checks failed: stale, fault, door, or unresolved incident.",
+            )
+        acs_res = await FleetAccessControl.validate_return_to_service(
+            ReturnToServicePayload(
+                credential_id=session.credential_id,
+                elevator_id=body.elevator_id,
+                technician_confirmation=True,
+                timestamp=session.timestamp,
+            ),
+            db_pool=db_pool,
+        )
+    elif body.state == "MAINTENANCE":
+        acs_res = await FleetAccessControl.validate_maintenance_operation(
+            MaintenanceOperationPayload(
+                credential_id=session.credential_id,
+                elevator_id=body.elevator_id,
+                operation_type=MaintenanceOperationType.ENTER_MAINTENANCE,
+                timestamp=session.timestamp,
+            ),
+            db_pool=db_pool,
+        )
+    else:
+        acs_res = await FleetAccessControl.validate_emergency_override(
+            EmergencyOverridePayload(
+                credential_id=session.credential_id,
+                override_type=EmergencyOverrideType.MANUAL_RECALL,
+                target_car_id=body.elevator_id,
+                incident_id=None,
+                reason=f"Stub state transition to {body.state}",
+                timestamp=session.timestamp,
+            ),
+            db_pool=db_pool,
+        )
+
+    if not acs_res.allowed:
+        return auth_result_response(acs_res)
+
+    try:
+        operational_simulator.isolate(
+            body.elevator_id, body.state, technician_id=session.credential_id  # type: ignore[arg-type]
+        )
+    except OperationalError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     return operational_simulator.fleet_status()

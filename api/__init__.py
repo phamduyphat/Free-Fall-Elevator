@@ -32,6 +32,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         yield
     finally:
         SimulationClock.stop()
+        if DbConnectionPool._pool is not None:
+            try:
+                async with DbConnectionPool.acquire() as conn:
+                    await operational_simulator.sync_to_db(conn)
+            except Exception:
+                pass
         await DbConnectionPool.close_pool()
 
 

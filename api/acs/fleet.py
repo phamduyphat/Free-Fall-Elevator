@@ -88,7 +88,9 @@ async def execute_maintenance_operation(
     )
     if result.allowed and str(body.operation_type) == "ENTER_MAINTENANCE":
         try:
-            operational_simulator.isolate(str(body.elevator_id), "MAINTENANCE")
+            operational_simulator.isolate(
+                str(body.elevator_id), "MAINTENANCE", technician_id=session.credential_id
+            )
         except OperationalError as exc:
             return auth_result_response(AuthorizationResult.deny(
                 "COMMAND_CONFLICT_REJECTED", message=str(exc)))
@@ -127,7 +129,9 @@ async def return_to_service(
     )
     if result.allowed:
         try:
-            operational_simulator.isolate(str(body.elevator_id), "IN_SERVICE")
+            operational_simulator.isolate(
+                str(body.elevator_id), "IN_SERVICE", technician_id=session.credential_id
+            )
         except OperationalError as exc:
             return auth_result_response(AuthorizationResult.deny(
                 "INVALID_STATE_TRANSITION", message=str(exc)))

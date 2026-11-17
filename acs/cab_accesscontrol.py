@@ -353,15 +353,17 @@ class CabAccessControl:
                 db_pool=db_pool,
             )
 
-        try:
-            async with db_pool.transaction():
-                if payload.requested_floor == -1:
-                    if payload.elevator_id == ElevatorId.E5:
-                        session = CabAccessControl.active_car_sessions.get(ElevatorId.E5.value)
+        if payload.requested_floor == -1:
+            if payload.elevator_id == ElevatorId.E5:
+                session = CabAccessControl.active_car_sessions.get(ElevatorId.E5.value)
+                cred_id = session["credential_id"] if session else None
+                role = session["role"] if session else UserRole.SYSTEM
+                try:
+                    async with db_pool.transaction():
                         return await CabAccessControl._deny_destination_selection(
                             payload=payload,
-                            cred_id=session["credential_id"] if session else None,
-                            role=session["role"] if session else UserRole.SYSTEM,
+                            cred_id=cred_id,
+                            role=role,
                             reason=DenialReason.E5_B1_FORBIDDEN,
                             message="Freight elevator E5 does not serve Basement 1 (B1).",
                             action_type=AuditActionType.ACCESS_DENIAL,
@@ -369,7 +371,15 @@ class CabAccessControl:
                             ts=ts,
                             db_pool=db_pool,
                         )
+                except Exception:
+                    return AuthorizationResult.deny(
+                        DenialReason.E5_B1_FORBIDDEN,
+                        message="Freight elevator E5 does not serve Basement 1 (B1).",
+                        credential_id=cred_id,
+                    )
 
+            try:
+                async with db_pool.transaction():
                     await Logging.log_authorization_event(
                         timestamp=ts,
                         credential_id=None,
@@ -381,14 +391,19 @@ class CabAccessControl:
                         alert_triggered=False,
                         db_pool=db_pool,
                     )
-                    return AuthorizationResult.allow(
-                        message="Basement 1 (B1) is universally accessible on residential cars.",
-                        details={
-                            "elevator_id": str(payload.elevator_id),
-                            "requested_floor": -1,
-                        },
-                    )
+            except Exception:
+                # B1 access on residential cars remains available even when the data store is down (MNT-4.11, VT-26).
+                pass
+            return AuthorizationResult.allow(
+                message="Basement 1 (B1) is universally accessible on residential cars.",
+                details={
+                    "elevator_id": str(payload.elevator_id),
+                    "requested_floor": -1,
+                },
+            )
 
+        try:
+            async with db_pool.transaction():
                 session, session_err = CabAccessControl._check_car_session(
                     str(payload.elevator_id), ts
                 )
@@ -428,7 +443,6 @@ class CabAccessControl:
                         db_pool=db_pool,
                     )
 
-                session["consumed"] = True
                 await Logging.log_authorization_event(
                     timestamp=ts,
                     credential_id=cred_id,
@@ -440,6 +454,7 @@ class CabAccessControl:
                     alert_triggered=False,
                     db_pool=db_pool,
                 )
+                session["consumed"] = True
                 return AuthorizationResult.allow(
                     message=f"Destination floor {payload.requested_floor} authorized for {payload.elevator_id}.",
                     session_token=session["session_token"],

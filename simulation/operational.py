@@ -86,6 +86,8 @@ class HallRequest:
     boarding_deadline_tick: int | None = None
     no_boarding: bool = False
     traffic_profile: str | None = None
+    cancelled_by: str | None = None
+    cancellation_reason: str | None = None
     history: list[str] = field(default_factory=lambda: ["RECEIVED"])
 
     def transition(self, new_status: str) -> None:
@@ -122,6 +124,7 @@ class Incident:
     rescue_car_id: str | None = None
     confirmed: bool = False
     escalated: bool = False
+    acknowledged_at: datetime | None = None
     history: list[str] = field(default_factory=lambda: ["OPEN"])
 
 
@@ -210,6 +213,7 @@ class OperationalSimulator:
             self._wall_reference = time.monotonic()
             self._synced_trips_idx = 0
             self._synced_downtime_idx = 0
+            self._synced_closed_downtime_ids: set[str] = set()
             self._synced_heartbeats_idx = 0
             self.heartbeats.append({"timestamp": self._now(), "status": "UP"})
 
@@ -397,15 +401,25 @@ class OperationalSimulator:
         car.rescue_wait_remaining = 0
         car.direction = "IDLE"
 
-    def _close_open_downtime(self, elevator_id: str, now: datetime) -> None:
+    def _close_open_downtime(
+        self, elevator_id: str, now: datetime, *, technician_id: str | None = None
+    ) -> None:
         for interval in self.downtime_intervals:
             if interval["elevator_id"] == elevator_id and interval["ended_at"] is None:
                 interval["ended_at"] = now
                 interval["duration_seconds"] = max(
                     0.0, (now - interval["started_at"]).total_seconds()
                 )
+                if technician_id and interval.get("technician_id") is None:
+                    interval["technician_id"] = technician_id
 
-    def isolate(self, elevator_id: str, availability: CarAvailability) -> None:
+    def isolate(
+        self,
+        elevator_id: str,
+        availability: CarAvailability,
+        *,
+        technician_id: str | None = None,
+    ) -> None:
         """Trusted equipment-stub or authorized staff transition, not public passenger input."""
         with self._lock:
             self._update_auto()
@@ -421,7 +435,7 @@ class OperationalSimulator:
                 if not (self.recoverable(elevator_id) or recovered_snapshot):
                     raise OperationalError("Recovery checks failed: stale, fault, door or movement state")
                 if any(i.kind in ("FIRE", "POWER_FAILURE", "MEDICAL", "STUCK_CAR", "BLOCKING_FAULT")
-                       and i.status not in ("RESOLVED", "CLOSED")
+                       and i.status not in ("RESOLVED", "CLOSED", "FALSE_ALARM")
                        and (i.elevator_id is None or i.elevator_id == elevator_id)
                        for i in self.incidents.values()):
                     raise OperationalError("Unresolved incident prevents return to service")
@@ -430,7 +444,7 @@ class OperationalSimulator:
                 self._release_car_hall_calls(car)
                 self._event("ISOLATION", elevator_id, availability)
                 if car.availability != availability:
-                    self._close_open_downtime(elevator_id, now)
+                    self._close_open_downtime(elevator_id, now, technician_id=technician_id)
                     mapped_state = (
                         "EMERGENCY"
                         if availability == "EMERGENCY_UNAVAILABLE"
@@ -452,11 +466,11 @@ class OperationalSimulator:
                             "started_at": now,
                             "ended_at": None,
                             "duration_seconds": None,
-                            "technician_id": None,
+                            "technician_id": technician_id,
                         }
                     )
             else:
-                self._close_open_downtime(elevator_id, now)
+                self._close_open_downtime(elevator_id, now, technician_id=technician_id)
             car.availability = availability
             if availability == "IN_SERVICE":
                 car.connected = True
@@ -728,7 +742,9 @@ class OperationalSimulator:
                         f"Test stub boarded={boarded}; hall call {request_id}")
             return self._serialize_request(request)
 
-    def cancel_hall_call(self, request_id: str, actor: str) -> dict:
+    def cancel_hall_call(
+        self, request_id: str, actor: str, *, reason: str = "ADMIN_CANCELLED"
+    ) -> dict:
         with self._lock:
             self._update_auto()
             request = self.hall_calls.get(request_id)
@@ -738,8 +754,10 @@ class OperationalSimulator:
                 car = self.cars[request.assigned_car]
                 car.stops = [stop for stop in car.stops if stop.request_id != request_id]
             request.assigned_car = None
+            request.cancelled_by = actor
+            request.cancellation_reason = reason
             request.transition("CANCELLED")
-            self._event("HALL_CANCELLED", None, f"{request_id} by {actor}")
+            self._event("HALL_CANCELLED", None, f"{request_id} by {actor}: {reason}")
             return self._serialize_request(request)
 
     def diagnostics(self, elevator_id: str) -> dict:
@@ -792,19 +810,19 @@ class OperationalSimulator:
                                 "Nonstop run to Floor 1 scheduled in the stub")
             return asdict(incident)
 
-    def confirm_help_as_stuck(self, incident_id: str) -> dict:
+    def confirm_help_as_stuck(self, incident_id: str, *, actor: str | None = None) -> dict:
         with self._lock:
             self._update_auto()
             incident = self._incident(incident_id)
-            if incident.kind != "HELP" or incident.status in ("RESOLVED", "CLOSED"):
+            if incident.kind != "HELP" or incident.status in ("RESOLVED", "CLOSED", "FALSE_ALARM"):
                 raise OperationalError("Only an open HELP request can be confirmed as stuck")
             incident.kind = "STUCK_CAR"
             incident.confirmed = True
             incident.history.append("CONFIRMED_STUCK")
-            self.isolate(incident.elevator_id, "EMERGENCY_UNAVAILABLE")
+            self.isolate(incident.elevator_id, "EMERGENCY_UNAVAILABLE", technician_id=actor)
             return asdict(incident)
 
-    def building_emergency(self, kind: str) -> dict:
+    def building_emergency(self, kind: str, *, actor: str | None = None) -> dict:
         """Inject building fire or power status; default policy commands NO recall."""
         with self._lock:
             self._update_auto()
@@ -813,11 +831,13 @@ class OperationalSimulator:
             incident = self._create_incident(kind, None,
                 "Simulated building-wide event. Ordinary dispatch suspended; no recall.", "CRITICAL")
             for elevator_id in self.ELEVATOR_IDS:
-                self.isolate(elevator_id, "EMERGENCY_UNAVAILABLE")
+                self.isolate(elevator_id, "EMERGENCY_UNAVAILABLE", technician_id=actor)
                 self.cars[elevator_id].message = f"{kind} reported: wait for staff instructions"
             return asdict(incident)
 
-    def report_fault(self, elevator_id: str, fault_code: str) -> dict:
+    def report_fault(
+        self, elevator_id: str, fault_code: str, *, actor: str | None = None
+    ) -> dict:
         with self._lock:
             self._update_auto()
             car = self._car(elevator_id)
@@ -825,7 +845,7 @@ class OperationalSimulator:
                 raise OperationalError("Fault code must contain 1..80 characters")
             car.active_fault = fault_code.strip()
             if car.availability != "EMERGENCY_UNAVAILABLE":
-                self.isolate(elevator_id, "FAULT")
+                self.isolate(elevator_id, "FAULT", technician_id=actor)
             return asdict(self._create_incident("BLOCKING_FAULT", elevator_id, fault_code.strip()))
 
     def clear_fault(self, elevator_id: str) -> dict:
@@ -867,14 +887,23 @@ class OperationalSimulator:
             self._event("DOOR_COMMAND", elevator_id, action)
             return self.fleet_status()
 
-    def communication_loss(self, elevator_id: str) -> dict:
+    def communication_loss(self, elevator_id: str, *, actor: str | None = None) -> dict:
         with self._lock:
             self._update_auto()
-            self.isolate(elevator_id, "STALE")
+            self.isolate(elevator_id, "STALE", technician_id=actor)
             return asdict(self._create_incident("COMMUNICATION_LOSS", elevator_id,
                 "Connection lost; outstanding commands require reconciliation"))
 
-    def reconcile_connection(self, elevator_id: str) -> dict:
+    def can_reconcile_connection(self, elevator_id: str) -> None:
+        with self._lock:
+            self._update_auto()
+            car = self._car(elevator_id)
+            if car.availability != "STALE":
+                raise OperationalError("Car is not marked STALE")
+            if car.active_fault or car.door_state == "OBSTRUCTED":
+                raise OperationalError("Cannot reconcile with active fault or obstruction")
+
+    def reconcile_connection(self, elevator_id: str, *, actor: str | None = None) -> dict:
         with self._lock:
             self._update_auto()
             car = self._car(elevator_id)
@@ -887,7 +916,7 @@ class OperationalSimulator:
             for request in self.car_calls.values():
                 if request.elevator_id == elevator_id and request.status == "BLOCKED/REQUIRES_RECONCILIATION":
                     request.status = "FAILED"  # unknown outcome: never blindly replay
-            self.isolate(elevator_id, "IN_SERVICE")
+            self.isolate(elevator_id, "IN_SERVICE", technician_id=actor)
             self._event("RECONCILED", elevator_id, "Fresh simulated snapshot; no uncertain command replay")
             return self.fleet_status()
 
@@ -904,12 +933,19 @@ class OperationalSimulator:
             return asdict(self._create_incident("MEDICAL", None,
                              "Admin-reported medical emergency by telephone", "CRITICAL", floor))
 
-    def dispatch_rescue(self, incident_id: str, *, wait_seconds: int = 120,
-                        confirmed_empty: bool = False) -> dict:
+    def select_rescue_candidate(
+        self,
+        incident_id: str,
+        *,
+        wait_seconds: int = 120,
+        confirmed_empty: bool = False,
+        preferred_car_id: str | None = None,
+    ) -> tuple[str, int]:
+        """Validate rescue preconditions and select the candidate rescue car without mutating state."""
         with self._lock:
             self._update_auto()
             incident = self._incident(incident_id)
-            if incident.kind not in ("MEDICAL", "STUCK_CAR") or incident.status in ("RESOLVED", "CLOSED"):
+            if incident.kind not in ("MEDICAL", "STUCK_CAR") or incident.status in ("RESOLVED", "CLOSED", "FALSE_ALARM"):
                 raise OperationalError("Rescue requires an unresolved medical or stuck-car incident")
             if not confirmed_empty:
                 raise OperationalError("Admin must confirm rescue car is empty")
@@ -920,13 +956,41 @@ class OperationalSimulator:
             floor = incident.floor
             if floor is None:
                 raise OperationalError("Incident floor is unknown")
-            candidates = [c for c in list(self.cars.values())[:4]
-                          if c.elevator_id != incident.elevator_id and self._eligible(c)
-                          and all(s.kind == "HALL" for s in c.stops)]
+            if preferred_car_id is not None:
+                return preferred_car_id, floor
+            candidates = [
+                c for c in list(self.cars.values())[:4]
+                if c.elevator_id != incident.elevator_id and self._eligible(c)
+                and all(s.kind == "HALL" for s in c.stops)
+            ]
             if not candidates:
                 raise OperationalError("No eligible, confirmed-empty rescue car")
-            car = min(candidates, key=lambda c: (self._eta_and_insertion(c, floor, None)[0],
-                                                 int(c.elevator_id[1:])))
+            car = min(
+                candidates,
+                key=lambda c: (self._eta_and_insertion(c, floor, None)[0], int(c.elevator_id[1:])),
+            )
+            return car.elevator_id, floor
+
+    def dispatch_rescue(
+        self,
+        incident_id: str,
+        *,
+        wait_seconds: int = 120,
+        confirmed_empty: bool = False,
+        rescue_car_id: str | None = None,
+    ) -> dict:
+        with self._lock:
+            self._update_auto()
+            chosen_id, floor = self.select_rescue_candidate(
+                incident_id,
+                wait_seconds=wait_seconds,
+                confirmed_empty=confirmed_empty,
+                preferred_car_id=rescue_car_id,
+            )
+            incident = self._incident(incident_id)
+            car = self._car(chosen_id)
+            if chosen_id == "E5" or chosen_id == incident.elevator_id or not self._eligible(car) or not all(s.kind == "HALL" for s in car.stops):
+                raise OperationalError("Selected rescue car is ineligible or busy")
             self._release_car_hall_calls(car)
             car.rescue_active = True
             car.rescue_wait_remaining = wait_seconds
@@ -936,6 +1000,27 @@ class OperationalSimulator:
             self._reassign_pending()
             return {"incident": asdict(incident), "rescue_car_id": car.elevator_id,
                     "wait_seconds": wait_seconds}
+
+    def cancel_rescue(self, incident_id: str, *, actor: str = "ADMIN") -> dict:
+        """Admin cancels an active rescue-car dispatch/hold; car returns to normal dispatch and incident stays open."""
+        with self._lock:
+            self._update_auto()
+            incident = self._incident(incident_id)
+            if not incident.rescue_car_id:
+                raise OperationalError("Incident has no active rescue car")
+            car = self._car(incident.rescue_car_id)
+            car.stops = [s for s in car.stops if not (s.kind == "RESCUE" and s.request_id == incident_id)]
+            car.rescue_active = False
+            car.rescue_wait_remaining = 0
+            car.dwell_remaining = 0
+            car.door_state = "CLOSED"
+            car.direction = "IDLE"
+            car.message = "Rescue cancelled by Admin; returned to normal dispatch"
+            released_car = car.elevator_id
+            incident.rescue_car_id = None
+            self._event("RESCUE_RELEASE", released_car, f"Cancelled by {actor} for {incident_id}")
+            self._reassign_pending()
+            return asdict(incident)
 
     def confirm_rescue_boarding(self, incident_id: str) -> dict:
         with self._lock:
@@ -957,6 +1042,62 @@ class OperationalSimulator:
             self._event("RESCUE_BOARDING", car.elevator_id, "Medical responder-floor run")
             return asdict(incident)
 
+    def preview_incident_action(
+        self,
+        incident_id: str,
+        action: str,
+        *,
+        technician_confirmation: bool = False,
+    ) -> tuple[dict, list[str]]:
+        """Validate incident action preconditions without mutating state and return cars that would return to service."""
+        with self._lock:
+            self._update_auto()
+            incident = self._incident(incident_id)
+            returning_cars: list[str] = []
+            if action == "ACKNOWLEDGE":
+                if incident.status != "OPEN":
+                    raise OperationalError("Only OPEN incidents can be acknowledged")
+            elif action in ("RESOLVE", "FALSE_ALARM"):
+                if incident.status not in ("OPEN", "ACKNOWLEDGED"):
+                    raise OperationalError("Incident already resolved or closed")
+                if action == "RESOLVE" and incident.kind != "HELP" and not technician_confirmation:
+                    raise OperationalError("Recovery confirmation is required")
+                if incident.elevator_id:
+                    car = self.cars[incident.elevator_id]
+                    if car.rescue_active:
+                        raise OperationalError("Rescue car still active")
+                    if action == "RESOLVE" and car.availability in ("EMERGENCY_UNAVAILABLE", "FAULT", "MAINTENANCE", "STALE"):
+                        if not self.recoverable(incident.elevator_id):
+                            raise OperationalError("Recovery checks not satisfied")
+                        if not any(
+                            i is not incident and i.elevator_id == incident.elevator_id
+                            and i.kind in ("MEDICAL", "STUCK_CAR", "BLOCKING_FAULT")
+                            and i.status not in ("RESOLVED", "CLOSED", "FALSE_ALARM")
+                            for i in self.incidents.values()
+                        ):
+                            returning_cars.append(incident.elevator_id)
+                elif incident.kind in ("FIRE", "POWER_FAILURE"):
+                    if not any(
+                        i is not incident and i.kind in ("FIRE", "POWER_FAILURE")
+                        and i.status not in ("RESOLVED", "CLOSED", "FALSE_ALARM")
+                        for i in self.incidents.values()
+                    ):
+                        for car in self.cars.values():
+                            if car.availability == "EMERGENCY_UNAVAILABLE" and self.recoverable(car.elevator_id):
+                                if not any(
+                                    i is not incident and i.elevator_id == car.elevator_id
+                                    and i.kind in ("MEDICAL", "STUCK_CAR", "BLOCKING_FAULT")
+                                    and i.status not in ("RESOLVED", "CLOSED", "FALSE_ALARM")
+                                    for i in self.incidents.values()
+                                ):
+                                    returning_cars.append(car.elevator_id)
+            elif action == "CLOSE":
+                if incident.status != "RESOLVED":
+                    raise OperationalError("Resolve before closing")
+            else:
+                raise OperationalError("Action must be ACKNOWLEDGE, RESOLVE, CLOSE or FALSE_ALARM")
+            return asdict(incident), returning_cars
+
     def incident_action(self, incident_id: str, action: str, *, actor: str,
                         technician_confirmation: bool = False) -> dict:
         with self._lock:
@@ -967,6 +1108,7 @@ class OperationalSimulator:
                     raise OperationalError("Only OPEN incidents can be acknowledged")
                 incident.status = "ACKNOWLEDGED"
                 incident.acknowledged_by = actor
+                incident.acknowledged_at = self._now()
             elif action == "RESOLVE":
                 if incident.status not in ("OPEN", "ACKNOWLEDGED"):
                     raise OperationalError("Incident already resolved or closed")
@@ -984,25 +1126,48 @@ class OperationalSimulator:
                 incident.resolved_by = actor
                 if incident.kind in ("FIRE", "POWER_FAILURE"):
                     if not any(i is not incident and i.kind in ("FIRE", "POWER_FAILURE")
-                               and i.status not in ("RESOLVED", "CLOSED") for i in self.incidents.values()):
+                               and i.status not in ("RESOLVED", "CLOSED", "FALSE_ALARM") for i in self.incidents.values()):
                         for car in self.cars.values():
                             if car.availability == "EMERGENCY_UNAVAILABLE":
-                                if self.recoverable(car.elevator_id):
-                                    self.isolate(car.elevator_id, "IN_SERVICE")
+                                if self.recoverable(car.elevator_id) and not any(
+                                    i is not incident and i.elevator_id == car.elevator_id
+                                    and i.kind in ("MEDICAL", "STUCK_CAR", "BLOCKING_FAULT")
+                                    and i.status not in ("RESOLVED", "CLOSED", "FALSE_ALARM")
+                                    for i in self.incidents.values()
+                                ):
+                                    self.isolate(car.elevator_id, "IN_SERVICE", technician_id=actor)
                 elif incident.elevator_id:
                     car = self.cars[incident.elevator_id]
                     if car.availability in ("EMERGENCY_UNAVAILABLE", "FAULT", "MAINTENANCE"):
                         if not any(i is not incident and i.elevator_id == incident.elevator_id
                                    and i.kind in ("MEDICAL", "STUCK_CAR", "BLOCKING_FAULT")
-                                   and i.status not in ("RESOLVED", "CLOSED")
+                                   and i.status not in ("RESOLVED", "CLOSED", "FALSE_ALARM")
                                    for i in self.incidents.values()):
-                            self.isolate(incident.elevator_id, "IN_SERVICE")
+                            self.isolate(incident.elevator_id, "IN_SERVICE", technician_id=actor)
+            elif action == "FALSE_ALARM":
+                if incident.status not in ("OPEN", "ACKNOWLEDGED"):
+                    raise OperationalError("Incident already resolved or closed")
+                if incident.elevator_id and self.cars[incident.elevator_id].rescue_active:
+                    raise OperationalError("Rescue car still active")
+                incident.status = "FALSE_ALARM"
+                incident.resolved_at = self._now()
+                incident.resolved_by = actor
+                if incident.elevator_id:
+                    car = self.cars[incident.elevator_id]
+                    if car.availability in ("EMERGENCY_UNAVAILABLE", "FAULT", "MAINTENANCE") and self.recoverable(incident.elevator_id):
+                        if not any(
+                            i is not incident and i.elevator_id == incident.elevator_id
+                            and i.kind in ("MEDICAL", "STUCK_CAR", "BLOCKING_FAULT")
+                            and i.status not in ("RESOLVED", "CLOSED", "FALSE_ALARM")
+                            for i in self.incidents.values()
+                        ):
+                            self.isolate(incident.elevator_id, "IN_SERVICE", technician_id=actor)
             elif action == "CLOSE":
                 if incident.status != "RESOLVED":
                     raise OperationalError("Resolve before closing")
                 incident.status = "CLOSED"
             else:
-                raise OperationalError("Action must be ACKNOWLEDGE, RESOLVE or CLOSE")
+                raise OperationalError("Action must be ACKNOWLEDGE, RESOLVE, CLOSE or FALSE_ALARM")
             incident.history.append(incident.status)
             self._event("INCIDENT_" + action, incident.elevator_id, f"{incident_id} by {actor}")
             return asdict(incident)
@@ -1051,7 +1216,12 @@ class OperationalSimulator:
                 car_calls_snapshot = list(self.car_calls.values())
                 trips_to_sync = list(self.trips[self._synced_trips_idx:])
                 incidents_snapshot = list(self.incidents.values())
-                downtime_to_sync = list(self.downtime_intervals[self._synced_downtime_idx:])
+                downtime_to_sync = [
+                    dict(di)
+                    for idx, di in enumerate(self.downtime_intervals)
+                    if idx >= self._synced_downtime_idx
+                    or di["interval_id"] not in self._synced_closed_downtime_ids
+                ]
                 heartbeats_to_sync = list(self.heartbeats[self._synced_heartbeats_idx:])
                 current_trips_len = len(self.trips)
                 current_downtime_len = len(self.downtime_intervals)
@@ -1097,7 +1267,7 @@ class OperationalSimulator:
                     r.wait_seconds,
                     r.reassignment_count,
                     r.no_boarding,
-                    None,
+                    r.cancellation_reason,
                     r.traffic_profile or "NORMAL"
                 )
 
@@ -1181,6 +1351,7 @@ class OperationalSimulator:
                 "ACKNOWLEDGED": "ACKNOWLEDGED",
                 "RESOLVED": "RESOLVED",
                 "CLOSED": "CLOSED",
+                "FALSE_ALARM": "FALSE_ALARM",
             }
             for inc in incidents_snapshot:
                 await conn.execute(  # type: ignore[union-attr]
@@ -1192,6 +1363,7 @@ class OperationalSimulator:
                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
                     ON CONFLICT (incident_id) DO UPDATE SET
                         status = EXCLUDED.status,
+                        acknowledged_at = COALESCE(EXCLUDED.acknowledged_at, incidents.acknowledged_at),
                         resolved_at = EXCLUDED.resolved_at,
                         resolved_by = EXCLUDED.resolved_by,
                         rescue_car_id = EXCLUDED.rescue_car_id;
@@ -1204,7 +1376,7 @@ class OperationalSimulator:
                     severity_map.get(inc.severity, "LOW"),
                     inc.details,
                     _aware(inc.created_at),
-                    None,
+                    _aware(inc.acknowledged_at),
                     _aware(inc.resolved_at),
                     inc.resolved_by,
                     inc.rescue_car_id,
@@ -1214,6 +1386,7 @@ class OperationalSimulator:
             state_map = {
                 "FAULT": "FAULT",
                 "MAINTENANCE": "MAINTENANCE",
+                "EMERGENCY": "EMERGENCY",
                 "EMERGENCY_UNAVAILABLE": "EMERGENCY_UNAVAILABLE",
                 "STALE": "STALE",
             }
@@ -1228,7 +1401,8 @@ class OperationalSimulator:
                     ON CONFLICT (interval_id) DO UPDATE SET
                         ended_at = EXCLUDED.ended_at,
                         duration_seconds = EXCLUDED.duration_seconds,
-                        is_ongoing = EXCLUDED.is_ongoing;
+                        is_ongoing = EXCLUDED.is_ongoing,
+                        technician_id = COALESCE(EXCLUDED.technician_id, car_downtime_intervals.technician_id);
                     """,
                     di["interval_id"],
                     di["elevator_id"],
@@ -1260,6 +1434,11 @@ class OperationalSimulator:
             with self._lock:
                 self._synced_trips_idx = current_trips_len
                 self._synced_downtime_idx = current_downtime_len
+                self._synced_closed_downtime_ids.update(
+                    di["interval_id"]
+                    for di in downtime_to_sync
+                    if di.get("ended_at") is not None
+                )
                 self._synced_heartbeats_idx = current_heartbeats_len
         except Exception as exc:
             import logging
@@ -1508,7 +1687,7 @@ class OperationalSimulator:
                 timestamps.append(inc.created_at)
                 if inc.resolved_at is not None:
                     timestamps.append(inc.resolved_at)
-                if status not in ("RESOLVED", "CLOSED"):
+                if status not in ("RESOLVED", "CLOSED", "FALSE_ALARM"):
                     if kind in ("FIRE", "POWER_FAILURE"):
                         building_emergency_active = True
                     elif kind in ("MEDICAL", "STUCK_CAR") and inc.elevator_id:
@@ -1565,14 +1744,27 @@ class OperationalSimulator:
                             or eid in open_emergency_cars
                         ):
                             car.availability = "EMERGENCY_UNAVAILABLE"
+                            car.connected = True
                         elif state == "MAINTENANCE":
                             car.availability = "MAINTENANCE"
+                            car.connected = True
                         else:
                             car.availability = "FAULT"
+                            car.connected = True
                             if reason and reason != "FAULT":
                                 car.active_fault = str(reason)
 
+            if building_emergency_active:
+                for car in self.cars.values():
+                    if car.availability != "STALE":
+                        car.availability = "EMERGENCY_UNAVAILABLE"
+
             self.downtime_intervals = loaded_downtime
+            self._synced_closed_downtime_ids = {
+                d["interval_id"]
+                for d in loaded_downtime
+                if d.get("ended_at") is not None
+            }
             self._synced_downtime_idx = (
                 first_open_idx if first_open_idx is not None else len(self.downtime_intervals)
             )

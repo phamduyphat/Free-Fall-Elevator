@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from datetime import datetime
+from typing import Callable, Optional
+
 from acs.enums import (
     AuditActionType,
     DenialReason,
@@ -23,6 +26,18 @@ from acs.payloads import (
     ReturnToServicePayload,
 )
 from db import DbConnectionPool
+
+_ADMIN_ONLY_INCIDENT_KINDS = frozenset(
+    {"MEDICAL", "FIRE", "DOOR_OBSTRUCTION", "HELP", "REPEATED_EMERGENCY", "REPEATED_EMPTY_CALLS"}
+)
+
+_OVERRIDE_AUDIT_MAP: dict[str, AuditActionType] = {
+    EmergencyOverrideType.RESOLVE_INCIDENT.value: AuditActionType.INCIDENT_RESOLVED,
+    EmergencyOverrideType.FALSE_ALARM.value: AuditActionType.FALSE_ALARM_CLOSED,
+    EmergencyOverrideType.RESCUE_BOARDING.value: AuditActionType.RESCUE_CAR_BOARDED,
+    EmergencyOverrideType.RESCUE_RELEASE.value: AuditActionType.RESCUE_CAR_RELEASED,
+    EmergencyOverrideType.CALL_CANCEL.value: AuditActionType.CALL_CANCELLED_BY_ADMIN,
+}
 
 
 class FleetAccessControl:
@@ -73,13 +88,18 @@ class FleetAccessControl:
                 assert record is not None
                 role = record["user_role"]
 
+                audit_action = (
+                    AuditActionType.DIAGNOSTIC_QUERY
+                    if str(payload.operation_type) == MaintenanceOperationType.DIAGNOSTIC_QUERY.value
+                    else AuditActionType.MAINTENANCE_ENTER
+                )
                 await Logging.write_audit(
                     [
                         AuditEntry(
                             timestamp=ts,
                             actor_id=payload.credential_id,
                             actor_role=role,
-                            action_type=AuditActionType.MAINTENANCE_ENTER,
+                            action_type=audit_action,
                             target_id=str(payload.elevator_id),
                             event_payload={
                                 "elevator_id": str(payload.elevator_id),
@@ -203,10 +223,8 @@ class FleetAccessControl:
                 assert record is not None
                 role = record["user_role"]
 
-                audit_action = (
-                    AuditActionType.INCIDENT_RESOLVED
-                    if payload.override_type == EmergencyOverrideType.RESOLVE_INCIDENT
-                    else AuditActionType.EMERGENCY_OVERRIDE
+                audit_action = _OVERRIDE_AUDIT_MAP.get(
+                    str(payload.override_type), AuditActionType.EMERGENCY_OVERRIDE
                 )
                 await Logging.write_audit(
                     [
@@ -267,6 +285,20 @@ class FleetAccessControl:
                 assert record is not None
                 role = record["user_role"]
 
+                if not ElevatorId.has_value(payload.rescue_car_id):
+                    return await reject_malformed_msg(
+                        timestamp=ts,
+                        target_id=str(payload.rescue_car_id),
+                        source="RescueCarDispatchPayload",
+                        payload_details={
+                            "rescue_car_id": str(payload.rescue_car_id),
+                            "incident_id": payload.incident_id,
+                        },
+                        message=f"Invalid rescue_car_id '{payload.rescue_car_id}'.",
+                        credential_id=payload.credential_id,
+                        db_pool=db_pool,
+                    )
+
                 if not ElevatorId.is_residential(payload.rescue_car_id):
                     await Logging.write_audit(
                         [
@@ -294,8 +326,28 @@ class FleetAccessControl:
 
                 from simulation.operational import operational_simulator
 
-                car_state = operational_simulator.cars.get(str(payload.rescue_car_id))
-                if car_state is not None and car_state.availability == "MAINTENANCE":
+                conflict_reason: Optional[str] = None
+                conflict_msg = ""
+                with operational_simulator._lock:
+                    car_state = operational_simulator.cars.get(str(payload.rescue_car_id))
+                    if car_state is not None:
+                        if car_state.availability != "IN_SERVICE":
+                            conflict_reason = f"CAR_IN_{car_state.availability}"
+                            conflict_msg = (
+                                f"Rescue dispatch rejected: car {payload.rescue_car_id} "
+                                f"is in {car_state.availability}."
+                            )
+                        elif not car_state.connected:
+                            conflict_reason = "CAR_DISCONNECTED"
+                            conflict_msg = f"Rescue dispatch rejected: car {payload.rescue_car_id} is disconnected."
+                        elif car_state.rescue_active or car_state.medical_run:
+                            conflict_reason = "CAR_BUSY_EMERGENCY"
+                            conflict_msg = f"Rescue dispatch rejected: car {payload.rescue_car_id} is busy on an emergency run."
+                        elif any(s.kind != "HALL" for s in car_state.stops):
+                            conflict_reason = "CAR_NOT_EMPTY"
+                            conflict_msg = f"Rescue dispatch rejected: car {payload.rescue_car_id} has active car commitments."
+
+                if conflict_reason is not None:
                     await Logging.write_audit(
                         [
                             AuditEntry(
@@ -308,7 +360,7 @@ class FleetAccessControl:
                                     "attempted_command": AuditActionType.RESCUE_CAR_DISPATCHED.value,
                                     "rescue_car_id": str(payload.rescue_car_id),
                                     "incident_id": payload.incident_id,
-                                    "conflict_reason": "CAR_IN_MAINTENANCE",
+                                    "conflict_reason": conflict_reason,
                                 },
                             )
                         ],
@@ -316,15 +368,23 @@ class FleetAccessControl:
                     )
                     return AuthorizationResult.deny(
                         DenialReason.COMMAND_CONFLICT_REJECTED,
-                        message=f"Rescue dispatch rejected: car {payload.rescue_car_id} is in MAINTENANCE.",
+                        message=conflict_msg,
                         credential_id=payload.credential_id,
                     )
 
                 if not (1 <= payload.dwell_wait_seconds <= 600):
-                    return AuthorizationResult.deny(
-                        DenialReason.MALFORMED_MSG_REJECTED,
+                    return await reject_malformed_msg(
+                        timestamp=ts,
+                        target_id=str(payload.rescue_car_id),
+                        source="RescueCarDispatchPayload",
+                        payload_details={
+                            "rescue_car_id": str(payload.rescue_car_id),
+                            "incident_id": payload.incident_id,
+                            "dwell_wait_seconds": payload.dwell_wait_seconds,
+                        },
                         message="dwell_wait_seconds must be between 1 and 600 seconds.",
                         credential_id=payload.credential_id,
+                        db_pool=db_pool,
                     )
 
                 await Logging.write_audit(
@@ -357,4 +417,128 @@ class FleetAccessControl:
                 )
         except Exception:
             return fail_closed(payload.credential_id)
+
+    @staticmethod
+    async def validate_incident_action(
+        *,
+        credential_id: str,
+        incident_id: str,
+        incident_kind: str,
+        elevator_id: Optional[str],
+        action: str,
+        recovery_confirmed: bool,
+        returning_cars: Optional[list[str]] = None,
+        precheck: Optional[Callable[[], list[str]]] = None,
+        timestamp: datetime,
+        db_pool: type[DbConnectionPool] = DbConnectionPool,
+    ) -> AuthorizationResult:
+        """Validate role authority and write tamper-evident audit records for incident lifecycle actions."""
+        ts = Logging.normalize_timestamp(timestamp)
+        if action not in ("ACKNOWLEDGE", "RESOLVE", "CLOSE", "FALSE_ALARM"):
+            return await reject_malformed_msg(
+                timestamp=ts,
+                target_id=incident_id or "UNKNOWN",
+                source="IncidentAction",
+                payload_details={"incident_id": incident_id, "action": action},
+                message=f"Invalid incident action '{action}'.",
+                credential_id=credential_id,
+                db_pool=db_pool,
+            )
+
+        admin_required = action in ("RESOLVE", "CLOSE", "FALSE_ALARM") and (
+            incident_kind in _ADMIN_ONLY_INCIDENT_KINDS or action == "FALSE_ALARM"
+        )
+        required_roles = (
+            [UserRole.ADMIN.value]
+            if admin_required
+            else [UserRole.TECHNICIAN.value, UserRole.ADMIN.value]
+        )
+
+        try:
+            async with db_pool.transaction() as conn:
+                record, denial = await authorize_credential_role(
+                    conn,
+                    credential_id,
+                    ts,
+                    required_roles=required_roles,
+                    inactive_msg="Active staff credential required for incident action.",
+                    unauth_msg=(
+                        f"Role '{{role}}' is not authorized to perform '{action}' "
+                        f"on incident type '{incident_kind}'."
+                    ),
+                    target_id=incident_id,
+                    operation=f"INCIDENT_{action}",
+                    extra_payload={"incident_kind": incident_kind, "elevator_id": elevator_id},
+                    db_pool=db_pool,
+                )
+                if denial:
+                    return denial
+                assert record is not None
+                role = record["user_role"]
+
+                if action == "RESOLVE" and incident_kind != "HELP" and not recovery_confirmed:
+                    return AuthorizationResult.deny(
+                        DenialReason.CONFIRMATION_REQUIRED,
+                        message="Recovery confirmation is required to resolve this incident.",
+                        credential_id=credential_id,
+                    )
+
+                if precheck is not None:
+                    resolved_returning_cars = precheck()
+                else:
+                    resolved_returning_cars = returning_cars or []
+
+                action_map = {
+                    "ACKNOWLEDGE": AuditActionType.INCIDENT_ACKNOWLEDGED,
+                    "RESOLVE": AuditActionType.INCIDENT_RESOLVED,
+                    "CLOSE": AuditActionType.INCIDENT_CLOSED,
+                    "FALSE_ALARM": AuditActionType.FALSE_ALARM_CLOSED,
+                }
+                entries = [
+                    AuditEntry(
+                        timestamp=ts,
+                        actor_id=credential_id,
+                        actor_role=role,
+                        action_type=action_map[action],
+                        target_id=incident_id,
+                        event_payload={
+                            "incident_id": incident_id,
+                            "incident_kind": incident_kind,
+                            "elevator_id": elevator_id,
+                            "action": action,
+                            "recovery_confirmed": recovery_confirmed,
+                        },
+                    )
+                ]
+                for car_id in resolved_returning_cars:
+                    entries.append(
+                        AuditEntry(
+                            timestamp=ts,
+                            actor_id=credential_id,
+                            actor_role=role,
+                            action_type=AuditActionType.RETURN_TO_SERVICE,
+                            target_id=car_id,
+                            event_payload={
+                                "elevator_id": car_id,
+                                "incident_id": incident_id,
+                                "technician_confirmation": recovery_confirmed,
+                            },
+                        )
+                    )
+                await Logging.write_audit(entries, db_pool=db_pool)
+                return AuthorizationResult.allow(
+                    message=f"Incident action '{action}' authorized.",
+                    credential_id=credential_id,
+                    details={
+                        "incident_id": incident_id,
+                        "action": action,
+                        "role": role,
+                    },
+                )
+        except Exception as exc:
+            from simulation.operational import OperationalError
+
+            if isinstance(exc, OperationalError):
+                raise
+            return fail_closed(credential_id)
 

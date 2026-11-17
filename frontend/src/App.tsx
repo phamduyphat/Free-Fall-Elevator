@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
+import { authorizedApi, postApi, requestCabDestination, swipeCabCard } from "./api.ts";
+import type { ApiResult } from "./api.ts";
 
 type View = "overview" | "simulation" | "elevators" | "credentials" | "security" | "analytics" | "audit";
 type ElevatorStatus = {
@@ -16,47 +18,15 @@ type ElevatorStatus = {
   message_to_occupants?: string;
 };
 type FleetResponse = { elevators: ElevatorStatus[]; source: string; sim_tick: number };
-type HallCall = {
-  request_id: string;
-  origin_floor: number;
-  call_type: "ORDINARY" | "FREIGHT";
-  direction: "UP" | "DOWN" | null;
-  status: string;
-  assigned_car: string | null;
-  wait_seconds: number | null;
-  reassignment_count: number;
-};
-type ApiResult = { allowed?: boolean; message?: string; detail?: string; request?: HallCall; merged?: boolean; incident?: Incident; session_token?: string; details?: { role?: string; passed?: boolean; total_records_inspected?: number } };
+type HallCall = NonNullable<ApiResult["request"]>;
 type Summary = { source: string; total_hall_calls: number; completed_hall_calls: number; active_hall_calls: number; mean_wait_seconds: number | null; median_wait_seconds: number | null; p95_wait_seconds: number | null; completed_car_calls: number; active_incidents: number; fleet_available: number; fleet_count: number; events_count: number };
-type Incident = { incident_id: string; kind: string; elevator_id: string | null; floor: number | null; status: string; severity: string; details: string; history: string[]; rescue_car_id: string | null };
+type Incident = NonNullable<ApiResult["incident"]>;
 type StubEvent = { timestamp: string; event_type: string; elevator_id: string | null; detail: string };
-
-async function authorizedApi<T>(path: string, token: string, data?: object): Promise<T> {
-  const response = await fetch(path, {
-    method: data === undefined ? "GET" : "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-    ...(data === undefined ? {} : { body: JSON.stringify(data) }),
-  });
-  const result = await response.json() as T & { detail?: string; message?: string };
-  if (!response.ok) throw new Error(result.message ?? result.detail ?? `HTTP ${response.status}`);
-  return result;
-}
 
 async function getSummary(): Promise<Summary> {
   const response = await fetch("/api/v1/operational/summary");
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
   return response.json() as Promise<Summary>;
-}
-
-async function postApi(path: string, data: object): Promise<ApiResult> {
-  const response = await fetch(path, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(data),
-  });
-  const result = await response.json() as ApiResult;
-  if (!response.ok) throw new Error(result.message ?? result.detail ?? `HTTP ${response.status}`);
-  return result;
 }
 
 const floorLabel = (floor: number | null): string => floor === null ? "—" : floor === -1 ? "B1" : `F${floor}`;
@@ -251,31 +221,16 @@ function Simulation({ fleet, onFleetRefresh }: { fleet: FleetResponse | null; on
   const swipe = () => {
     if (!selectedCar) return;
     void runAction(async () => {
-      try {
-        const result = await postApi("/api/v1/acs/auth/cab/swipe", {
-          elevator_id: selectedId, credential_id: cardId, origin_floor: selectedCar.current_floor,
-        });
-        return result.message ?? "Card processed";
-      } catch {
-        return `Card ${cardId} registered in cab ${selectedId}. You may now select a destination floor.`;
-      }
+      const result = await swipeCabCard(selectedId, cardId, selectedCar.current_floor);
+      return result.message ?? "Card processed";
     });
   };
 
   const selectDestination = (floor: number) => {
     if (!selectedCar) return;
     void runAction(async () => {
-      try {
-        const result = await postApi("/api/v1/acs/cab/destination", {
-          elevator_id: selectedId, origin_floor: selectedCar.current_floor, requested_floor: floor,
-        });
-        return result.message ?? `Destination ${floorLabel(floor)} accepted`;
-      } catch {
-        const fallback = await postApi("/api/v1/operational/car-calls", {
-          elevator_id: selectedId, destination_floor: floor,
-        });
-        return fallback.message ?? `Destination ${floorLabel(floor)} accepted`;
-      }
+      const result = await requestCabDestination(selectedId, selectedCar.current_floor, floor);
+      return result.message ?? `Destination ${floorLabel(floor)} accepted`;
     });
   };
 
