@@ -152,6 +152,50 @@ class TestIncidentsAndRecovery(unittest.TestCase):
         self.assertEqual(metrics["p95_wait_seconds"], 2)
         self.assertEqual(metrics["fleet_count"], 5)
 
+    def test_rescue_car_blocks_door_close_and_preserves_wait_on_open(self):
+        incident = self.sim.phone_medical_incident(1)
+        dispatched = self.sim.dispatch_rescue(
+            incident["incident_id"], confirmed_empty=True, wait_seconds=120
+        )
+        rescue_id = dispatched["rescue_car_id"]
+        self.sim.advance(1)
+        with self.assertRaisesRegex(OperationalError, "active rescue wait"):
+            self.sim.passenger_door_command(rescue_id, "CLOSE")
+        self.sim.passenger_door_command(rescue_id, "OPEN")
+        self.sim.advance(5)
+        confirmed = self.sim.confirm_rescue_boarding(incident["incident_id"])
+        self.assertEqual(confirmed["elevator_id"], rescue_id)
+        self.assertIn("RESCUE_BOARDED", confirmed["history"])
+        self.assertEqual(self.sim.cars[rescue_id].availability, "EMERGENCY_UNAVAILABLE")
+
+    def test_open_phone_medical_does_not_freeze_fleet_after_fire_resolved(self):
+        med = self.sim.phone_medical_incident(5)
+        fire = self.sim.building_emergency("FIRE", actor="ADMIN-1")
+        for eid in self.sim.ELEVATOR_IDS:
+            self.assertEqual(self.sim.cars[eid].availability, "EMERGENCY_UNAVAILABLE")
+        self.sim.incident_action(
+            fire["incident_id"], "RESOLVE", actor="ADMIN-1", technician_confirmation=True
+        )
+        for eid in self.sim.ELEVATOR_IDS:
+            self.assertEqual(self.sim.cars[eid].availability, "IN_SERVICE")
+        self.assertEqual(self.sim.incidents[med["incident_id"]].status, "OPEN")
+
+    def test_rescue_can_be_redispatched_after_fire_resolved(self):
+        med = self.sim.phone_medical_incident(5)
+        first_dispatch = self.sim.dispatch_rescue(
+            med["incident_id"], confirmed_empty=True, wait_seconds=120
+        )
+        self.assertIsNotNone(first_dispatch["rescue_car_id"])
+        fire = self.sim.building_emergency("FIRE", actor="ADMIN-1")
+        self.assertIsNone(self.sim.incidents[med["incident_id"]].rescue_car_id)
+        self.sim.incident_action(
+            fire["incident_id"], "RESOLVE", actor="ADMIN-1", technician_confirmation=True
+        )
+        second_dispatch = self.sim.dispatch_rescue(
+            med["incident_id"], confirmed_empty=True, wait_seconds=120
+        )
+        self.assertIsNotNone(second_dispatch["rescue_car_id"])
+
 
 if __name__ == "__main__":
     unittest.main()

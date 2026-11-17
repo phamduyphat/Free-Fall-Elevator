@@ -417,7 +417,18 @@ class OperationalSimulator:
             raise OperationalError(f"Unknown elevator: {elevator_id}")
         return self.cars[elevator_id]
 
+    def _clear_rescue_assignment(self, elevator_id: str, history_tag: str) -> None:
+        for incident in self.incidents.values():
+            if (
+                incident.rescue_car_id == elevator_id
+                and incident.status not in ("RESOLVED", "CLOSED", "FALSE_ALARM")
+            ):
+                incident.rescue_car_id = None
+                incident.history.append(history_tag)
+                self._event(history_tag, elevator_id, incident.incident_id)
+
     def _release_car_hall_calls(self, car: Car) -> None:
+        was_rescue = car.rescue_active
         for stop in car.stops:
             if stop.kind == "HALL":
                 request = self.hall_calls[stop.request_id]
@@ -434,6 +445,8 @@ class OperationalSimulator:
         car.rescue_active = False
         car.rescue_wait_remaining = 0
         car.direction = "IDLE"
+        if was_rescue:
+            self._clear_rescue_assignment(car.elevator_id, "RESCUE_CANCELLED")
 
     def _close_open_downtime(
         self, elevator_id: str, now: datetime, *, technician_id: str | None = None
@@ -468,10 +481,17 @@ class OperationalSimulator:
                                       and car.active_fault is None and car.door_state != "OBSTRUCTED")
                 if not (self.recoverable(elevator_id) or recovered_snapshot):
                     raise OperationalError("Recovery checks failed: stale, fault, door or movement state")
-                if any(i.kind in ("FIRE", "POWER_FAILURE", "MEDICAL", "STUCK_CAR", "BLOCKING_FAULT")
-                       and i.status not in ("RESOLVED", "CLOSED", "FALSE_ALARM")
-                       and (i.elevator_id is None or i.elevator_id == elevator_id)
-                       for i in self.incidents.values()):
+                if any(
+                    i.status not in ("RESOLVED", "CLOSED", "FALSE_ALARM")
+                    and (
+                        i.kind in ("FIRE", "POWER_FAILURE")
+                        or (
+                            i.kind in ("MEDICAL", "STUCK_CAR", "BLOCKING_FAULT")
+                            and i.elevator_id == elevator_id
+                        )
+                    )
+                    for i in self.incidents.values()
+                ):
                     raise OperationalError("Unresolved incident prevents return to service")
             now = self._now()
             if availability != "IN_SERVICE":
@@ -612,6 +632,7 @@ class OperationalSimulator:
                             car.rescue_active = False
                             car.rescue_wait_remaining = 0
                             car.message = "Rescue wait expired; incident remains open"
+                            self._clear_rescue_assignment(car.elevator_id, "RESCUE_EXPIRED")
                             self._event("RESCUE_RELEASE", car.elevator_id, "Wait expired")
                         car.door_state = "CLOSED"
                     continue
@@ -960,8 +981,13 @@ class OperationalSimulator:
                 raise OperationalError("Door operation prohibited while car is moving")
             if action == "CLOSE" and (car.door_state == "OBSTRUCTED" or car.obstruction_started is not None):
                 raise OperationalError("Door close prohibited while obstruction is active")
+            if car.rescue_active and action == "CLOSE":
+                raise OperationalError("Door close prohibited during active rescue wait")
             car.door_state = "OPEN" if action == "OPEN" else "CLOSED"
-            car.dwell_remaining = 2 if action == "OPEN" else 0
+            if car.rescue_active and action == "OPEN":
+                car.dwell_remaining = max(car.dwell_remaining, car.rescue_wait_remaining)
+            else:
+                car.dwell_remaining = 2 if action == "OPEN" else 0
             self._event("DOOR_COMMAND", elevator_id, action)
             return self.fleet_status()
 
@@ -1117,6 +1143,7 @@ class OperationalSimulator:
             self.isolate(car.elevator_id, "EMERGENCY_UNAVAILABLE")
             car.medical_run = True
             car.stops.append(Stop(1, "MEDICAL", incident_id))
+            incident.history.append("RESCUE_BOARDED")
             self._event("RESCUE_BOARDING", car.elevator_id, "Medical responder-floor run")
             return asdict(incident)
 

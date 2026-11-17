@@ -15,6 +15,8 @@ type ElevatorStatus = {
   pending_stops: number;
   message: string;
   active_fault?: string | null;
+  medical_run?: boolean;
+  rescue_active?: boolean;
   message_to_occupants?: string;
 };
 type FleetResponse = {
@@ -68,6 +70,14 @@ async function getSummary(): Promise<Summary> {
 
 const floorLabel = (floor: number | null): string => floor === null ? "—" : floor === -1 ? "B1" : `F${floor}`;
 
+const isWarningOrError = (text: string): boolean => /failed|denied|error|invalid|rejected|forbidden|blocked|mismatch|unavailable/i.test(text);
+
+const isEmergencyCar = (car: ElevatorStatus | undefined): boolean =>
+  Boolean(car && (car.state === "EMERGENCY_UNAVAILABLE" || car.rescue_active));
+
+const carDisplayState = (car: ElevatorStatus | undefined): string =>
+  !car ? "Loading" : car.rescue_active ? "EMERGENCY RESCUE" : car.state.replaceAll("_", " ");
+
 const formatLocalTime = (value: string | null | undefined): string => {
   if (!value) return "—";
   const parsed = new Date(value);
@@ -111,7 +121,7 @@ function PageHeader({ eyebrow, title, detail, action }: { eyebrow: string; title
 function FleetCards({ fleet, renderActions }: { fleet: FleetResponse | null; renderActions?: (car: ElevatorStatus) => ReactNode }) {
   return <div className="elevator-grid">{(fleet?.elevators ?? []).map((car) => (
     <article className="elevator-card" key={car.elevator_id}>
-      <div className="card-top"><span className="elevator-id">{car.elevator_id}</span><span className={`badge ${car.available ? "ok" : "unknown"}`}>{car.state.replaceAll("_", " ")}</span></div>
+      <div className="card-top"><span className="elevator-id">{car.elevator_id}</span><span className={`badge ${car.available ? "ok" : isEmergencyCar(car) ? "danger" : "unknown"}`}>{carDisplayState(car)}</span></div>
       <div className="floor-display">{floorLabel(car.current_floor)}<span>floor</span></div>
       <div className="card-details"><span>Direction</span><strong>{car.direction}</strong></div>
       <div className="card-details"><span>Next stop</span><strong>{floorLabel(car.target_floor)}</strong></div>
@@ -204,8 +214,10 @@ function Elevators({ fleet, refresh, token, role }: { fleet: FleetResponse | nul
 
   const loadDiagnostics = useCallback(async (carId: string, showBusy = true) => {
     if (!isStaff) return;
-    if (showBusy) setBusy(true);
-    setError("");
+    if (showBusy) {
+      setBusy(true);
+      setError("");
+    }
     try {
       const result = await authorizedApi<Record<string, unknown>>(`/api/v1/operational/diagnostics/${carId}`, token);
       setDiagCar(carId);
@@ -279,7 +291,7 @@ function Elevators({ fleet, refresh, token, role }: { fleet: FleetResponse | nul
     {feedback && <p className="authorization-feedback">{feedback}</p>}
     {error && <p className="error-banner" role="alert">{error}</p>}
     <FleetCards fleet={fleet} renderActions={isStaff ? (car) => (
-      <div style={{ marginTop: "12px", paddingTop: "10px", borderTop: "1px solid #edf0f4", display: "grid", gap: "8px" }}>
+      <div style={{ marginTop: "auto", paddingTop: "12px", borderTop: "1px solid #edf0f4", display: "grid", gap: "8px" }}>
         <div style={{ display: "grid", gap: "8px" }}>
           <button className="button secondary" style={{ width: "100%" }} disabled={busy} onClick={() => { void loadDiagnostics(car.elevator_id); }}>View Diagnostics</button>
           <button className="button secondary" style={{ width: "100%" }} disabled={busy || car.state === "MAINTENANCE"} onClick={() => { void enterMaintenance(car.elevator_id); }}>Enter Maintenance</button>
@@ -416,16 +428,16 @@ function Simulation({ fleet, onFleetRefresh }: { fleet: FleetResponse | null; on
       <div className="shaft-panel">
         <div className="shaft-labels">{[...SIM_FLOORS].reverse().map((floor) => <span key={floor}>{floorLabel(floor)}</span>)}</div>
         <div className="shaft-grid">{[...SIM_FLOORS].reverse().map((floor) => <div className="floor-line" key={floor}><span>{floor === -1 ? "Basement 1" : `Floor ${floor}`}</span></div>)}
-          {cars.map((car) => <div className={`sim-car ${car.state === "EMERGENCY_UNAVAILABLE" ? "emergency-car" : ""} ${car.state === "MAINTENANCE" ? "maintenance-car" : ""}`} key={car.elevator_id} style={{ bottom: `${((car.current_floor === -1 ? 0 : car.current_floor) / 30) * 100}%`, left: `${(Number(car.elevator_id.slice(1)) - 1) * 20 + 1}%` }} title={`${car.elevator_id}: ${floorLabel(car.current_floor)}`}>
+          {cars.map((car) => <div className={`sim-car ${isEmergencyCar(car) ? "emergency-car" : ""} ${car.state === "MAINTENANCE" ? "maintenance-car" : ""}`} key={car.elevator_id} style={{ bottom: `${((car.current_floor === -1 ? 0 : car.current_floor) / 30) * 100}%`, left: `${(Number(car.elevator_id.slice(1)) - 1) * 20 + 1}%` }} title={`${car.elevator_id}: ${floorLabel(car.current_floor)}`}>
             <div className="sim-car-header"><strong>{car.elevator_id}</strong><span>{car.direction === "UP" ? "↑" : car.direction === "DOWN" ? "↓" : "·"}</span></div>
             <small>{floorLabel(car.current_floor)}</small>
           </div>)}
         </div>
       </div>
       <div className="simulation-side">
-        <div className="panel"><div className="section-heading"><div><p className="eyebrow">UI-8 · SEC-2.6</p><h2>{selectedId} operating panel</h2></div><span className={`state-pill ${selectedCar?.available ? "ok" : "warn"}`}>{selectedCar?.state.replaceAll("_", " ") ?? "Loading"}</span></div><div className="simulation-toolbar"><label>Selected car<select value={selectedId} onChange={(event) => setSelectedId(event.target.value)}>{["E1", "E2", "E3", "E4", "E5"].map((id) => <option key={id}>{id}</option>)}</select></label><label className="card-reader-field">Card reader<input value={cardId} onChange={(event) => setCardId(event.target.value)} aria-label="Simulated card credential" /></label><button className="button secondary" disabled={busy || !selectedCar} onClick={swipe}>Present card</button></div><div className="car-state-grid"><div><span>Floor</span><strong>{floorLabel(selectedCar?.current_floor ?? null)}</strong></div><div><span>Direction</span><strong>{selectedCar?.direction ?? "—"}</strong></div><div><span>Door</span><strong>{selectedCar?.door_state ?? "—"}</strong></div><div><span>Next stop</span><strong>{floorLabel(selectedCar?.target_floor ?? null)}</strong></div></div><p className="authorization-feedback" aria-live="polite">{announcement}</p><div className="control-row"><button className="button secondary" disabled={busy || !selectedCar} onClick={() => doorCommand("OPEN")}>Door open</button><button className="button secondary" disabled={busy || !selectedCar} onClick={() => doorCommand("CLOSE")}>Door close</button><button className="button emergency-button" disabled={busy || !selectedCar} onClick={() => emergency("HELP")}>Emergency / help</button><button className="button medical-button" disabled={busy || !selectedCar} onClick={() => emergency("MEDICAL")}>Medical</button></div>{selectedId === "E5" && <div className="hall-controls" style={{ marginTop: "12px" }}><label>E5 service floor<select value={serviceFloor} onChange={(e) => setServiceFloor(e.target.value)}>{Array.from({ length: 30 }, (_, i) => i + 1).map((f) => <option key={f} value={f}>Floor {f}</option>)}</select></label><label>Purpose<input value={servicePurpose} onChange={(e) => setServicePurpose(e.target.value)} /></label><button className="button secondary freight-button" disabled={busy || !selectedCar?.available} onClick={startE5ServiceRun}>Start E5 Service Run</button></div>}<div className="destination-panel"><strong>Destination keys</strong><div className="destination-keys"><button disabled={busy || !selectedCar?.available || selectedId === "E5"} onClick={() => selectDestination(-1)}>B1</button>{Array.from({ length: 30 }, (_, index) => index + 1).map((floor) => <button disabled={busy || !selectedCar?.available} key={floor} onClick={() => selectDestination(floor)}>{floor}</button>)}</div></div></div>
+        <div className="panel"><div className="section-heading"><div><p className="eyebrow">UI-8 · SEC-2.6</p><h2>{selectedId} operating panel</h2></div><span className={`state-pill ${selectedCar?.available ? "ok" : isEmergencyCar(selectedCar) ? "danger" : "warn"}`}>{carDisplayState(selectedCar)}</span></div><div className="simulation-toolbar"><label>Selected car<select value={selectedId} onChange={(event) => setSelectedId(event.target.value)}>{["E1", "E2", "E3", "E4", "E5"].map((id) => <option key={id}>{id}</option>)}</select></label><label className="card-reader-field">Card reader<input value={cardId} onChange={(event) => setCardId(event.target.value)} aria-label="Simulated card credential" /></label><button className="button secondary" disabled={busy || !selectedCar} onClick={swipe}>Present card</button></div><div className="car-state-grid"><div><span>Floor</span><strong>{floorLabel(selectedCar?.current_floor ?? null)}</strong></div><div><span>Direction</span><strong>{selectedCar?.direction ?? "—"}</strong></div><div><span>Door</span><strong>{selectedCar?.door_state ?? "—"}</strong></div><div><span>Next stop</span><strong>{floorLabel(selectedCar?.target_floor ?? null)}</strong></div></div><p className={isWarningOrError(announcement) ? "authorization-feedback danger-text" : "authorization-feedback"} aria-live="polite">{announcement}</p><div className="control-row"><button className="button secondary" disabled={busy || !selectedCar} onClick={() => doorCommand("OPEN")}>Door open</button><button className="button secondary" disabled={busy || !selectedCar || Boolean(selectedCar?.rescue_active)} title={selectedCar?.rescue_active ? "Door close disabled during active rescue wait" : undefined} onClick={() => doorCommand("CLOSE")}>Door close</button><button className="button emergency-button" disabled={busy || !selectedCar} onClick={() => emergency("HELP")}>Emergency / help</button><button className="button medical-button" disabled={busy || !selectedCar} onClick={() => emergency("MEDICAL")}>Medical</button></div>{selectedId === "E5" && <div className="hall-controls" style={{ marginTop: "12px" }}><label>E5 service floor<select value={serviceFloor} onChange={(e) => setServiceFloor(e.target.value)}>{Array.from({ length: 30 }, (_, i) => i + 1).map((f) => <option key={f} value={f}>Floor {f}</option>)}</select></label><label>Purpose<input value={servicePurpose} onChange={(e) => setServicePurpose(e.target.value)} /></label><button className="button secondary freight-button" disabled={busy || !selectedCar?.available} onClick={startE5ServiceRun}>Start E5 Service Run</button></div>}<div className="destination-panel"><strong>Destination keys</strong><div className="destination-keys"><button disabled={busy || !selectedCar?.available || selectedId === "E5"} onClick={() => selectDestination(-1)}>B1</button>{Array.from({ length: 30 }, (_, index) => index + 1).map((floor) => <button disabled={busy || !selectedCar?.available} key={floor} onClick={() => selectDestination(floor)}>{floor}</button>)}</div></div></div>
         <div className="panel"><div className="section-heading"><div><p className="eyebrow">UI-9 · FR-1.3 to FR-1.7</p><h2>Hall panel</h2></div></div><div className="hall-controls"><label>Call floor<select value={hallFloor} onChange={(event) => setHallFloor(event.target.value)}>{SIM_FLOORS.map((floor) => <option key={floor} value={floor}>{floor === -1 ? "B1" : `Floor ${floor}`}</option>)}</select></label><button className="button secondary" disabled={busy || hallFloor === "30"} onClick={() => hallCall("ORDINARY", "UP")}>↑ Up</button><button className="button secondary" disabled={busy || hallFloor === "-1"} onClick={() => hallCall("ORDINARY", "DOWN")}>↓ Down</button><button className="button secondary freight-button" disabled={busy || hallFloor === "-1"} onClick={() => hallCall("FREIGHT")}>E5 Freight</button></div>{hallRequest && <div className="request-feedback" aria-live="polite"><strong>Request status: </strong>{hallRequest.status} · {hallRequest.assigned_car ?? "Unassigned"} · wait {hallRequest.wait_seconds ?? "—"}s</div>}</div>
-        <div className="panel"><div className="section-heading"><div><p className="eyebrow">UI-3 · monitoring</p><h2>Fleet state and calls</h2></div></div><div className="sim-car-list">{cars.map((car) => <div className="sim-car-row" key={car.elevator_id}><span className="elevator-id">{car.elevator_id}</span><span className="sim-direction">{car.direction}</span><strong>{floorLabel(car.current_floor)}</strong><span>{car.state}</span><span className="weight">{car.pending_stops} stops</span></div>)}</div><p className="muted dark">{calls.filter((request) => request.status !== "COMPLETED").length} active hall requests. Data resets when the application restarts.</p></div>
+        <div className="panel"><div className="section-heading"><div><p className="eyebrow">UI-3 · monitoring</p><h2>Fleet state and calls</h2></div></div><div className="sim-car-list">{cars.map((car) => <div className="sim-car-row" key={car.elevator_id}><span className="elevator-id">{car.elevator_id}</span><span className="sim-direction">{car.direction}</span><strong>{floorLabel(car.current_floor)}</strong><span>{carDisplayState(car)}</span><span className="weight">{car.pending_stops} stops</span></div>)}</div><p className="muted dark">{calls.filter((request) => request.status !== "COMPLETED").length} active hall requests. Data resets when the application restarts.</p></div>
       </div>
     </div>
   </section>;
@@ -655,7 +667,7 @@ function Credentials({ token, role }: { token: string; role: string }) {
       <EmptyState title="Dashboard sign-in required" detail="Sign in with an Admin or Security Operator card in the header to manage credentials." />
     ) : (
       <>
-        {feedback && <p className="authorization-feedback" aria-live="polite">{feedback}</p>}
+        {feedback && <p className={isWarningOrError(feedback) ? "authorization-feedback danger-text" : "authorization-feedback"} aria-live="polite">{feedback}</p>}
         {error && <p className="error-banner" role="alert">{error}</p>}
 
         {(role === "ADMIN" || role === "SECURITY_OPERATOR") && (
@@ -777,7 +789,7 @@ function Security({ token, role, refreshFleet }: { token: string; role: string; 
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [medicalFloor, setMedicalFloor] = useState("3");
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (clearError = true) => {
     if (!token) { setIncidents([]); setAlerts([]); return; }
     try {
       const [incResult, alertResult] = await Promise.all([
@@ -786,18 +798,18 @@ function Security({ token, role, refreshFleet }: { token: string; role: string; 
       ]);
       setIncidents(incResult.items);
       setAlerts(alertResult.items ?? []);
-      setError(null);
+      if (clearError) setError(null);
     } catch (reason) { setError(reason instanceof Error ? reason.message : "Failed to load incidents"); }
   }, [token]);
   useEffect(() => {
-    void refresh();
+    void refresh(true);
     if (!token) return;
     let alive = true;
     let inFlight = false;
     const timer = window.setInterval(() => {
       if (!alive || inFlight) return;
       inFlight = true;
-      void refresh().finally(() => { inFlight = false; });
+      void refresh(false).finally(() => { inFlight = false; });
     }, 500);
     return () => { alive = false; window.clearInterval(timer); };
   }, [refresh, token]);
@@ -813,7 +825,7 @@ function Security({ token, role, refreshFleet }: { token: string; role: string; 
   };
   return <><PageHeader eyebrow="Mode 3 · software test stub" title="Incidents and emergency response" detail="Polls incidents and ACS security alerts every 500 ms (PERF-3)." action={<button className="button secondary" disabled={!token} onClick={() => { void refresh(); }}>Refresh incidents</button>} />
     {!token ? <EmptyState title="Dashboard sign-in required" detail="Present an Admin or Technician credential in the header to inspect and resolve simulated incidents." /> : <>
-      {error && <p className="authorization-feedback" role="alert">{error}</p>}
+      {error && <p className="error-banner" role="alert">{error}</p>}
       {role === "ADMIN" && <section className="panel section"><div className="section-heading"><h2>Admin demo controls</h2></div><div className="hall-controls"><label>Telephone medical floor<input type="number" min={1} max={30} value={medicalFloor} onChange={(e) => setMedicalFloor(e.target.value)} /></label><button className="button secondary" disabled={busy} onClick={() => { void act("/api/v1/operational/incidents/phone-medical", { floor: Number(medicalFloor) }); }}>Record medical call</button><button className="button emergency-button" disabled={busy} onClick={() => { void act("/api/v1/operational/stub/building-event", { kind: "FIRE" }); }}>Inject fire (stub)</button></div></section>}
       <section className="panel section"><div className="table-heading"><strong>Security alerts (database)</strong><span>{alerts.length} records</span></div>
         {alerts.length === 0 ? <EmptyState title="No security alerts" detail="Repeated access failures, cloned cards, or card scanning alerts appear here within 1 second." /> : alerts.map((alert) =>
@@ -829,8 +841,8 @@ function Security({ token, role, refreshFleet }: { token: string; role: string; 
             {(incident.status === "OPEN" || incident.status === "ACKNOWLEDGED") && <button className="button secondary" disabled={busy} onClick={() => { void act("/api/v1/operational/incidents/action", { incident_id: incident.incident_id, action: "RESOLVE", recovery_confirmed: true }); }}>Resolve (after checks)</button>}
             {incident.status === "RESOLVED" && <button className="button secondary" disabled={busy} onClick={() => { void act("/api/v1/operational/incidents/action", { incident_id: incident.incident_id, action: "CLOSE" }); }}>Close</button>}
             {role === "ADMIN" && incident.kind === "HELP" && incident.status !== "RESOLVED" && incident.status !== "CLOSED" && <button className="button secondary" disabled={busy} onClick={() => { void act("/api/v1/operational/incidents/confirm-stuck", { incident_id: incident.incident_id }); }}>Confirm stuck</button>}
-            {role === "ADMIN" && ["MEDICAL", "STUCK_CAR"].includes(incident.kind) && !incident.rescue_car_id && incident.status !== "CLOSED" && <button className="button secondary" disabled={busy} onClick={() => { void act("/api/v1/operational/incidents/rescue", { incident_id: incident.incident_id, confirmed_empty: true, wait_seconds: 120 }); }}>Send empty rescue car (confirm)</button>}
-            {role === "ADMIN" && incident.kind === "MEDICAL" && incident.rescue_car_id && <button className="button secondary" disabled={busy} onClick={() => { void act("/api/v1/operational/incidents/confirm-boarding", { incident_id: incident.incident_id }); }}>Confirm rescue boarding</button>}
+            {role === "ADMIN" && ["MEDICAL", "STUCK_CAR"].includes(incident.kind) && !incident.rescue_car_id && !["RESOLVED", "CLOSED", "FALSE_ALARM"].includes(incident.status) && <button className="button secondary" disabled={busy} onClick={() => { void act("/api/v1/operational/incidents/rescue", { incident_id: incident.incident_id, confirmed_empty: true, wait_seconds: 120 }); }}>Send empty rescue car (confirm)</button>}
+            {role === "ADMIN" && incident.kind === "MEDICAL" && incident.rescue_car_id && !["RESOLVED", "CLOSED", "FALSE_ALARM"].includes(incident.status) && !(incident.history ?? []).includes("RESCUE_BOARDED") && <button className="button secondary" disabled={busy} onClick={() => { void act("/api/v1/operational/incidents/confirm-boarding", { incident_id: incident.incident_id }); }}>Confirm rescue boarding</button>}
           </div></article>
         )}</section>
     </>}
@@ -1380,7 +1392,7 @@ function Audit({ token, role }: { token: string; role: string }) {
 
   return <><PageHeader eyebrow="Governance · SEC-2.14 & ANA-5.8" title="Audit log" detail="Searchable ACS audit chain, authorization events, DB incidents, and security alerts." action={<button className="button secondary" disabled={!token || role !== "ADMIN"} onClick={() => { void verify(); }}>Verify ACS hash chain</button>} />
     {!token || role !== "ADMIN" ? <EmptyState title="Admin sign-in required" detail="The real ACS audit log and investigation search are only accessible to authorized Admins." /> : <>
-      {integrity && <p className="authorization-feedback">{integrity}</p>}{error && <p className="error-banner" role="alert">{error}</p>}
+      {integrity && <p className={isWarningOrError(integrity) ? "error-banner" : "authorization-feedback"} role={isWarningOrError(integrity) ? "alert" : undefined}>{integrity}</p>}{error && <p className="error-banner" role="alert">{error}</p>}
       <section className="panel section">
         <div className="hall-controls">
           <button className={`button ${tab === "audit" ? "primary" : "secondary"}`} onClick={() => switchTab("audit")}>Audit Chain</button>

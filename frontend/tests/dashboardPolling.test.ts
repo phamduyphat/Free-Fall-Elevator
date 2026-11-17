@@ -69,4 +69,7 @@ test("App.tsx wires MNT-4.2/4.3/4.5, SEC-2.14 search, and FR-1.13 E5 service run
   assert.match(appSource, /mismatch_index/);
   assert.match(appSource, /function SearchSelect/);
   assert.match(appSource, /role="combobox"/);
+  assert.match(appSource, /RESCUE_BOARDED/);
+  assert.match(appSource, /isEmergencyCar/);
+  assert.match(appSource, /EMERGENCY RESCUE/);
 });
