@@ -276,34 +276,49 @@ async def apply_credential_transitions(
         expires_at_dt = Logging.normalize_timestamp(rec["expires_at"])
         created_at_dt = Logging.normalize_timestamp(rec["created_at"])
         if current_time >= expires_at_dt:
-            await conn.execute(
-                "UPDATE credentials SET status = $2, updated_at = $3 WHERE credential_id = $1",
-                cid,
-                CredentialStatus.EXPIRED.value,
-                current_time,
-            )
-            rec["status"] = CredentialStatus.EXPIRED.value
-            rec["updated_at"] = current_time
-            await Logging.write_audit(
-                [
-                    AuditEntry(
-                        timestamp=current_time,
-                        actor_id=UserRole.SYSTEM,
-                        actor_role=UserRole.SYSTEM,
-                        action_type=AuditActionType.VISITOR_PASS_EXPIRED,
-                        target_id=cid,
-                        event_payload={
-                            "credential_id": cid,
-                            "expires_at": Logging.format_timestamp(expires_at_dt),
-                            "total_valid_duration_seconds": (
-                                expires_at_dt - created_at_dt
-                            ).total_seconds(),
-                            "final_status": CredentialStatus.EXPIRED.value,
-                        },
+            async with conn.transaction():
+                updated_row = await conn.fetchrow(
+                    """
+                    UPDATE credentials
+                    SET status = $2, updated_at = $3
+                    WHERE credential_id = $1 AND status = $4
+                    RETURNING status, revocation_reason, revoked_at, updated_at
+                    """,
+                    cid,
+                    CredentialStatus.EXPIRED.value,
+                    current_time,
+                    CredentialStatus.ACTIVE.value,
+                )
+                if updated_row is not None:
+                    rec["status"] = CredentialStatus.EXPIRED.value
+                    rec["updated_at"] = current_time
+                    await Logging.write_audit(
+                        [
+                            AuditEntry(
+                                timestamp=current_time,
+                                actor_id=UserRole.SYSTEM,
+                                actor_role=UserRole.SYSTEM,
+                                action_type=AuditActionType.VISITOR_PASS_EXPIRED,
+                                target_id=cid,
+                                event_payload={
+                                    "credential_id": cid,
+                                    "expires_at": Logging.format_timestamp(expires_at_dt),
+                                    "total_valid_duration_seconds": (
+                                        expires_at_dt - created_at_dt
+                                    ).total_seconds(),
+                                    "final_status": CredentialStatus.EXPIRED.value,
+                                },
+                            )
+                        ],
+                        conn=conn,
                     )
-                ],
-                db_pool=db_pool,
-            )
+                else:
+                    latest = await conn.fetchrow(
+                        "SELECT status, revocation_reason, revoked_at, updated_at FROM credentials WHERE credential_id = $1",
+                        cid,
+                    )
+                    if latest is not None:
+                        rec.update(dict(latest))
 
     # 2. 72-Hour Lost Card Review Window Auto-Revocation (SEC-2.17)
     elif (
@@ -313,41 +328,54 @@ async def apply_credential_transitions(
     ):
         suspension_start_dt = Logging.normalize_timestamp(rec["suspension_start"])
         if (current_time - suspension_start_dt) >= review_window:
-            await conn.execute(
-                """
-                UPDATE credentials
-                SET status = $2,
-                    revocation_reason = 'WINDOW_EXPIRED',
-                    revoked_at = $3,
-                    updated_at = $3
-                WHERE credential_id = $1
-                """,
-                cid,
-                CredentialStatus.REVOKED.value,
-                current_time,
-            )
-            rec["status"] = CredentialStatus.REVOKED.value
-            rec["revocation_reason"] = "WINDOW_EXPIRED"
-            rec["revoked_at"] = current_time
-            rec["updated_at"] = current_time
-            await Logging.write_audit(
-                [
-                    AuditEntry(
-                        timestamp=current_time,
-                        actor_id=UserRole.SYSTEM,
-                        actor_role=UserRole.SYSTEM,
-                        action_type=AuditActionType.CREDENTIAL_REVOKED,
-                        target_id=cid,
-                        event_payload={
-                            "credential_id": cid,
-                            "trigger": "WINDOW_EXPIRED",
-                            "suspension_start": Logging.format_timestamp(suspension_start_dt),
-                            "revoked_at": Logging.format_timestamp(current_time),
-                        },
+            async with conn.transaction():
+                updated_row = await conn.fetchrow(
+                    """
+                    UPDATE credentials
+                    SET status = $2,
+                        revocation_reason = 'WINDOW_EXPIRED',
+                        revoked_at = $3,
+                        updated_at = $3
+                    WHERE credential_id = $1 AND status = $4
+                    RETURNING status, revocation_reason, revoked_at, updated_at
+                    """,
+                    cid,
+                    CredentialStatus.REVOKED.value,
+                    current_time,
+                    CredentialStatus.SUSPENDED.value,
+                )
+                if updated_row is not None:
+                    rec["status"] = CredentialStatus.REVOKED.value
+                    rec["revocation_reason"] = "WINDOW_EXPIRED"
+                    rec["revoked_at"] = current_time
+                    rec["updated_at"] = current_time
+                    await Logging.write_audit(
+                        [
+                            AuditEntry(
+                                timestamp=current_time,
+                                actor_id=UserRole.SYSTEM,
+                                actor_role=UserRole.SYSTEM,
+                                action_type=AuditActionType.CREDENTIAL_REVOKED,
+                                target_id=cid,
+                                event_payload={
+                                    "credential_id": cid,
+                                    "trigger": "WINDOW_EXPIRED",
+                                    "suspension_start": Logging.format_timestamp(
+                                        suspension_start_dt
+                                    ),
+                                    "revoked_at": Logging.format_timestamp(current_time),
+                                },
+                            )
+                        ],
+                        conn=conn,
                     )
-                ],
-                db_pool=db_pool,
-            )
+                else:
+                    latest = await conn.fetchrow(
+                        "SELECT status, revocation_reason, revoked_at, updated_at FROM credentials WHERE credential_id = $1",
+                        cid,
+                    )
+                    if latest is not None:
+                        rec.update(dict(latest))
 
     return rec
 

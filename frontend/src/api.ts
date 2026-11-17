@@ -33,9 +33,14 @@ export type ApiResult = {
   };
 };
 
-export async function authorizedApi<T>(path: string, token: string, data?: object): Promise<T> {
+export async function authorizedApi<T>(
+  path: string,
+  token: string,
+  data?: object,
+  method?: "GET" | "POST" | "PATCH",
+): Promise<T> {
   const response = await fetch(path, {
-    method: data === undefined ? "GET" : "POST",
+    method: method ?? (data === undefined ? "GET" : "POST"),
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
     ...(data === undefined ? {} : { body: JSON.stringify(data) }),
   });

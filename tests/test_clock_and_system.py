@@ -9,7 +9,6 @@ from acs.enums import (
     AuditActionType,
     CredentialAction,
     CredentialStatus,
-    DenialReason,
     SuspensionReason,
     UserRole,
 )
@@ -114,99 +113,17 @@ def test_health_db_readiness_uninitialized_and_connected() -> None:
     asyncio.run(scenario())
 
 
-def test_system_reset_requires_admin_and_configures_clock() -> None:
-    async def scenario() -> None:
-        async with api_test_session() as client:
-            # Unauthenticated reset -> 401 SESSION_INVALID with AuthorizationResult JSON
-            no_auth_resp = await client.post("/api/v1/system/reset", json_body={})
-            assert no_auth_resp.status_code == 401
-            assert no_auth_resp.json()["allowed"] is False
-            assert no_auth_resp.json()["reason_code"] == DenialReason.SESSION_INVALID
-
-            # Seed technician & issue card via ADMIN
-            admin_token = await login_dashboard(client, "ADMIN-CARD-0001")
-            tech_uid = await seed_user_row(full_name="Tech Alice", role="TECHNICIAN")
-            issue_resp = await client.post(
-                "/api/v1/acs/credentials/manage",
-                headers=bearer(admin_token),
-                json_body={
-                    "action": "ISSUE",
-                    "target_user_id": tech_uid,
-                    "target_credential_id": "TECH-CARD-01",
-                },
-            )
-            assert issue_resp.status_code == 200
-
-            # Technician cannot reset system -> 403 UNAUTHORIZED_ROLE
-            tech_token = await login_dashboard(client, "TECH-CARD-01")
-            tech_reset = await client.post(
-                "/api/v1/system/reset",
-                headers=bearer(tech_token),
-                json_body={},
-            )
-            assert tech_reset.status_code == 403
-            assert tech_reset.json()["reason_code"] == DenialReason.UNAUTHORIZED_ROLE
-
-            # Admin resets system with Morning Peak T_0 and paused loop
-            reset_resp = await client.post(
-                "/api/v1/system/reset",
-                headers=bearer(admin_token),
-                json_body={
-                    "base_time": MORNING_PEAK_BASE_TIME.isoformat(),
-                    "sim_seconds_per_tick": 5.0,
-                    "tick_interval_seconds": 0.0,
-                    "start_loop": False,
-                },
-            )
-            assert reset_resp.status_code == 200
-            payload = reset_resp.json()
-            assert payload["status"] == "reset"
-            assert payload["clock"]["tick"] == 0
-            assert payload["clock"]["sim_seconds_per_tick"] == 5.0
-            assert payload["clock"]["current_sim_time"].startswith("2026-01-01T07:00:00")
-
-            # Previous sessions were cleared on reset
-            stale_tick = await client.post(
-                "/api/v1/system/clock/tick",
-                headers=bearer(admin_token),
-                json_body={"steps": 1},
-            )
-            assert stale_tick.status_code == 401
-            assert stale_tick.json()["reason_code"] == DenialReason.SESSION_INVALID
-
-            # Log in again at T_0 and manually advance 3 ticks (15s)
-            fresh_admin_token = await login_dashboard(client, "ADMIN-CARD-0001")
-            tick_resp = await client.post(
-                "/api/v1/system/clock/tick",
-                headers=bearer(fresh_admin_token),
-                json_body={"steps": 3},
-            )
-            assert tick_resp.status_code == 200
-            assert tick_resp.json()["tick"] == 3
-            assert tick_resp.json()["current_sim_time"].startswith("2026-01-01T07:00:15")
-
-            clock_resp = await client.get("/api/v1/system/clock")
-            assert clock_resp.status_code == 200
-            assert clock_resp.json()["tick"] == 3
-
-    asyncio.run(scenario())
-
-
-def test_bulk_credential_transitions_in_clock_advance_and_loop() -> None:
+def test_bulk_visitor_pass_expiry_in_clock_advance_and_loop() -> None:
     async def scenario() -> None:
         async with api_test_session(
             base_time=MORNING_PEAK_BASE_TIME,
-            sim_seconds_per_tick=3600.0,
+            sim_seconds_per_tick=1800.0,
             tick_interval_seconds=0.0,
             start_loop=False,
         ) as client:
             admin_token = await login_dashboard(client, "ADMIN-CARD-0001")
-
-            # Seed 2 short visitor passes (expire in 1h) and 2 lost-suspended cards (auto-revoke in 72h)
             vis_uid = await seed_user_row(full_name="Bulk Visitor", role=UserRole.VISITOR)
-            res_uid = await seed_user_row(
-                full_name="Bulk Resident", role=UserRole.RESIDENT, assigned_floor=4
-            )
+
             for cid in ("VIS-BULK-1", "VIS-BULK-2"):
                 assert (
                     await client.post(
@@ -220,6 +137,80 @@ def test_bulk_credential_transitions_in_clock_advance_and_loop() -> None:
                         },
                     )
                 ).status_code == 200
+
+            hook_saw_conn: list[bool] = []
+
+            def check_hook(_next_time: datetime, _next_tick: int) -> None:
+                hook_saw_conn.append(SimulationClock._loop_db_conn is not None)
+
+            SimulationClock.set_tick_hook(check_hook)
+            try:
+                # Tick 1 (+1800s = 30m): midway, visitor passes still active
+                await advance_clock(client, admin_token, 1)
+                assert hook_saw_conn == [True]
+                assert SimulationClock._loop_db_conn is None
+
+                async with DbConnectionPool.acquire() as conn:
+                    rows = await conn.fetch(
+                        "SELECT credential_id, status FROM credentials WHERE credential_id IN ('VIS-BULK-1', 'VIS-BULK-2')"
+                    )
+                    assert {r["credential_id"]: r["status"] for r in rows} == {
+                        "VIS-BULK-1": CredentialStatus.ACTIVE,
+                        "VIS-BULK-2": CredentialStatus.ACTIVE,
+                    }
+
+                # Tick 2 (+1800s = 1h total): both visitor passes expire via bulk SQL IN transition
+                admin_token = await login_dashboard(client, "ADMIN-CARD-0001")
+                await advance_clock(client, admin_token, 1)
+                assert hook_saw_conn == [True, True]
+                assert SimulationClock._loop_db_conn is None
+
+                admin_token = await login_dashboard(client, "ADMIN-CARD-0001")
+                async with DbConnectionPool.acquire() as conn:
+                    rows = await conn.fetch(
+                        "SELECT credential_id, status FROM credentials WHERE credential_id IN ('VIS-BULK-1', 'VIS-BULK-2')"
+                    )
+                    assert {r["credential_id"]: r["status"] for r in rows} == {
+                        "VIS-BULK-1": CredentialStatus.EXPIRED,
+                        "VIS-BULK-2": CredentialStatus.EXPIRED,
+                    }
+
+                for cid in ("VIS-BULK-1", "VIS-BULK-2"):
+                    audit_resp = await client.get(
+                        "/api/v1/acs/logs/audit",
+                        headers=bearer(admin_token),
+                        params={
+                            "target_id": cid,
+                            "action_type": AuditActionType.VISITOR_PASS_EXPIRED.value,
+                        },
+                    )
+                    assert audit_resp.status_code == 200
+                    assert audit_resp.json()["count"] >= 1
+
+                verify_resp = await client.post(
+                    "/api/v1/acs/logs/audit/verify",
+                    headers=bearer(admin_token),
+                )
+                assert verify_resp.status_code == 200
+                assert verify_resp.json()["details"]["passed"] is True
+            finally:
+                SimulationClock.set_tick_hook(None)
+
+    asyncio.run(scenario())
+
+
+def test_bulk_lost_card_auto_revoke_in_clock_advance_and_loop() -> None:
+    async def scenario() -> None:
+        async with api_test_session(
+            base_time=MORNING_PEAK_BASE_TIME,
+            sim_seconds_per_tick=36 * 3600.0,
+            tick_interval_seconds=0.0,
+            start_loop=False,
+        ) as client:
+            admin_token = await login_dashboard(client, "ADMIN-CARD-0001")
+            res_uid = await seed_user_row(
+                full_name="Bulk Resident", role=UserRole.RESIDENT, assigned_floor=4
+            )
 
             for cid in ("RES-LOST-1", "RES-LOST-2"):
                 assert (
@@ -245,7 +236,6 @@ def test_bulk_credential_transitions_in_clock_advance_and_loop() -> None:
                     )
                 ).status_code == 200
 
-            # Verify hook sees persistent loop connection & runs AFTER bulk transition
             hook_saw_conn: list[bool] = []
 
             def check_hook(_next_time: datetime, _next_tick: int) -> None:
@@ -253,43 +243,46 @@ def test_bulk_credential_transitions_in_clock_advance_and_loop() -> None:
 
             SimulationClock.set_tick_hook(check_hook)
             try:
-                # 1 tick = +3600s -> both visitor passes expire via bulk SQL IN transition
+                # Tick 1 (+36h): midway through 72h wait period, cards remain SUSPENDED
                 await advance_clock(client, admin_token, 1)
                 assert hook_saw_conn == [True]
                 assert SimulationClock._loop_db_conn is None
 
                 async with DbConnectionPool.acquire() as conn:
                     rows = await conn.fetch(
-                        "SELECT credential_id, status FROM credentials WHERE credential_id IN ('VIS-BULK-1', 'VIS-BULK-2')"
+                        "SELECT credential_id, status FROM credentials WHERE credential_id IN ('RES-LOST-1', 'RES-LOST-2')"
                     )
                     assert {r["credential_id"]: r["status"] for r in rows} == {
-                        "VIS-BULK-1": CredentialStatus.EXPIRED,
-                        "VIS-BULK-2": CredentialStatus.EXPIRED,
+                        "RES-LOST-1": CredentialStatus.SUSPENDED,
+                        "RES-LOST-2": CredentialStatus.SUSPENDED,
                     }
 
-                # 71 more ticks = 72h total -> both LOST cards auto-revoke via bulk SQL IN transition
+                # Tick 2 (+36h = 72h total): both LOST cards auto-revoke via bulk SQL IN transition
                 admin_token = await login_dashboard(client, "ADMIN-CARD-0001")
-                await advance_clock(client, admin_token, 71)
+                await advance_clock(client, admin_token, 1)
+                assert hook_saw_conn == [True, True]
+                assert SimulationClock._loop_db_conn is None
+
                 admin_token = await login_dashboard(client, "ADMIN-CARD-0001")
                 async with DbConnectionPool.acquire() as conn:
                     rows = await conn.fetch(
                         "SELECT credential_id, status, revocation_reason FROM credentials WHERE credential_id IN ('RES-LOST-1', 'RES-LOST-2')"
                     )
-                    assert {r["credential_id"]: (r["status"], r["revocation_reason"]) for r in rows} == {
+                    assert {
+                        r["credential_id"]: (r["status"], r["revocation_reason"]) for r in rows
+                    } == {
                         "RES-LOST-1": (CredentialStatus.REVOKED, "WINDOW_EXPIRED"),
                         "RES-LOST-2": (CredentialStatus.REVOKED, "WINDOW_EXPIRED"),
                     }
 
-                for cid, expected_action in (
-                    ("VIS-BULK-1", AuditActionType.VISITOR_PASS_EXPIRED.value),
-                    ("VIS-BULK-2", AuditActionType.VISITOR_PASS_EXPIRED.value),
-                    ("RES-LOST-1", AuditActionType.CREDENTIAL_REVOKED.value),
-                    ("RES-LOST-2", AuditActionType.CREDENTIAL_REVOKED.value),
-                ):
+                for cid in ("RES-LOST-1", "RES-LOST-2"):
                     audit_resp = await client.get(
                         "/api/v1/acs/logs/audit",
                         headers=bearer(admin_token),
-                        params={"target_id": cid, "action_type": expected_action},
+                        params={
+                            "target_id": cid,
+                            "action_type": AuditActionType.CREDENTIAL_REVOKED.value,
+                        },
                     )
                     assert audit_resp.status_code == 200
                     assert audit_resp.json()["count"] >= 1

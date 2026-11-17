@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
+import os
 from statistics import mean, median
 import threading
 import time
@@ -21,6 +22,19 @@ CarAvailability = Literal["IN_SERVICE", "OCCUPIED", "MAINTENANCE", "FAULT", "EME
 HallDirection = Literal["UP", "DOWN"]
 CallType = Literal["ORDINARY", "FREIGHT"]
 TERMINAL_STATUSES = {"COMPLETED", "CANCELLED", "FAILED"}
+CAR_TERMINAL_STATUSES = {"COMPLETED", "REJECTED", "CANCELLED", "FAILED"}
+DEFAULT_BACKLOG_LIMIT = 100
+
+
+def classify_traffic_profile(ts: datetime) -> str:
+    """Classify a timestamp into PEAK, OFF_PEAK, or NORMAL using SRS PERF-8 default windows."""
+    utc_ts = _normalize_utc(ts)
+    hour = utc_ts.hour
+    if (7 <= hour < 9) or (17 <= hour < 20):
+        return "PEAK"
+    if hour >= 22 or hour < 5:
+        return "OFF_PEAK"
+    return "NORMAL"
 
 
 class OperationalError(ValueError):
@@ -137,9 +151,22 @@ class OperationalSimulator:
 
     ELEVATOR_IDS = ("E1", "E2", "E3", "E4", "E5")
 
-    def __init__(self, *, auto_advance: bool = False, load_from_db: bool = True) -> None:
+    def __init__(
+        self,
+        *,
+        auto_advance: bool = False,
+        load_from_db: bool = True,
+        backlog_limit: int | None = None,
+    ) -> None:
         self._lock = threading.RLock()
         self._auto_advance = auto_advance
+        env_limit = os.getenv("SREMS_BACKLOG_LIMIT")
+        resolved_limit = (
+            backlog_limit
+            if backlog_limit is not None
+            else (int(env_limit) if env_limit and env_limit.isdigit() else DEFAULT_BACKLOG_LIMIT)
+        )
+        self.backlog_limit = max(1, resolved_limit)
         self.reset()
         if load_from_db:
             self._load_from_db_on_init()
@@ -192,8 +219,10 @@ class OperationalSimulator:
             import logging
             logging.getLogger("srems.sync").debug("Init DB load skipped or failed: %s", exc)
 
-    def reset(self, *, base_time: datetime | None = None) -> None:
+    def reset(self, *, base_time: datetime | None = None, backlog_limit: int | None = None) -> None:
         with self._lock:
+            if backlog_limit is not None:
+                self.backlog_limit = max(1, backlog_limit)
             self.cars: dict[str, Car] = {eid: Car(eid) for eid in self.ELEVATOR_IDS}
             self.hall_calls: dict[str, HallRequest] = {}
             self.car_calls: dict[str, CarRequest] = {}
@@ -204,6 +233,7 @@ class OperationalSimulator:
             self.downtime_intervals: list[dict] = []
             self.heartbeats: list[dict] = []
             self._emergency_triggers: dict[str, list[int]] = {}
+            self._backlog_alerted = False
             self.sim_tick = 0
             self.base_time = (
                 _normalize_utc(base_time)
@@ -321,18 +351,21 @@ class OperationalSimulator:
                     and previous.call_type == call_type):
                     return self._serialize_request(previous), True
 
+            now = self._now()
+            resolved_profile = traffic_profile or classify_traffic_profile(now)
             request = HallRequest(
                 str(uuid4()),
                 origin_floor,
                 call_type,
                 direction,
-                self._now(),
-                traffic_profile=traffic_profile,
+                now,
+                traffic_profile=resolved_profile,
             )
             self.hall_calls[request.request_id] = request
             self._event("HALL_CALL", None, f"{call_type} hall call at {origin_floor}")
             request.transition("QUEUED")
             self._assign_request(request)
+            self._check_backlog_event()
             return self._serialize_request(request), False
 
     def submit_car_call(self, elevator_id: str, destination_floor: int) -> dict:
@@ -354,6 +387,7 @@ class OperationalSimulator:
             self.car_calls[request.request_id] = request
             self._event("CAR_CALL", elevator_id, f"Authorized destination {destination_floor}")
             car.stops.append(Stop(destination_floor, "CAR", request.request_id))
+            self._check_backlog_event()
             return asdict(request)
 
     def start_service_run(self, destination_floor: int) -> dict:
@@ -524,7 +558,7 @@ class OperationalSimulator:
                     "motor_starts": 1,
                     "is_estimated": False,
                     "is_service_run": stop.kind == "SERVICE",
-                    "traffic_profile": None,
+                    "traffic_profile": classify_traffic_profile(dep_time),
                 }
             )
         car.door_state = "OPEN"
@@ -637,11 +671,19 @@ class OperationalSimulator:
                 )
             )
             if is_idle and seconds > 60:
+                start_tick = self.sim_tick
                 self.sim_tick += seconds
                 for car in self.cars.values():
                     if car.connected:
                         car.last_seen_tick = self.sim_tick
-                self.heartbeats.append({"timestamp": self._now(), "status": "UP"})
+                first_hb = ((start_tick // 10) + 1) * 10
+                for hb_tick in range(first_hb, self.sim_tick + 1, 10):
+                    self.heartbeats.append(
+                        {
+                            "timestamp": self.base_time + timedelta(seconds=hb_tick),
+                            "status": "UP",
+                        }
+                    )
             else:
                 self._advance_locked(seconds)
             self._wall_reference = time.monotonic()
@@ -671,12 +713,48 @@ class OperationalSimulator:
                 return self._serialize_request(self.hall_calls[request_id])
             return [self._serialize_request(req) for req in self.hall_calls.values()]
 
+    def _backlog_status(self) -> dict[str, int | bool]:
+        active_hall = sum(
+            1 for r in self.hall_calls.values() if r.status not in TERMINAL_STATUSES
+        )
+        active_car = sum(
+            1 for c in self.car_calls.values() if c.status not in CAR_TERMINAL_STATUSES
+        )
+        active_requests = active_hall + active_car
+        exceeded = active_requests > self.backlog_limit
+        return {
+            "active_hall_calls": active_hall,
+            "active_car_calls": active_car,
+            "active_requests": active_requests,
+            "backlog_limit": self.backlog_limit,
+            "backlog_exceeded": exceeded,
+            "backlog_count": max(0, active_requests - self.backlog_limit),
+        }
+
+    def _check_backlog_event(self) -> None:
+        status = self._backlog_status()
+        if status["backlog_exceeded"]:
+            if not self._backlog_alerted:
+                self._backlog_alerted = True
+                self._event(
+                    "BACKLOG_EXCEEDED",
+                    None,
+                    f"{status['active_requests']} active requests exceed backlog limit {self.backlog_limit}",
+                )
+        else:
+            self._backlog_alerted = False
+
     def fleet_status(self) -> dict:
         with self._lock:
             self._update_auto()
+            backlog = self._backlog_status()
             return {
                 "source": "labelled-test-stub",
                 "sim_tick": self.sim_tick,
+                "active_requests": backlog["active_requests"],
+                "backlog_limit": backlog["backlog_limit"],
+                "backlog_exceeded": backlog["backlog_exceeded"],
+                "backlog_count": backlog["backlog_count"],
                 "elevators": [{
                     "elevator_id": car.elevator_id,
                     "state": car.availability,
@@ -1194,10 +1272,16 @@ class OperationalSimulator:
                 from math import ceil
                 return waits[max(0, ceil(p * len(waits)) - 1)]
             completed_trips = [r for r in self.car_calls.values() if r.status == "COMPLETED"]
-            active_incidents = [i for i in self.incidents.values() if i.status not in ("RESOLVED", "CLOSED")]
+            active_incidents = [i for i in self.incidents.values() if i.status not in ("RESOLVED", "CLOSED", "FALSE_ALARM")]
+            backlog = self._backlog_status()
             return {"source": "labelled-test-stub", "sim_tick": self.sim_tick,
                     "total_hall_calls": len(self.hall_calls), "completed_hall_calls": len(waits),
-                    "active_hall_calls": sum(r.status not in TERMINAL_STATUSES for r in self.hall_calls.values()),
+                    "active_hall_calls": backlog["active_hall_calls"],
+                    "active_car_calls": backlog["active_car_calls"],
+                    "active_requests": backlog["active_requests"],
+                    "backlog_limit": backlog["backlog_limit"],
+                    "backlog_exceeded": backlog["backlog_exceeded"],
+                    "backlog_count": backlog["backlog_count"],
                     "mean_wait_seconds": mean(waits) if waits else None,
                     "median_wait_seconds": median(waits) if waits else None,
                     "p95_wait_seconds": pct(.95),
@@ -1416,20 +1500,31 @@ class OperationalSimulator:
                 )
 
             # 6. Heartbeats
-            for hb in heartbeats_to_sync:
-                await conn.execute(  # type: ignore[union-attr]
-                    """
+            if heartbeats_to_sync:
+                active_elevators = sum(self._eligible(c) for c in self.cars.values())
+                active_requests = sum(r.status not in TERMINAL_STATUSES for r in self.hall_calls.values())
+                active_incidents = sum(i.status not in ("RESOLVED", "CLOSED") for i in self.incidents.values())
+                hb_sql = """
                     INSERT INTO system_heartbeats (
                         timestamp, status, active_elevators_count, active_requests_count, active_incidents_count
                     )
                     VALUES ($1, $2, $3, $4, $5);
-                    """,
-                    _aware(hb["timestamp"]),
-                    hb.get("status", "UP"),
-                    sum(self._eligible(c) for c in self.cars.values()),
-                    sum(r.status not in TERMINAL_STATUSES for r in self.hall_calls.values()),
-                    sum(i.status not in ("RESOLVED", "CLOSED") for i in self.incidents.values()),
-                )
+                    """
+                hb_rows = [
+                    (
+                        _aware(hb["timestamp"]),
+                        hb.get("status", "UP"),
+                        active_elevators,
+                        active_requests,
+                        active_incidents,
+                    )
+                    for hb in heartbeats_to_sync
+                ]
+                if hasattr(conn, "executemany"):
+                    await conn.executemany(hb_sql, hb_rows)  # type: ignore[union-attr]
+                else:
+                    for row in hb_rows:
+                        await conn.execute(hb_sql, *row)  # type: ignore[union-attr]
 
             with self._lock:
                 self._synced_trips_idx = current_trips_len

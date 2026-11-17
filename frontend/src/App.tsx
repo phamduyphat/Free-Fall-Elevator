@@ -17,10 +17,47 @@ type ElevatorStatus = {
   active_fault?: string | null;
   message_to_occupants?: string;
 };
-type FleetResponse = { elevators: ElevatorStatus[]; source: string; sim_tick: number };
+type FleetResponse = {
+  elevators: ElevatorStatus[];
+  source: string;
+  sim_tick: number;
+  active_requests?: number;
+  backlog_limit?: number;
+  backlog_exceeded?: boolean;
+  backlog_count?: number;
+};
 type HallCall = NonNullable<ApiResult["request"]>;
-type Summary = { source: string; total_hall_calls: number; completed_hall_calls: number; active_hall_calls: number; mean_wait_seconds: number | null; median_wait_seconds: number | null; p95_wait_seconds: number | null; completed_car_calls: number; active_incidents: number; fleet_available: number; fleet_count: number; events_count: number };
+type Summary = {
+  source: string;
+  total_hall_calls: number;
+  completed_hall_calls: number;
+  active_hall_calls: number;
+  active_car_calls?: number;
+  active_requests?: number;
+  backlog_limit?: number;
+  backlog_exceeded?: boolean;
+  backlog_count?: number;
+  mean_wait_seconds: number | null;
+  median_wait_seconds: number | null;
+  p95_wait_seconds: number | null;
+  completed_car_calls: number;
+  active_incidents: number;
+  fleet_available: number;
+  fleet_count: number;
+  events_count: number;
+};
 type Incident = NonNullable<ApiResult["incident"]>;
+type SecurityAlert = {
+  alert_id: string;
+  severity: string;
+  alert_type: string;
+  credential_id: string | null;
+  primary_car_id: string | null;
+  secondary_car_id: string | null;
+  details: string;
+  status: string;
+  created_at: string;
+};
 type StubEvent = { timestamp: string; event_type: string; elevator_id: string | null; detail: string };
 
 async function getSummary(): Promise<Summary> {
@@ -168,15 +205,14 @@ function Simulation({ fleet, onFleetRefresh }: { fleet: FleetResponse | null; on
           setCalls(payload.requests);
           setHallRequest((current) => payload.requests.find((r) => r.request_id === current?.request_id) ?? current);
         }
-        await onFleetRefresh();
       } catch (reason) {
         if (alive) setAnnouncement(reason instanceof Error ? reason.message : "Unable to refresh simulation");
       }
     };
     void refresh();
-    const timer = window.setInterval(() => { void refresh(); }, 1000);
+    const timer = window.setInterval(() => { void refresh(); }, 750);
     return () => { alive = false; window.clearInterval(timer); };
-  }, [updating, onFleetRefresh]);
+  }, [updating]);
 
   const runAction = async (action: () => Promise<string>) => {
     if (busy) return;
@@ -598,34 +634,55 @@ function Credentials({ token, role }: { token: string; role: string }) {
 
 function Security({ token, role, refreshFleet }: { token: string; role: string; refreshFleet: () => Promise<void> }) {
   const [incidents, setIncidents] = useState<Incident[]>([]);
+  const [alerts, setAlerts] = useState<SecurityAlert[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [medicalFloor, setMedicalFloor] = useState("3");
-  const [diagnosticCar, setDiagnosticCar] = useState("E1");
-  const [faultCode, setFaultCode] = useState("SIMULATED_FAULT");
   const refresh = useCallback(async () => {
-    if (!token) { setIncidents([]); return; }
+    if (!token) { setIncidents([]); setAlerts([]); return; }
     try {
-      const result = await authorizedApi<{ items: Incident[] }>("/api/v1/operational/incidents", token);
-      setIncidents(result.items);
+      const [incResult, alertResult] = await Promise.all([
+        authorizedApi<{ items: Incident[] }>("/api/v1/operational/incidents", token),
+        authorizedApi<{ items: SecurityAlert[] }>("/api/v1/acs/logs/alerts", token).catch(() => ({ items: [] as SecurityAlert[] })),
+      ]);
+      setIncidents(incResult.items);
+      setAlerts(alertResult.items ?? []);
       setError(null);
     } catch (reason) { setError(reason instanceof Error ? reason.message : "Failed to load incidents"); }
   }, [token]);
-  useEffect(() => { void refresh(); }, [refresh]);
-  const act = async (path: string, body: object) => {
+  useEffect(() => {
+    void refresh();
+    if (!token) return;
+    let alive = true;
+    let inFlight = false;
+    const timer = window.setInterval(() => {
+      if (!alive || inFlight) return;
+      inFlight = true;
+      void refresh().finally(() => { inFlight = false; });
+    }, 750);
+    return () => { alive = false; window.clearInterval(timer); };
+  }, [refresh, token]);
+  const act = async (path: string, body: object, method: "POST" | "PATCH" = "POST") => {
     setBusy(true);
     try {
-      await authorizedApi(path, token, body);
+      await authorizedApi(path, token, body, method);
       setError(null);
       await refresh();
       await refreshFleet();
     } catch (reason) { setError(reason instanceof Error ? reason.message : "Operation failed"); }
     finally { setBusy(false); }
   };
-  return <><PageHeader eyebrow="Mode 3 · software test stub" title="Incidents and emergency response" detail="Actions require an ACS dashboard session. Simulation records are not the database audit log." action={<button className="button secondary" disabled={!token} onClick={() => { void refresh(); }}>Refresh incidents</button>} />
+  return <><PageHeader eyebrow="Mode 3 · software test stub" title="Incidents and emergency response" detail="Polls incidents and ACS security alerts every 750 ms (PERF-3)." action={<button className="button secondary" disabled={!token} onClick={() => { void refresh(); }}>Refresh incidents</button>} />
     {!token ? <EmptyState title="Dashboard sign-in required" detail="Present an Admin or Technician credential in the header to inspect and resolve simulated incidents." /> : <>
       {error && <p className="authorization-feedback" role="alert">{error}</p>}
       {role === "ADMIN" && <section className="panel section"><div className="section-heading"><h2>Admin demo controls</h2></div><div className="hall-controls"><label>Telephone medical floor<input type="number" min={1} max={30} value={medicalFloor} onChange={(e) => setMedicalFloor(e.target.value)} /></label><button className="button secondary" disabled={busy} onClick={() => { void act("/api/v1/operational/incidents/phone-medical", { floor: Number(medicalFloor) }); }}>Record medical call</button><button className="button emergency-button" disabled={busy} onClick={() => { void act("/api/v1/operational/stub/building-event", { kind: "FIRE" }); }}>Inject fire (stub)</button></div></section>}
+      <section className="panel section"><div className="table-heading"><strong>Security alerts (database)</strong><span>{alerts.length} records</span></div>
+        {alerts.length === 0 ? <EmptyState title="No security alerts" detail="Repeated access failures, cloned cards, or card scanning alerts appear here within 1 second." /> : alerts.map((alert) =>
+          <article className="incident-card" key={alert.alert_id}><div><strong>{alert.alert_type}</strong> · {alert.status} · {alert.severity}</div><p>{alert.details}</p><small>{alert.primary_car_id ?? "System"}{alert.secondary_car_id ? ` / ${alert.secondary_car_id}` : ""} · {alert.credential_id ?? "No card"} · {alert.created_at}</small><div className="incident-actions">
+            {role === "ADMIN" && alert.status === "OPEN" && <button className="button secondary" disabled={busy} onClick={() => { void act(`/api/v1/acs/logs/alerts/${alert.alert_id}`, { new_status: "ACKNOWLEDGED" }, "PATCH"); }}>Acknowledge alert</button>}
+            {role === "ADMIN" && alert.status !== "RESOLVED" && <button className="button secondary" disabled={busy} onClick={() => { void act(`/api/v1/acs/logs/alerts/${alert.alert_id}`, { new_status: "RESOLVED" }, "PATCH"); }}>Resolve alert</button>}
+          </div></article>
+        )}</section>
       <section className="panel section"><div className="table-heading"><strong>Simulated incident queue</strong><span>{incidents.length} records</span></div>
         {incidents.length === 0 ? <EmptyState title="No incidents in memory" detail="Use HELP or MEDICAL on the simulator screen, or an Admin test event." /> : incidents.map((incident) =>
           <article className="incident-card" key={incident.incident_id}><div><strong>{incident.kind}</strong> · {incident.status} · {incident.severity}</div><p>{incident.details}</p><small>{incident.elevator_id ?? "Building"} · {floorLabel(incident.floor)} · {incident.incident_id}</small><div className="incident-actions">
@@ -736,7 +793,17 @@ function App() {
     }
   }, []);
 
-  useEffect(() => { void onFleetRefresh(); }, [onFleetRefresh]);
+  useEffect(() => {
+    void onFleetRefresh();
+    let alive = true;
+    let inFlight = false;
+    const timer = window.setInterval(() => {
+      if (!alive || inFlight) return;
+      inFlight = true;
+      void onFleetRefresh().finally(() => { inFlight = false; });
+    }, 750);
+    return () => { alive = false; window.clearInterval(timer); };
+  }, [onFleetRefresh]);
 
   const login = async () => {
     try {
@@ -753,7 +820,7 @@ function App() {
   const page = view === "overview" ? <Overview fleet={fleet} summary={summary} token={token} /> : view === "simulation" ? <Simulation fleet={fleet} onFleetRefresh={onFleetRefresh} /> : view === "elevators" ? <Elevators fleet={fleet} refresh={onFleetRefresh} /> : view === "credentials" ? <Credentials token={token} role={role} /> : view === "security" ? <Security token={token} role={role} refreshFleet={onFleetRefresh} /> : view === "analytics" ? <Analytics summary={summary} token={token} role={role} /> : <Audit token={token} role={role} />;
   return <div className="app-shell">
     <aside className="sidebar"><div className="brand"><span className="brand-mark">S</span><div><strong>SREMS</strong><span>Operations</span></div></div><nav aria-label="Primary navigation">{navigation.map((item) => <button className={`nav-item ${item.id === view ? "active" : ""}`} key={item.id} onClick={() => setView(item.id)}><span className="nav-icon">{item.icon}</span>{item.label}</button>)}</nav><div className="sidebar-footer"><span className="status-dot" /> {error ? "API unavailable" : fleet ? "Test stub connected" : "Connecting"}</div></aside>
-    <main className="content"><header className="topbar"><div><p className="eyebrow">Building operations</p><div className="breadcrumb">SREMS / {active.label}</div></div><div className="operator">{token ? <><span className="avatar">{role.slice(0, 1)}</span><span><strong>{role}</strong><small>ACS session</small></span><button className="button secondary" onClick={() => { void logout(); }}>Log out</button></> : <><label className="login-field">Dashboard card<input aria-label="Dashboard card" value={credential} onChange={(event) => setCredential(event.target.value)} /></label><button className="button secondary" onClick={() => { void login(); }}>Sign in</button></>}</div></header>{loginError && <div className="error-banner" role="alert">{loginError}</div>}{error && <div className="error-banner" role="alert">{error}</div>}<div className="page-content">{page}</div></main>
+    <main className="content"><header className="topbar"><div><p className="eyebrow">Building operations</p><div className="breadcrumb">SREMS / {active.label}</div></div><div className="operator">{token ? <><span className="avatar">{role.slice(0, 1)}</span><span><strong>{role}</strong><small>ACS session</small></span><button className="button secondary" onClick={() => { void logout(); }}>Log out</button></> : <><label className="login-field">Dashboard card<input aria-label="Dashboard card" value={credential} onChange={(event) => setCredential(event.target.value)} /></label><button className="button secondary" onClick={() => { void login(); }}>Sign in</button></>}</div></header>{summary?.backlog_exceeded && <div className="error-banner" role="alert">Request backlog exceeded: {summary.active_requests} active requests (limit {summary.backlog_limit ?? 100}, +{summary.backlog_count ?? 0} queued above limit).</div>}{(summary?.active_incidents ?? 0) > 0 && <div className="error-banner" role="alert">Critical alert: {summary?.active_incidents} active incident(s) require review.</div>}{loginError && <div className="error-banner" role="alert">{loginError}</div>}{error && <div className="error-banner" role="alert">{error}</div>}<div className="page-content">{page}</div></main>
   </div>;
 }
 

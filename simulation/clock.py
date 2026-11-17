@@ -62,6 +62,7 @@ class SimulationClock:
     _stop_event: Optional[threading.Event] = None
     _tick_hook: Optional[Callable[[datetime, int], None]] = None
     _loop_db_conn: Optional[asyncpg.Connection] = None
+    _tick_execution_lock: threading.Lock = threading.Lock()
 
     @classmethod
     def now(cls) -> datetime:
@@ -167,24 +168,26 @@ class SimulationClock:
                     break
 
                 # Run a single tick
-                loop.run_until_complete(cls._execute_single_tick_async(cls._loop_db_conn))
+                with cls._tick_execution_lock:
+                    loop.run_until_complete(cls._execute_single_tick_async(cls._loop_db_conn))
         finally:
             cls._cleanup_loop(loop)
 
     @classmethod
     def _run_advance_steps(cls, steps: int) -> None:
         """Execute `steps` sequential ticks in CPU clock time using one persistent DB connection."""
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        cls._loop_db_conn = None
-        try:
-            async def _run_batch() -> None:
-                for _ in range(steps):
-                    await cls._execute_single_tick_async(cls._loop_db_conn)
+        with cls._tick_execution_lock:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            cls._loop_db_conn = None
+            try:
+                async def _run_batch() -> None:
+                    for _ in range(steps):
+                        await cls._execute_single_tick_async(cls._loop_db_conn)
 
-            loop.run_until_complete(_run_batch())
-        finally:
-            cls._cleanup_loop(loop)
+                loop.run_until_complete(_run_batch())
+            finally:
+                cls._cleanup_loop(loop)
 
     @classmethod
     def stop(cls, timeout: float = 2.0) -> None:

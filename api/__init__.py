@@ -1,14 +1,19 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+import os
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from acs.enums import AuditActionType, UserRole
+from acs.logs import Logging
+from acs.payloads import AuditEntry
 from api.routes import router as api_router
 from db import DbConnectionPool
 from simulation import SimulationClock
 from simulation.operational import operational_simulator
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -21,7 +26,26 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     try:
         await DbConnectionPool.init_pool()
         async with DbConnectionPool.acquire() as conn:
-            await operational_simulator.load_from_db(conn)
+            loaded = await operational_simulator.load_from_db(conn)
+            try:
+                await Logging.write_audit(
+                    [
+                        AuditEntry(
+                            timestamp=SimulationClock.now(),
+                            actor_id=UserRole.SYSTEM,
+                            actor_role=UserRole.SYSTEM,
+                            action_type=AuditActionType.SYSTEM_STARTUP,
+                            target_id="SREMS",
+                            event_payload={
+                                "base_time": SimulationClock.now().isoformat(),
+                                "loaded_from_db": loaded,
+                            },
+                        )
+                    ],
+                    conn=conn,
+                )
+            except Exception:
+                pass
         SimulationClock.start()
     except OSError as exc:
         import logging
@@ -36,6 +60,29 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             try:
                 async with DbConnectionPool.acquire() as conn:
                     await operational_simulator.sync_to_db(conn)
+                    announced = os.getenv("SREMS_ANNOUNCED_MAINTENANCE", "").strip().lower() in (
+                        "1",
+                        "true",
+                        "yes",
+                    )
+                    await Logging.write_audit(
+                        [
+                            AuditEntry(
+                                timestamp=SimulationClock.now(),
+                                actor_id=UserRole.SYSTEM,
+                                actor_role=UserRole.SYSTEM,
+                                action_type=AuditActionType.SYSTEM_SHUTDOWN,
+                                target_id="SREMS",
+                                event_payload={
+                                    "reason": "ANNOUNCED_MAINTENANCE"
+                                    if announced
+                                    else "GRACEFUL_SHUTDOWN",
+                                    "is_announced_maintenance": announced,
+                                },
+                            )
+                        ],
+                        conn=conn,
+                    )
             except Exception:
                 pass
         await DbConnectionPool.close_pool()

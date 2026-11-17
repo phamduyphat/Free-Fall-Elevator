@@ -214,6 +214,18 @@ async def advance_clock(client: AsgiClient, admin_token: str, steps: int = 1) ->
     return resp.json()
 
 
+async def advance_clock_and_relogin(
+    client: AsgiClient,
+    credential_id: str,
+    steps: int = 1,
+) -> tuple[dict[str, Any], str]:
+    """Login, advance the clock, and return `(tick_payload, fresh_token)` so >15m jumps stay authenticated."""
+    token = await login_dashboard(client, credential_id)
+    tick_payload = await advance_clock(client, token, steps=steps)
+    fresh_token = await login_dashboard(client, credential_id)
+    return tick_payload, fresh_token
+
+
 @pytest.fixture(scope="session", autouse=True)
 def reset_database_after_all_tests() -> Iterator[None]:
     """Wipe all table rows and re-seed the two default Admin users/cards after all tests run."""
