@@ -74,6 +74,7 @@ class DbConnectionPool:
         """
         async with cls.transaction() as conn:
             # Delete in child-to-parent order to respect foreign key constraints
+            await conn.execute("DELETE FROM elevator_commands WHERE TRUE;")
             await conn.execute("DELETE FROM incidents WHERE TRUE;")
             await conn.execute("DELETE FROM car_downtime_intervals WHERE TRUE;")
             await conn.execute("DELETE FROM trips WHERE TRUE;")
@@ -183,6 +184,5 @@ async def get_db_connection() -> AsyncIterator[asyncpg.Connection]:
 
 
 def get_db_pool() -> type[DbConnectionPool]:
-    """FastAPI dependency that provides the initialized DbConnectionPool class."""
-    DbConnectionPool.get_pool()
+    """FastAPI dependency that provides the DbConnectionPool class."""
     return DbConnectionPool

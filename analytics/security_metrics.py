@@ -5,7 +5,6 @@ from datetime import datetime
 from analytics.helpers import normalize_timestamp
 from analytics.reports import SecuritySummaryReport
 from db import DbConnectionPool
-from simulation.operational import operational_simulator
 
 AUTH_FAILURE_REASONS: frozenset[str] = frozenset(
     {
@@ -73,13 +72,16 @@ class SecurityMetrics:
                 et,
             )
 
-        incidents_by_type: dict[str, int] = {}
-        with operational_simulator._lock:
-            for inc in operational_simulator.incidents.values():
-                inc_ts = normalize_timestamp(inc.created_at)
-                if st <= inc_ts <= et:
-                    etype = str(inc.kind)
-                    incidents_by_type[etype] = incidents_by_type.get(etype, 0) + 1
+            incident_rows = await conn.fetch(
+                """
+                SELECT incident_type, count(*) AS cnt
+                FROM incidents
+                WHERE created_at >= $1 AND created_at <= $2
+                GROUP BY incident_type
+                """,
+                st,
+                et,
+            )
 
         denials_by_reason: dict[str, int] = {
             str(r["denial_reason"] or "UNKNOWN"): int(r["cnt"]) for r in denial_rows
@@ -91,6 +93,9 @@ class SecurityMetrics:
         }
         external_rejections = int(malformed_rows[0]["cnt"]) if malformed_rows else 0
 
+        incidents_by_type: dict[str, int] = {
+            str(r["incident_type"]): int(r["cnt"]) for r in incident_rows
+        }
         total_incidents = sum(incidents_by_type.values())
 
         failed_auth = sum(

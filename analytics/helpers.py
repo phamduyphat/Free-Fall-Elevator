@@ -6,12 +6,12 @@ import statistics
 
 
 def normalize_timestamp(ts: datetime | str) -> datetime:
-    """Normalize a datetime or ISO string to naive UTC datetime."""
+    """Normalize a datetime or ISO string to offset-aware UTC datetime."""
     if isinstance(ts, str):
         ts = datetime.fromisoformat(ts)
-    if ts.tzinfo is not None:
-        return ts.astimezone(timezone.utc).replace(tzinfo=None)
-    return ts
+    if ts.tzinfo is None:
+        return ts.replace(tzinfo=timezone.utc)
+    return ts.astimezone(timezone.utc)
 
 
 def calculate_percentile(values: list[float], p: float) -> float:

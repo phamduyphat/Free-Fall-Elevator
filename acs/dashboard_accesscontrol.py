@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 import uuid
 
@@ -153,7 +153,7 @@ class DashboardAccessControl:
         db_pool: type[DbConnectionPool] = DbConnectionPool,
     ) -> tuple[AuthorizationResult, Optional[IntegrityCheckResult]]:
         """Authorized wrapper for ANA-5.8."""
-        ts = Logging.normalize_timestamp(timestamp or datetime.now())
+        ts = Logging.normalize_timestamp(timestamp or datetime.now(timezone.utc))
         try:
             async with db_pool.acquire() as conn:
                 admin_record, denial = await authorize_credential_role(
@@ -306,7 +306,7 @@ class DashboardAccessControl:
         Explicitly terminate an active dashboard session and emit `ADMIN_LOGOUT`
         with `reason = 'MANUAL'`.
         """
-        ts = Logging.normalize_timestamp(timestamp or datetime.now())
+        ts = Logging.normalize_timestamp(timestamp or datetime.now(timezone.utc))
         session = DashboardAccessControl.active_dashboard_sessions.pop(session_token, None)
         if session is None:
             return AuthorizationResult.deny(

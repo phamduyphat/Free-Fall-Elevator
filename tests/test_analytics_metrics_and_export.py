@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import timedelta
+from datetime import datetime, timedelta
 import json
 
 from acs.enums import DenialReason
@@ -213,7 +213,7 @@ def test_analytics_wait_times_and_export() -> None:
             assert json_export.status_code == 200
             j_body = json_export.json()
             assert j_body["export_format"] == "JSON"
-            assert j_body["generated_at"] == end
+            assert datetime.fromisoformat(j_body["generated_at"]) == datetime.fromisoformat(end)
             assert j_body["record_count"] == 3
             parsed_content = json.loads(j_body["content"])
             assert parsed_content["run_id"] == "peak-run-01"

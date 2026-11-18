@@ -6,14 +6,12 @@ Secure and Reliable Elevator Monitoring and Control System.
 It currently provides the application shell and views for:
 
 - fleet overview;
-- elevator monitoring;
+- simulation and 30-floor visual shaft;
+- elevator monitoring and service matrix;
 - credential management;
-- security alerts;
+- security alerts and incident handling;
 - analytics; and
-- audit logs.
-
-The frontend is intentionally read-only until the corresponding authenticated
-backend workflows and operational data sources are connected.
+- audit logs with integrity verification.
 
 ## Requirements
 
@@ -52,18 +50,30 @@ http://127.0.0.1:8000
 Start the backend separately from the repository root:
 
 ```powershell
+cd ..
 python main.py
 ```
 
-The frontend currently consumes:
+*(Optional) If using a virtual environment:*
 
-```text
-GET /api/v1/fleet/status
+```powershell
+cd ..
+.\.venv\Scripts\Activate.ps1
+python main.py
 ```
 
-The backend returns explicit `UNKNOWN` elevator states until a live
-operational telemetry source is connected. The UI does not fabricate current
-floor, availability, alert, credential, analytics, or audit data.
+The frontend connects to the SREMS API endpoints (`/api/v1/*`) including
+fleet status, hall and car calls, emergency incidents, credentials, and audit logs.
+
+## Running the simulation
+
+1. Start the backend (`python main.py` in the root repository).
+2. Start the frontend (`npm run dev` in `frontend/`).
+3. Open `http://localhost:5173` and click **"Simulator (stub)"** in the navigation sidebar:
+   - **Shaft panel:** Displays real-time animated car positions for `E1`–`E5` across B1 and Floors 1–30.
+   - **Car Operating Panel (COP):** Select a car, swipe a card (e.g. `ADMIN-CARD-0001`), press destination buttons, and test `HELP` or `MEDICAL` emergency actions.
+   - **Hall panel:** Select an origin floor to submit Up/Down hall calls or request `E5` Freight service.
+   - **Security & diagnostics:** Open the **"Incidents & diagnostics"** tab to resolve alarms, send rescue cars, and confirm medical boarding.
 
 ## Available scripts
 
@@ -93,12 +103,13 @@ frontend/
 The application uses in-memory view navigation rather than a URL router at
 this stage. The available sections are:
 
-- **Overview:** fleet summary, KPI placeholders, and recent activity state.
+- **Overview:** fleet summary, KPI indicators, and recent operational activity.
+- **Simulation:** interactive 30-floor visual shaft, car operating panel, and hall panel.
 - **Elevators:** individual elevator cards and service matrix.
-- **Credentials:** cardholder and credential-management workspace.
-- **Security alerts:** alert queue and severity summaries.
-- **Analytics:** time-window and traffic-profile controls for Mode 5 KPIs.
-- **Audit log:** ledger search and integrity-verification workspace.
+- **Credentials:** cardholder registration and credential lifecycle management.
+- **Security alerts:** incident queue, rescue car dispatch, and diagnostics.
+- **Analytics:** real-time operational indicators and persisted Mode 5 database reports.
+- **Audit log:** database-backed audit chain search and SHA-256 integrity verification.
 
 Screens show loading, empty, unavailable, and error states instead of
 silently displaying success-shaped placeholder data.

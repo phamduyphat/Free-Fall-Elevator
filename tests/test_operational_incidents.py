@@ -127,6 +127,21 @@ class TestIncidentsAndRecovery(unittest.TestCase):
         self.sim.advance(60)
         self.assertTrue(any(i.escalated for i in self.sim.incidents.values()))
 
+    def test_rescue_dispatch_excludes_maintenance_cars(self):
+        incident = self.sim.phone_medical_incident(5)
+        # Put E1, E2, E3 in maintenance
+        self.sim.isolate("E1", "MAINTENANCE")
+        self.sim.isolate("E2", "MAINTENANCE")
+        self.sim.isolate("E3", "MAINTENANCE")
+        # E4 should be selected
+        result = self.sim.dispatch_rescue(incident["incident_id"], confirmed_empty=True, wait_seconds=60)
+        self.assertEqual(result["rescue_car_id"], "E4")
+        # Now put E4 in maintenance as well - should raise OperationalError (no eligible rescue car)
+        self.sim.isolate("E4", "MAINTENANCE")
+        incident2 = self.sim.phone_medical_incident(10)
+        with self.assertRaisesRegex(OperationalError, "No eligible, confirmed-empty rescue car"):
+            self.sim.dispatch_rescue(incident2["incident_id"], confirmed_empty=True, wait_seconds=60)
+
     def test_metrics_are_aggregates_labelled_as_stub(self):
         self.sim.submit_hall_call(origin_floor=3, direction="UP")
         self.sim.advance(2)
@@ -136,6 +151,122 @@ class TestIncidentsAndRecovery(unittest.TestCase):
         self.assertEqual(metrics["mean_wait_seconds"], 2)
         self.assertEqual(metrics["p95_wait_seconds"], 2)
         self.assertEqual(metrics["fleet_count"], 5)
+
+    def test_rescue_car_blocks_door_close_and_preserves_wait_on_open(self):
+        incident = self.sim.phone_medical_incident(1)
+        dispatched = self.sim.dispatch_rescue(
+            incident["incident_id"], confirmed_empty=True, wait_seconds=120
+        )
+        rescue_id = dispatched["rescue_car_id"]
+        self.sim.advance(1)
+        with self.assertRaisesRegex(OperationalError, "active rescue wait"):
+            self.sim.passenger_door_command(rescue_id, "CLOSE")
+        self.sim.passenger_door_command(rescue_id, "OPEN")
+        self.sim.advance(5)
+        confirmed = self.sim.confirm_rescue_boarding(incident["incident_id"])
+        self.assertEqual(confirmed["elevator_id"], rescue_id)
+        self.assertIn("RESCUE_BOARDED", confirmed["history"])
+        self.assertEqual(self.sim.cars[rescue_id].availability, "EMERGENCY_UNAVAILABLE")
+
+    def test_open_phone_medical_does_not_freeze_fleet_after_fire_resolved(self):
+        med = self.sim.phone_medical_incident(5)
+        fire = self.sim.building_emergency("FIRE", actor="ADMIN-1")
+        for eid in self.sim.ELEVATOR_IDS:
+            self.assertEqual(self.sim.cars[eid].availability, "EMERGENCY_UNAVAILABLE")
+        self.sim.incident_action(
+            fire["incident_id"], "RESOLVE", actor="ADMIN-1", technician_confirmation=True
+        )
+        for eid in self.sim.ELEVATOR_IDS:
+            self.assertEqual(self.sim.cars[eid].availability, "IN_SERVICE")
+        self.assertEqual(self.sim.incidents[med["incident_id"]].status, "OPEN")
+
+    def test_rescue_can_be_redispatched_after_fire_resolved(self):
+        med = self.sim.phone_medical_incident(5)
+        first_dispatch = self.sim.dispatch_rescue(
+            med["incident_id"], confirmed_empty=True, wait_seconds=120
+        )
+        self.assertIsNotNone(first_dispatch["rescue_car_id"])
+        fire = self.sim.building_emergency("FIRE", actor="ADMIN-1")
+        self.assertIsNone(self.sim.incidents[med["incident_id"]].rescue_car_id)
+        self.sim.incident_action(
+            fire["incident_id"], "RESOLVE", actor="ADMIN-1", technician_confirmation=True
+        )
+        second_dispatch = self.sim.dispatch_rescue(
+            med["incident_id"], confirmed_empty=True, wait_seconds=120
+        )
+        self.assertIsNotNone(second_dispatch["rescue_car_id"])
+
+    def test_emr34_incident_fields_populated(self):
+        hc, _ = self.sim.submit_hall_call(origin_floor=6, direction="UP")
+        assigned_car = hc["assigned_car"]
+        med_inc = self.sim.trigger_emergency(assigned_car, "MEDICAL")
+        self.assertEqual(med_inc["scope"], "CAR_SPECIFIC")
+        self.assertEqual(med_inc["trigger_source"], "PASSENGER_MEDICAL")
+        self.assertEqual(med_inc["notification_status"], "NOTIFIED")
+        self.assertIn(med_inc["direction"], ("UP", "DOWN", "IDLE"))
+        self.assertIn(hc["request_id"], med_inc["related_requests"])
+        self.assertEqual(med_inc["history"], ["OPEN"])
+
+        phone_inc = self.sim.phone_medical_incident(4)
+        self.assertEqual(phone_inc["scope"], "CAR_SPECIFIC")
+        self.assertEqual(phone_inc["trigger_source"], "ADMIN_MANUAL")
+        self.assertIsNone(phone_inc["direction"])
+
+    def test_stuck_car_rescue_targets_stopped_floor_and_releases_on_resolve(self):
+        self.sim.submit_hall_call(origin_floor=10, direction="UP")
+        help_inc = self.sim.trigger_emergency("E1", "HELP")
+        self.assertEqual(help_inc["floor"], 1)
+        self.sim.advance(5)  # E1 moves to floor 6 while still serving
+        stuck = self.sim.confirm_help_as_stuck(help_inc["incident_id"], actor="ADMIN-1")
+        self.assertEqual(stuck["floor"], 6)
+        dispatched = self.sim.dispatch_rescue(
+            help_inc["incident_id"], confirmed_empty=True, wait_seconds=120
+        )
+        rescue_id = dispatched["rescue_car_id"]
+        self.assertTrue(self.sim.cars[rescue_id].rescue_active)
+        self.sim.advance(2)
+        self.sim.incident_action(
+            help_inc["incident_id"],
+            "RESOLVE",
+            actor="ADMIN-1",
+            technician_confirmation=True,
+        )
+        self.assertFalse(self.sim.cars[rescue_id].rescue_active)
+        self.assertEqual(self.sim.cars[rescue_id].availability, "IN_SERVICE")
+        self.assertEqual(self.sim.cars[rescue_id].stops, [])
+
+    def test_com3_command_statuses_acknowledged_rejected_timed_out_unknown(self):
+        # 1. ACKNOWLEDGED
+        self.sim.submit_car_call("E1", 5)
+        # 2. REJECTED
+        with self.assertRaises(OperationalError):
+            self.sim.submit_car_call("E5", -1)
+        # 3. UNKNOWN (in-flight command when comm loss occurs)
+        self.sim.communication_loss("E1", actor="TECH-1")
+        # 4. TIMED_OUT (armed timeout on E2)
+        self.sim.arm_command_timeout("E2", True)
+        with self.assertRaisesRegex(OperationalError, "timed out"):
+            self.sim.submit_car_call("E2", 7)
+        self.assertEqual(self.sim.cars["E2"].availability, "STALE")
+        statuses = {c["status"] for c in self.sim.commands}
+        self.assertEqual(statuses, {"ACKNOWLEDGED", "REJECTED", "UNKNOWN", "TIMED_OUT"})
+
+    def test_fr18_car_call_lifecycle_blocked_and_rejected(self):
+        cc = self.sim.submit_car_call("E1", 6, credential_id="RES-CARD-06")
+        self.assertEqual(cc["history"], ["RECEIVED", "AUTHORIZATION_CHECK", "QUEUED"])
+        self.assertEqual(cc["credential_id"], "RES-CARD-06")
+        self.assertIsNotNone(cc["authorized_at"])
+        self.sim.communication_loss("E1", actor="TECH-1")
+        self.assertEqual(
+            self.sim.car_calls[cc["request_id"]].status,
+            "BLOCKED/REQUIRES_RECONCILIATION",
+        )
+        rej = self.sim.record_rejected_car_call(
+            "E1", 20, "UNAUTHORIZED_FLOOR", credential_id="RES-CARD-06"
+        )
+        self.assertEqual(rej["status"], "REJECTED")
+        self.assertEqual(rej["history"], ["RECEIVED", "AUTHORIZATION_CHECK", "REJECTED"])
+        self.assertEqual(rej["rejection_reason"], "UNAUTHORIZED_FLOOR")
 
 
 if __name__ == "__main__":

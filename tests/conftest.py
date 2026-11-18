@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime
 import json
-from typing import Any, AsyncIterator, Optional
+import threading
+from typing import Any, AsyncIterator, Iterator, Optional
 from urllib.parse import urlencode
 import uuid
+
+import asyncpg
+import pytest
 
 from acs.cab_accesscontrol import CabAccessControl
 from acs.dashboard_accesscontrol import DashboardAccessControl
@@ -207,4 +212,58 @@ async def advance_clock(client: AsgiClient, admin_token: str, steps: int = 1) ->
     )
     assert resp.status_code == 200, resp.text
     return resp.json()
+
+
+async def advance_clock_and_relogin(
+    client: AsgiClient,
+    credential_id: str,
+    steps: int = 1,
+) -> tuple[dict[str, Any], str]:
+    """Login, advance the clock, and return `(tick_payload, fresh_token)` so >15m jumps stay authenticated."""
+    token = await login_dashboard(client, credential_id)
+    tick_payload = await advance_clock(client, token, steps=steps)
+    fresh_token = await login_dashboard(client, credential_id)
+    return tick_payload, fresh_token
+
+
+@pytest.fixture(scope="session", autouse=True)
+def reset_database_after_all_tests() -> Iterator[None]:
+    """Wipe all table rows and re-seed the two default Admin users/cards after all tests run."""
+    yield
+
+    async def _teardown() -> None:
+        created_pool = DbConnectionPool._pool is None
+        try:
+            if created_pool:
+                await DbConnectionPool.init_pool(timeout=2.0)
+            await DbConnectionPool.reset_database_tables()
+        except (OSError, asyncpg.PostgresError, TimeoutError, RuntimeError):
+            # Allow offline unit-test runs when PostgreSQL is unavailable.
+            pass
+        finally:
+            if created_pool and DbConnectionPool._pool is not None:
+                await DbConnectionPool.close_pool()
+
+    try:
+        asyncio.get_running_loop()
+        in_loop = True
+    except RuntimeError:
+        in_loop = False
+
+    if in_loop:
+        err: list[BaseException] = []
+
+        def _worker() -> None:
+            try:
+                asyncio.run(_teardown())
+            except BaseException as exc:
+                err.append(exc)
+
+        thread = threading.Thread(target=_worker, daemon=True)
+        thread.start()
+        thread.join()
+        if err:
+            raise err[0]
+    else:
+        asyncio.run(_teardown())
 
