@@ -400,6 +400,8 @@ BEGIN
     END IF;
     IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'car_downtime_intervals' AND column_name = 'cause') THEN
         ALTER TABLE car_downtime_intervals ADD COLUMN cause TEXT NULL;
+    ELSE
+        ALTER TABLE car_downtime_intervals ALTER COLUMN cause DROP NOT NULL;
     END IF;
 
     -- incidents EMR-3.4 alignment
@@ -414,9 +416,6 @@ BEGIN
     END IF;
     IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'incidents' AND column_name = 'resolution_history') THEN
         ALTER TABLE incidents ADD COLUMN resolution_history JSONB NOT NULL DEFAULT '[]'::jsonb;
-    END IF;
-    ELSE
-        ALTER TABLE car_downtime_intervals ALTER COLUMN cause DROP NOT NULL;
     END IF;
     IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'car_downtime_intervals' AND column_name = 'is_ongoing') THEN
         ALTER TABLE car_downtime_intervals ADD COLUMN is_ongoing BOOLEAN NOT NULL DEFAULT TRUE;
@@ -489,6 +488,38 @@ BEGIN
     ALTER TABLE incidents ADD CONSTRAINT incidents_rescue_car_id_check CHECK (
         rescue_car_id IS NULL OR rescue_car_id IN ('E1', 'E2', 'E3', 'E4', 'E5')
     );
+
+    -- Ensure all timestamp columns are TIMESTAMPTZ across all tables
+    ALTER TABLE users ALTER COLUMN created_at TYPE TIMESTAMPTZ;
+    ALTER TABLE users ALTER COLUMN updated_at TYPE TIMESTAMPTZ;
+    ALTER TABLE credentials ALTER COLUMN created_at TYPE TIMESTAMPTZ;
+    ALTER TABLE credentials ALTER COLUMN updated_at TYPE TIMESTAMPTZ;
+    ALTER TABLE credentials ALTER COLUMN suspension_start TYPE TIMESTAMPTZ;
+    ALTER TABLE credentials ALTER COLUMN revoked_at TYPE TIMESTAMPTZ;
+    ALTER TABLE credentials ALTER COLUMN expires_at TYPE TIMESTAMPTZ;
+    ALTER TABLE access_authorization_events ALTER COLUMN timestamp TYPE TIMESTAMPTZ;
+    ALTER TABLE security_alerts ALTER COLUMN created_at TYPE TIMESTAMPTZ;
+    ALTER TABLE security_alerts ALTER COLUMN resolved_at TYPE TIMESTAMPTZ;
+    ALTER TABLE audit_log_chain ALTER COLUMN timestamp TYPE TIMESTAMPTZ;
+    ALTER TABLE trips ALTER COLUMN departure_time TYPE TIMESTAMPTZ;
+    ALTER TABLE trips ALTER COLUMN arrival_time TYPE TIMESTAMPTZ;
+    ALTER TABLE trips ALTER COLUMN created_at TYPE TIMESTAMPTZ;
+    ALTER TABLE hall_calls ALTER COLUMN created_at TYPE TIMESTAMPTZ;
+    ALTER TABLE hall_calls ALTER COLUMN assigned_at TYPE TIMESTAMPTZ;
+    ALTER TABLE hall_calls ALTER COLUMN approaching_at TYPE TIMESTAMPTZ;
+    ALTER TABLE hall_calls ALTER COLUMN arrived_at TYPE TIMESTAMPTZ;
+    ALTER TABLE hall_calls ALTER COLUMN completed_at TYPE TIMESTAMPTZ;
+    ALTER TABLE car_calls ALTER COLUMN created_at TYPE TIMESTAMPTZ;
+    ALTER TABLE car_calls ALTER COLUMN authorized_at TYPE TIMESTAMPTZ;
+    ALTER TABLE car_calls ALTER COLUMN command_sent_at TYPE TIMESTAMPTZ;
+    ALTER TABLE car_calls ALTER COLUMN completed_at TYPE TIMESTAMPTZ;
+    ALTER TABLE car_downtime_intervals ALTER COLUMN started_at TYPE TIMESTAMPTZ;
+    ALTER TABLE car_downtime_intervals ALTER COLUMN ended_at TYPE TIMESTAMPTZ;
+    ALTER TABLE car_downtime_intervals ALTER COLUMN created_at TYPE TIMESTAMPTZ;
+    ALTER TABLE system_heartbeats ALTER COLUMN timestamp TYPE TIMESTAMPTZ;
+    ALTER TABLE incidents ALTER COLUMN created_at TYPE TIMESTAMPTZ;
+    ALTER TABLE incidents ALTER COLUMN acknowledged_at TYPE TIMESTAMPTZ;
+    ALTER TABLE incidents ALTER COLUMN resolved_at TYPE TIMESTAMPTZ;
 END
 $$;
 
