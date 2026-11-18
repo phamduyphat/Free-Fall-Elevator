@@ -11,6 +11,25 @@ and control system. The project includes:
 
 The repository is also known as **Free-Fall-Elevator**.
 
+## Quick Start (Automated Scripts)
+
+To power on all subsystems with zero friction:
+
+```powershell
+# 1. One-time setup: installs dependencies & offers DB seeding
+.\setup.ps1
+
+# 2. Power on all subsystems (FastAPI backend + Vite React frontend)
+.\start.ps1
+
+# 3. Stop all running subsystems
+.\stop.ps1
+```
+
+*(Command Prompt / double-click shortcuts: `setup.bat`, `start.bat`, `stop.bat`)*
+
+---
+
 ## Requirements
 
 - Python 3.11 or newer
