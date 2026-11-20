@@ -106,6 +106,74 @@ class AdditionalOperationalTests(unittest.TestCase):
         self.assertTrue(recorded_args)
         self.assertTrue(all(dt.tzinfo == timezone.utc for dt in recorded_args))
 
+    def test_load_burst_api_endpoint(self):
+        from fastapi.testclient import TestClient
+        from main import app
+
+        client = TestClient(app)
+        response = client.post("/api/v1/operational/load/burst", json={
+            "count": 25,
+            "profile": "MORNING_PEAK",
+            "auto_step_seconds": 10,
+            "seed": 123
+        })
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["injected_count"], 25)
+        self.assertIn("MORNING", data["profile"])
+        self.assertIn("fleet_status", data)
+        self.assertIn("metrics", data)
+
+    def test_live_benchmark_api_endpoint(self):
+        from fastapi.testclient import TestClient
+        from main import app
+
+        client = TestClient(app)
+        response = client.post("/api/v1/operational/benchmark/live", json={
+            "scenario": "OFF_PEAK",
+            "reset_sim": False,
+            "seed": 99,
+            "wear_tear_enabled": True,
+            "strategy": "BOTTOM_PRIORITY"
+        })
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertIn("metrics", data)
+        self.assertIn("summary_text", data)
+        self.assertTrue(data["metrics"]["total_calls_submitted"] > 0)
+        self.assertIn("car_trips", data["metrics"])
+        self.assertIn("mean_wait_seconds", data["metrics"])
+        self.assertIn("trips", data)
+        self.assertTrue(len(data["trips"]) > 0)
+        self.assertIn("wear_spread_pct", data["metrics"])
+
+    def test_reset_all_counters_resets_total_traversed(self):
+        from fastapi.testclient import TestClient
+        from main import app
+
+        client = TestClient(app)
+        # First ensure cars have accumulated floors or trips
+        client.post("/api/v1/operational/load/burst", json={"count": 10, "auto_step_seconds": 15})
+        # Reset with scope=ALL
+        reset_resp = client.post("/api/v1/operational/wear-tear/reset", json={"scope": "ALL"})
+        self.assertEqual(reset_resp.status_code, 200)
+        data = reset_resp.json()
+        for cid in ("E1", "E2", "E3", "E4", "E5"):
+            self.assertEqual(data["car_stats"][cid]["total_floors"], 0)
+            self.assertEqual(data["car_stats"][cid]["total_trips"], 0)
+            self.assertEqual(data["car_stats"][cid]["floors_monthly"], 0)
+            self.assertEqual(data["car_stats"][cid]["floors_six_months"], 0)
+
+    def test_burst_injection_spreads_across_fleet_when_safe(self):
+        sim = OperationalSimulator(auto_advance=False)
+        sim.update_wear_tear_config({"enabled": True, "strategy": "BOTTOM_PRIORITY"})
+        from simulation.traffic_profiles import inject_load_burst
+        # Inject 20 calls in a burst
+        inject_load_burst(sim, count=20, profile="RANDOM", seed=42)
+        # Verify that all 4 residential elevators receive stops
+        for cid in ("E1", "E2", "E3", "E4"):
+            self.assertGreater(len(sim.cars[cid].stops), 0, f"Car {cid} received no stops during burst")
+
 
 if __name__ == "__main__":
     unittest.main()

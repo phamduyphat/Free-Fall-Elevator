@@ -18,6 +18,12 @@ from typing import Literal
 from uuid import uuid4
 from db import DbConnectionPool
 import asyncio
+from simulation.wear_tear import (
+    WearTearConfig,
+    calculate_wear_metrics,
+    run_wear_tear_benchmark,
+    select_best_car_for_wear,
+)
 
 CarAvailability = Literal["IN_SERVICE", "OCCUPIED", "MAINTENANCE", "FAULT", "EMERGENCY_UNAVAILABLE", "STALE"]
 HallDirection = Literal["UP", "DOWN"]
@@ -83,6 +89,13 @@ class Car:
     obstruction_started: int | None = None
     obstruction_alerted: bool = False
     message: str = ""
+    # Dual wear-and-tear counters
+    total_floors: int = 0
+    total_trips: int = 0
+    floors_monthly: int = 0
+    trips_monthly: int = 0
+    floors_six_months: int = 0
+    trips_six_months: int = 0
 
 
 @dataclass
@@ -237,6 +250,8 @@ class OperationalSimulator:
 
     def reset(self, *, base_time: datetime | None = None, backlog_limit: int | None = None) -> None:
         with self._lock:
+            if not hasattr(self, "wear_tear_config"):
+                self.wear_tear_config = WearTearConfig()
             if backlog_limit is not None:
                 self.backlog_limit = max(1, backlog_limit)
             self.cars: dict[str, Car] = {eid: Car(eid) for eid in self.ELEVATOR_IDS}
@@ -327,9 +342,31 @@ class OperationalSimulator:
         if not eligible:
             request.transition("QUEUED")
             return
+
         choices = [(self._eta_and_insertion(car, request.origin_floor, request.direction),
                     int(car.elevator_id[1:]), car) for car in eligible]
-        (eta, index), _, chosen = min(choices, key=lambda entry: (entry[0][0], entry[1]))
+
+        if request.call_type != "FREIGHT" and getattr(self, "wear_tear_config", None) and self.wear_tear_config.enabled:
+            eta_scores = {car.elevator_id: eta_info[0] for eta_info, _, car in choices}
+            insertion_indices = {car.elevator_id: eta_info[1] for eta_info, _, car in choices}
+            active_distances = {
+                cid: self.cars[cid].floors_six_months
+                if self.wear_tear_config.strategy in ("BOTTOM_PRIORITY", "TOP_HALT")
+                else self.cars[cid].floors_monthly
+                for cid in ("E1", "E2", "E3", "E4")
+                if cid in self.cars
+            }
+            chosen = select_best_car_for_wear(
+                eligible_cars=eligible,
+                car_distances=active_distances,
+                config=self.wear_tear_config,
+                current_time=self._now(),
+                eta_scores=eta_scores,
+            )
+            index = insertion_indices[chosen.elevator_id]
+        else:
+            (eta, index), _, chosen = min(choices, key=lambda entry: (len(entry[2].stops), entry[0][0], entry[1]))
+
         chosen.stops.insert(index, Stop(request.origin_floor, "HALL", request.request_id))
         self._event("ASSIGNMENT", chosen.elevator_id, f"Hall call {request.request_id} assigned")
         request.assigned_car = chosen.elevator_id
@@ -712,6 +749,12 @@ class OperationalSimulator:
         traversed = abs(_position(stop.floor) - _position(orig_floor))
         travel_sec = max(0.0, (now - dep_time).total_seconds())
         if traversed > 0 or stop.kind in ("CAR", "SERVICE"):
+            car.total_floors += traversed
+            car.total_trips += 1
+            car.floors_monthly += traversed
+            car.trips_monthly += 1
+            car.floors_six_months += traversed
+            car.trips_six_months += 1
             self.trips.append(
                 {
                     "trip_id": str(uuid4()),
@@ -758,6 +801,14 @@ class OperationalSimulator:
     def _advance_locked(self, seconds: int) -> None:
         for _ in range(seconds):
             self.sim_tick += 1
+            if self.sim_tick > 0 and self.sim_tick % (30 * 86400) == 0:
+                for c in self.cars.values():
+                    c.floors_monthly = 0
+                    c.trips_monthly = 0
+            if self.sim_tick > 0 and self.sim_tick % (180 * 86400) == 0:
+                for c in self.cars.values():
+                    c.floors_six_months = 0
+                    c.trips_six_months = 0
             if self.sim_tick % 10 == 0:
                 self.heartbeats.append({"timestamp": self._now(), "status": "UP"})
             self._escalate_incidents()
@@ -2299,6 +2350,67 @@ class OperationalSimulator:
                     car.last_seen_tick = self.sim_tick
 
         return True
+
+    def get_wear_tear_config(self) -> dict:
+        with self._lock:
+            if not hasattr(self, "wear_tear_config"):
+                self.wear_tear_config = WearTearConfig()
+            return self.wear_tear_config.to_dict()
+
+    def update_wear_tear_config(self, data: dict) -> dict:
+        with self._lock:
+            self.wear_tear_config = WearTearConfig.from_dict(data)
+            return self.wear_tear_config.to_dict()
+
+    def get_wear_tear_status(self) -> dict:
+        with self._lock:
+            if not hasattr(self, "wear_tear_config"):
+                self.wear_tear_config = WearTearConfig()
+            car_stats = {}
+            distances_monthly = {}
+            distances_six_months = {}
+            for cid in self.ELEVATOR_IDS:
+                car = self.cars[cid]
+                car_stats[cid] = {
+                    "elevator_id": cid,
+                    "total_floors": car.total_floors,
+                    "total_trips": car.total_trips,
+                    "floors_monthly": car.floors_monthly,
+                    "trips_monthly": car.trips_monthly,
+                    "floors_six_months": car.floors_six_months,
+                    "trips_six_months": car.trips_six_months,
+                }
+                if cid in ("E1", "E2", "E3", "E4"):
+                    distances_monthly[cid] = car.floors_monthly
+                    distances_six_months[cid] = car.floors_six_months
+
+            monthly_metrics = calculate_wear_metrics(distances_monthly, self.wear_tear_config)
+            six_month_metrics = calculate_wear_metrics(distances_six_months, self.wear_tear_config)
+
+            return {
+                "config": self.wear_tear_config.to_dict(),
+                "car_stats": car_stats,
+                "monthly": asdict(monthly_metrics),
+                "six_months": asdict(six_month_metrics),
+            }
+
+    def reset_wear_tear_counters(self, scope: str = "ALL") -> dict:
+        with self._lock:
+            scope_clean = str(scope).upper()
+            for car in self.cars.values():
+                if scope_clean in ("MONTHLY", "ALL"):
+                    car.floors_monthly = 0
+                    car.trips_monthly = 0
+                if scope_clean in ("SIX_MONTHS", "ALL"):
+                    car.floors_six_months = 0
+                    car.trips_six_months = 0
+                if scope_clean in ("LIFETIME", "ALL"):
+                    car.total_floors = 0
+                    car.total_trips = 0
+            if scope_clean in ("LIFETIME", "ALL"):
+                self.trips.clear()
+            return self.get_wear_tear_status()
+
 
 
 # The singleton drives demo API views; instantiate a new simulator for isolated tests.

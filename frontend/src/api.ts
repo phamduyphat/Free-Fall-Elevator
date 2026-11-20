@@ -60,13 +60,13 @@ export async function authorizedApi<T>(
   return result;
 }
 
-export async function postApi(path: string, data: object): Promise<ApiResult> {
+export async function postApi<T = ApiResult>(path: string, data: object): Promise<T> {
   const response = await fetch(path, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(data),
   });
-  const result = await response.json() as ApiResult;
+  const result = await response.json() as T & { detail?: string; message?: string; reason_code?: string | null };
   if (!response.ok) {
     const baseMessage = result.message ?? result.detail ?? `HTTP ${response.status}`;
     throw new Error(result.reason_code ? `[${result.reason_code}] ${baseMessage}` : baseMessage);

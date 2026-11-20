@@ -104,10 +104,9 @@ npm run dev
 
 1. Start the backend with `python main.py`.
 2. In a separate terminal, start the frontend with `cd frontend; npm run dev`.
-3. Open `http://localhost:5173` and click **"Simulator (stub)"** in the sidebar:
-   - **Shaft view:** Real-time animated elevator movement for cars `E1`–`E5` across B1 and Floors 1–30.
-   - **Car Operating Panel (COP):** Swipe simulated cards (e.g. `ADMIN-CARD-0001`), select destination floors, and trigger `HELP` or `MEDICAL` emergencies.
-   - **Hall panel:** Submit up/down hall calls or dispatch `E5` freight from any floor.
+3. Open `http://localhost:5173`:
+   - **Simulator (stub):** Real-time animated elevator movement for cars `E1`–`E5` across B1 and Floors 1–30, Car Operating Panel (COP), and hall call dispatch.
+   - **Wear & Tear:** Live accumulated distance balancing for residential units `E1`–`E4`, 5 configurable balancing strategies, dual trip counters (30-day monthly and 180-day 6-month), and reproducible 6-month synthetic load benchmarks with SVG line graphs.
 
 The application initializes the shared `DbConnectionPool` during startup and
 closes it during shutdown. The pool can also be used directly by other

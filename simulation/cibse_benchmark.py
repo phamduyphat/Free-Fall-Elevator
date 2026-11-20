@@ -144,6 +144,13 @@ class BenchmarkMetrics:
     dropped_requests_count: int = 0
     queue_bounded_pass: bool = True
 
+    # Wear & Tear Balancing Metrics
+    wear_tear_enabled: bool = True
+    wear_tear_strategy: str = "BOTTOM_PRIORITY"
+    wear_spread_pct: float = 0.0
+    wear_target_met: bool = True
+    trips: list[dict[str, Any]] = field(default_factory=list)
+
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
@@ -171,6 +178,12 @@ class BenchmarkMetrics:
             f"  Reassignments   : {self.total_reassignments}",
             f"  NO_BOARDING Flag: {self.no_boarding_empty_calls}",
             f"-----------------------------------------------------------------------",
+            f"WEAR & TEAR BALANCING (E1-E4 RESIDENTIAL DISTANCE SPREAD):",
+            f"  Balancing Active: {'ENABLED' if self.wear_tear_enabled else 'DISABLED'} (Strategy: {self.wear_tear_strategy})",
+            f"  Distance Spread : {self.wear_spread_pct:.2f}%  (Monthly Target: <= 1.8%)",
+            f"  Wear Target Met?: {'PASSED [OK]' if self.wear_target_met else 'FAILED [X]'}",
+            f"  Car Floors      : " + ", ".join(f"{cid}: {self.car_floors_traversed.get(cid, 0)} fl" for cid in ("E1", "E2", "E3", "E4")),
+            f"-----------------------------------------------------------------------",
             f"FLEET UTILIZATION (TRIPS & DISTANCE):",
             f"  Total Trips Completed : {self.total_trips}",
             f"  Total Floors Traversed: {self.total_floors_traversed}",
@@ -190,6 +203,8 @@ def run_cibse_benchmark(
     scenario: BenchmarkScenario,
     *,
     reset_sim: bool = True,
+    wear_tear_enabled: bool | None = None,
+    wear_tear_strategy: str | None = None,
 ) -> BenchmarkMetrics:
     """
     Execute a reproducible CIBSE Guide D benchmark against OperationalSimulator.
@@ -198,6 +213,13 @@ def run_cibse_benchmark(
     """
     if reset_sim:
         sim.reset(base_time=scenario.base_time)
+
+    if wear_tear_enabled is not None:
+        sim.wear_tear_config.enabled = wear_tear_enabled
+    if wear_tear_strategy is not None:
+        sim.wear_tear_config.strategy = wear_tear_strategy
+
+    start_trip_idx = len(sim.trips)
 
     rng = random.Random(scenario.seed)
     total_submitted = 0
@@ -298,16 +320,45 @@ def run_cibse_benchmark(
     else:  # STRESS
         target_met = peak_queue <= 100
 
-    # Per-car trip and traversed floor breakdown
+    # Calculate trips and traversed floors specifically for this benchmark run
+    benchmark_trips = list(sim.trips[start_trip_idx:])
+
     car_trips: dict[str, int] = {eid: 0 for eid in sim.ELEVATOR_IDS}
     car_floors: dict[str, int] = {eid: 0 for eid in sim.ELEVATOR_IDS}
     car_starts: dict[str, int] = {eid: 0 for eid in sim.ELEVATOR_IDS}
 
-    for trip in sim.trips:
+    for trip in benchmark_trips:
         eid = trip["elevator_id"]
         car_trips[eid] = car_trips.get(eid, 0) + 1
         car_floors[eid] = car_floors.get(eid, 0) + trip.get("floors_traversed", 0)
         car_starts[eid] = car_starts.get(eid, 0) + trip.get("motor_starts", 1)
+
+    # Wear & Tear metrics for residential units E1-E4
+    res_floors = [car_floors[cid] for cid in ("E1", "E2", "E3", "E4")]
+    max_f = max(res_floors) if res_floors else 0
+    min_f = min(res_floors) if res_floors else 0
+    wear_spread = ((max_f - min_f) / max_f * 100.0) if max_f > 0 else 0.0
+    target_limit = sim.wear_tear_config.monthly_target_pct if hasattr(sim, "wear_tear_config") else 1.8
+    wear_target_met = wear_spread <= target_limit
+
+    # Prepare serializable list of individual trips
+    serializable_trips: list[dict[str, Any]] = []
+    for t in benchmark_trips:
+        dep = t.get("departure_time")
+        arr = t.get("arrival_time")
+        serializable_trips.append({
+            "trip_id": t.get("trip_id", ""),
+            "elevator_id": t.get("elevator_id", ""),
+            "origin_floor": t.get("origin_floor", 1),
+            "destination_floor": t.get("destination_floor", 1),
+            "departure_time": dep.isoformat() if hasattr(dep, "isoformat") else str(dep or ""),
+            "arrival_time": arr.isoformat() if hasattr(arr, "isoformat") else str(arr or ""),
+            "travel_time_seconds": t.get("travel_time_seconds", 0.0),
+            "floors_traversed": t.get("floors_traversed", 0),
+            "motor_starts": t.get("motor_starts", 1),
+            "is_service_run": t.get("is_service_run", False),
+            "traffic_profile": t.get("traffic_profile", "NORMAL"),
+        })
 
     reassignments = sum(r.reassignment_count for r in sim.hall_calls.values())
     no_boarding_count = sum(1 for r in sim.hall_calls.values() if r.no_boarding)
@@ -336,14 +387,19 @@ def run_cibse_benchmark(
         total_reassignments=reassignments,
         no_boarding_empty_calls=no_boarding_count,
         mean_travel_seconds=mean(travel_times) if travel_times else 0.0,
-        total_trips=len(sim.trips),
-        total_floors_traversed=sum(t.get("floors_traversed", 0) for t in sim.trips),
+        total_trips=len(benchmark_trips),
+        total_floors_traversed=sum(t.get("floors_traversed", 0) for t in benchmark_trips),
         car_trips=car_trips,
         car_floors_traversed=car_floors,
         car_motor_starts=car_starts,
         peak_simultaneous_active_queue=peak_queue,
         dropped_requests_count=0,
         queue_bounded_pass=(peak_queue <= 100),
+        wear_tear_enabled=sim.wear_tear_config.enabled if hasattr(sim, "wear_tear_config") else True,
+        wear_tear_strategy=sim.wear_tear_config.strategy if hasattr(sim, "wear_tear_config") else "BOTTOM_PRIORITY",
+        wear_spread_pct=round(wear_spread, 2),
+        wear_target_met=wear_target_met,
+        trips=serializable_trips,
     )
 
 
