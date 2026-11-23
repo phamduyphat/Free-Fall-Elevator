@@ -97,7 +97,8 @@ class SimulationClock:
         """Open a single persistent asyncpg connection for the current clock loop."""
         dsn = os.getenv("DATABASE_URL", DEFAULT_DSN)
         try:
-            return await asyncpg.connect(dsn=dsn, timeout=1.0)
+            from db import connect_db
+            return await connect_db(dsn=dsn, timeout=1.0)
         except (OSError, asyncpg.PostgresError, TimeoutError):
             return None
 

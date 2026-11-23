@@ -201,10 +201,10 @@ class OperationalSimulator:
             return
 
         async def _connect_and_load() -> None:
-            import asyncpg
+            from db import connect_db
 
             dsn = os.getenv("DATABASE_URL", DEFAULT_DSN)
-            conn = await asyncpg.connect(dsn=dsn, timeout=1.0)
+            conn = await connect_db(dsn=dsn, timeout=1.0)
             try:
                 await self.load_from_db(conn)
             finally:
