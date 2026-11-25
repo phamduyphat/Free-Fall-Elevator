@@ -2,8 +2,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { authorizedApi, postApi, requestCabDestination, swipeCabCard } from "./api.ts";
 import type { ApiResult } from "./api.ts";
+import { WearPanel } from "./Wear.tsx";
+import { announce, initialVoiceEnabled, setVoiceEnabled, speechSupported, spokenFloor, subscribeAnnouncements } from "./announce.ts";
 
-type View = "overview" | "simulation" | "wear_tear" | "elevators" | "credentials" | "security" | "analytics" | "audit";
+type View = "overview" | "simulation" | "elevators" | "wear" | "credentials" | "security" | "analytics" | "audit";
 type ElevatorStatus = {
   elevator_id: string;
   state: "IN_SERVICE" | "OCCUPIED" | "MAINTENANCE" | "FAULT" | "EMERGENCY_UNAVAILABLE" | "STALE";
@@ -18,6 +20,8 @@ type ElevatorStatus = {
   medical_run?: boolean;
   rescue_active?: boolean;
   message_to_occupants?: string;
+  floors_month?: number;
+  floors_period?: number;
 };
 type FleetResponse = {
   elevators: ElevatorStatus[];
@@ -94,103 +98,15 @@ const fromLocalDateTimeInput = (value: string): string => {
   return Number.isNaN(parsed.getTime()) ? value : parsed.toISOString();
 };
 
-const navigation: { id: View; label: string; icon: ReactNode }[] = [
-  {
-    id: "overview",
-    label: "Overview",
-    icon: (
-      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-        <rect x="3" y="3" width="7" height="9" rx="1" />
-        <rect x="14" y="3" width="7" height="5" rx="1" />
-        <rect x="14" y="12" width="7" height="9" rx="1" />
-        <rect x="3" y="16" width="7" height="5" rx="1" />
-      </svg>
-    ),
-  },
-  {
-    id: "simulation",
-    label: "Simulator (stub)",
-    icon: (
-      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-        <rect x="4" y="2" width="16" height="20" rx="2" />
-        <path d="M9 10l3-3 3 3" />
-        <path d="M9 14l3 3 3-3" />
-      </svg>
-    ),
-  },
-  {
-    id: "wear_tear",
-    label: "Wear & Tear",
-    icon: (
-      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-        <path d="M12 3v18" />
-        <path d="M6 7l6-2 6 2" />
-        <path d="M6 7L3 14h6L6 7z" />
-        <path d="M18 7l-3 7h6l-3-7z" />
-        <path d="M8 21h8" />
-      </svg>
-    ),
-  },
-  {
-    id: "elevators",
-    label: "Elevators",
-    icon: (
-      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-        <rect x="3" y="3" width="18" height="18" rx="2" />
-        <line x1="12" y1="3" x2="12" y2="21" />
-        <path d="M7 8l2-2 2 2" />
-        <path d="M17 16l-2 2-2-2" />
-      </svg>
-    ),
-  },
-  {
-    id: "credentials",
-    label: "Credentials",
-    icon: (
-      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-        <rect x="3" y="4" width="18" height="16" rx="2" />
-        <circle cx="9" cy="10" r="2" />
-        <path d="M15 8h2" />
-        <path d="M15 12h2" />
-        <path d="M7 16h10" />
-      </svg>
-    ),
-  },
-  {
-    id: "security",
-    label: "Incidents & diagnostics",
-    icon: (
-      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-        <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
-        <line x1="12" y1="9" x2="12" y2="13" />
-        <line x1="12" y1="17" x2="12.01" y2="17" />
-      </svg>
-    ),
-  },
-  {
-    id: "analytics",
-    label: "Analytics",
-    icon: (
-      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-        <line x1="18" y1="20" x2="18" y2="10" />
-        <line x1="12" y1="20" x2="12" y2="4" />
-        <line x1="6" y1="20" x2="6" y2="14" />
-        <line x1="2" y1="20" x2="22" y2="20" />
-      </svg>
-    ),
-  },
-  {
-    id: "audit",
-    label: "Audit log",
-    icon: (
-      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-        <polyline points="14 2 14 8 20 8" />
-        <line x1="16" y1="13" x2="8" y2="13" />
-        <line x1="16" y1="17" x2="8" y2="17" />
-      </svg>
-    ),
-  },
+const navigation: { id: View; label: string; icon: string }[] = [
+  { id: "overview", label: "Overview", icon: "O" },
+  { id: "simulation", label: "Simulator (stub)", icon: "S" },
+  { id: "elevators", label: "Elevators", icon: "E" },
+  { id: "wear", label: "Wear & tear", icon: "W" },
+  { id: "credentials", label: "Credentials", icon: "C" },
+  { id: "security", label: "Incidents & diagnostics", icon: "!" },
+  { id: "analytics", label: "Analytics", icon: "A" },
+  { id: "audit", label: "Audit log", icon: "L" },
 ];
 
 async function loadFleet(): Promise<FleetResponse> {
@@ -214,6 +130,7 @@ function FleetCards({ fleet, renderActions }: { fleet: FleetResponse | null; ren
       <div className="floor-display">{floorLabel(car.current_floor)}<span>floor</span></div>
       <div className="card-details"><span>Direction</span><strong>{car.direction}</strong></div>
       <div className="card-details"><span>Next stop</span><strong>{floorLabel(car.target_floor)}</strong></div>
+      {car.floors_month !== undefined && <div className="card-details"><span>Trip counter (month)</span><strong>{car.floors_month.toLocaleString()} floors</strong></div>}
       {car.active_fault && <div className="card-details"><span>Active fault</span><strong style={{ color: "#c8514c" }}>{car.active_fault}</strong></div>}
       <p className="card-note">{car.message_to_occupants || car.message}</p>
       {renderActions && renderActions(car)}
@@ -408,55 +325,6 @@ function Elevators({ fleet, refresh, token, role }: { fleet: FleetResponse | nul
 
 const SIM_FLOORS = [-1, ...Array.from({ length: 30 }, (_, index) => index + 1)];
 
-type LiveBenchmarkTrip = {
-  trip_id: string;
-  elevator_id: string;
-  origin_floor: number;
-  destination_floor: number;
-  departure_time: string;
-  arrival_time: string;
-  travel_time_seconds: number;
-  floors_traversed: number;
-  motor_starts: number;
-  is_service_run: boolean;
-  traffic_profile: string;
-};
-
-type LiveBenchmarkMetrics = {
-  scenario: string;
-  total_calls: number;
-  completed_calls: number;
-  mean_wait_time: number;
-  median_wait_time: number;
-  p90_wait_time: number;
-  p95_wait_time: number;
-  max_wait_time: number;
-  mean_transit_time: number;
-  mean_journey_time: number;
-  max_hall_queue_depth: number;
-  awt_target_met: boolean;
-  p95_target_met: boolean;
-  queue_target_met: boolean;
-  car_trips: Record<string, number>;
-  wear_tear_enabled?: boolean;
-  wear_tear_strategy?: string;
-  wear_spread_pct?: number;
-  wear_target_met?: boolean;
-};
-
-type LiveBenchmarkResponse = {
-  metrics: LiveBenchmarkMetrics;
-  summary_text: string;
-  trips?: LiveBenchmarkTrip[];
-};
-
-type LoadBurstResponse = {
-  injected_count: number;
-  profile: string;
-  active_calls_count: number;
-  auto_step_seconds: number;
-};
-
 function Simulation({ fleet, onFleetRefresh }: { fleet: FleetResponse | null; onFleetRefresh: () => Promise<void> }) {
   const [selectedId, setSelectedId] = useState("E1");
   const [cardId, setCardId] = useState("ADMIN-CARD-0001");
@@ -471,43 +339,40 @@ function Simulation({ fleet, onFleetRefresh }: { fleet: FleetResponse | null; on
   const cars = fleet?.elevators ?? [];
   const selectedCar = cars.find((car) => car.elevator_id === selectedId);
 
-  // High-volume load generator & auto-traffic state
-  const [loadProfile, setLoadProfile] = useState<string>("RANDOM");
-  const [customBurstCount, setCustomBurstCount] = useState<number>(50);
-  const [autoStepSeconds, setAutoStepSeconds] = useState<number>(0);
-  const [autoTrafficRunning, setAutoTrafficRunning] = useState<boolean>(false);
-  const [autoTrafficRate, setAutoTrafficRate] = useState<number>(3);
-  const [autoTrafficInjected, setAutoTrafficInjected] = useState<number>(0);
-  const [loadStatus, setLoadStatus] = useState<string>("");
+  // UI-6 / UI-8: in-car announcements for the selected car (arrival, direction, floor).
+  const lastCarRef = useRef<{ id: string; floor: number; direction: string; door: string } | null>(null);
+  useEffect(() => {
+    if (!selectedCar) return;
+    const prev = lastCarRef.current;
+    const now = { id: selectedCar.elevator_id, floor: selectedCar.current_floor, direction: selectedCar.direction, door: selectedCar.door_state };
+    lastCarRef.current = now;
+    if (!prev || prev.id !== now.id) return;
+    if (now.door === "OPEN" && prev.door !== "OPEN") {
+      announce(`${now.id}. Arrived at ${spokenFloor(now.floor)}.`, { replace: true });
+    } else if (now.direction !== prev.direction && now.direction !== "IDLE") {
+      announce(`${now.id} going ${now.direction === "UP" ? "up" : "down"}.`, { replace: true });
+    } else if (now.floor !== prev.floor) {
+      announce(`${spokenFloor(now.floor)}.`, { replace: true });
+    }
+  }, [selectedCar]);
 
-  // Live Benchmark state
-  const [benchScenario, setBenchScenario] = useState<string>("MORNING_PEAK");
-  const [benchResetSim, setBenchResetSim] = useState<boolean>(false);
-  const [benchWearEnabled, setBenchWearEnabled] = useState<boolean>(true);
-  const [benchWearStrategy, setBenchWearStrategy] = useState<string>("BOTTOM_PRIORITY");
-  const [benchTripFilter, setBenchTripFilter] = useState<string>("ALL");
-  const [benchTripSearch, setBenchTripSearch] = useState<string>("" );
-  const [benchRunning, setBenchRunning] = useState<boolean>(false);
-  const [benchResult, setBenchResult] = useState<LiveBenchmarkResponse | null>(null);
-  const [showBenchSummaryText, setShowBenchSummaryText] = useState<boolean>(false);
-  const [showBenchTripsTable, setShowBenchTripsTable] = useState<boolean>(true);
-
-  const allBenchmarkTrips = useMemo(() => benchResult?.trips ?? [], [benchResult]);
-  const filteredBenchmarkTrips = useMemo(() => {
-    return allBenchmarkTrips.filter((t) => {
-      if (benchTripFilter !== "ALL" && t.elevator_id !== benchTripFilter) return false;
-      if (benchTripSearch.trim()) {
-        const query = benchTripSearch.toLowerCase();
-        const originStr = floorLabel(t.origin_floor).toLowerCase();
-        const destStr = floorLabel(t.destination_floor).toLowerCase();
-        const profileStr = (t.traffic_profile || "").toLowerCase();
-        if (!originStr.includes(query) && !destStr.includes(query) && !profileStr.includes(query)) {
-          return false;
-        }
-      }
-      return true;
-    });
-  }, [allBenchmarkTrips, benchTripFilter, benchTripSearch]);
+  // UI-9: non-visual arrival announcement for the hall-panel request.
+  const lastHallKey = useRef<string | null>(null);
+  useEffect(() => {
+    if (!hallRequest) {
+      lastHallKey.current = null;
+      return;
+    }
+    const key = `${hallRequest.request_id}:${hallRequest.status}`;
+    const previous = lastHallKey.current;
+    if (previous === key) return;
+    lastHallKey.current = key;
+    const arrived = hallRequest.status === "ARRIVED" || hallRequest.status === "COMPLETED";
+    if (arrived && previous !== null && previous.startsWith(`${hallRequest.request_id}:`) && !previous.endsWith(":COMPLETED")) {
+      const heading = hallRequest.direction ? `, going ${hallRequest.direction === "UP" ? "up" : "down"}` : "";
+      announce(`Car ${hallRequest.assigned_car ?? ""} has arrived at ${spokenFloor(hallRequest.origin_floor)}${heading}.`);
+    }
+  }, [hallRequest]);
 
   useEffect(() => {
     if (!updating) return;
@@ -597,72 +462,6 @@ function Simulation({ fleet, onFleetRefresh }: { fleet: FleetResponse | null; on
     });
   };
 
-  // High-volume load burst injector
-  const handleInjectBurst = async (count: number) => {
-    if (busy || benchRunning) return;
-    setBusy(true);
-    try {
-      const res = await postApi<LoadBurstResponse>("/api/v1/operational/load/burst", {
-        count,
-        profile: loadProfile,
-        auto_step_seconds: autoStepSeconds,
-      });
-      setLoadStatus(`✓ Injected ${res.injected_count} ${res.profile} calls. Active hall calls: ${res.active_calls_count}.`);
-      await onFleetRefresh();
-    } catch (err) {
-      setLoadStatus(err instanceof Error ? `Failed: ${err.message}` : "Failed to inject burst");
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  // Automatic background load generator
-  useEffect(() => {
-    if (!autoTrafficRunning) return;
-    let active = true;
-    const interval = window.setInterval(async () => {
-      try {
-        const res = await postApi<LoadBurstResponse>("/api/v1/operational/load/burst", {
-          count: autoTrafficRate,
-          profile: loadProfile,
-          auto_step_seconds: 0,
-        });
-        if (active) {
-          setAutoTrafficInjected((prev) => prev + res.injected_count);
-          await onFleetRefresh();
-        }
-      } catch {
-        // Continue auto-traffic interval even on transient errors
-      }
-    }, 1600);
-    return () => {
-      active = false;
-      window.clearInterval(interval);
-    };
-  }, [autoTrafficRunning, autoTrafficRate, loadProfile, onFleetRefresh]);
-
-  // Live benchmark runner on active simulator
-  const handleRunLiveBenchmark = async () => {
-    if (benchRunning || busy) return;
-    setBenchRunning(true);
-    setLoadStatus(`Running live CIBSE benchmark (${benchScenario}) with wear balancing ${benchWearEnabled ? `[${benchWearStrategy}]` : "DISABLED"}...`);
-    try {
-      const res = await postApi<LiveBenchmarkResponse>("/api/v1/operational/benchmark/live", {
-        scenario: benchScenario,
-        reset_sim: benchResetSim,
-        wear_tear_enabled: benchWearEnabled,
-        strategy: benchWearStrategy,
-      });
-      setBenchResult(res);
-      setLoadStatus(`✓ Benchmark "${benchScenario}" completed! AWT: ${res.metrics.mean_wait_time.toFixed(1)}s, Wear Spread: ${res.metrics.wear_spread_pct !== undefined ? `${res.metrics.wear_spread_pct.toFixed(2)}%` : "—"}.`);
-      await onFleetRefresh();
-    } catch (err) {
-      setLoadStatus(err instanceof Error ? `Benchmark error: ${err.message}` : "Benchmark failed");
-    } finally {
-      setBenchRunning(false);
-    }
-  };
-
   return <section className="simulation-page">
     <PageHeader eyebrow="Mode 1 · test-stub integration" title="Elevator operations" detail="Hall calls, direction-aware dispatch, and ACS-authorized destinations." action={<button className="button primary" onClick={() => setUpdating((on) => !on)}>{updating ? "Pause updates" : "Resume updates"}</button>} />
     <div className="simulation-notice"><strong>Software test stub</strong><span>These car positions come from the in-memory backend simulator. They are NOT live equipment readings. Pausing updates does not stop the server.</span><span className="srs-tag">SRS SWI-2</span></div>
@@ -670,7 +469,7 @@ function Simulation({ fleet, onFleetRefresh }: { fleet: FleetResponse | null; on
       <div className="shaft-panel">
         <div className="shaft-labels">{[...SIM_FLOORS].reverse().map((floor) => <span key={floor}>{floorLabel(floor)}</span>)}</div>
         <div className="shaft-grid">{[...SIM_FLOORS].reverse().map((floor) => <div className="floor-line" key={floor}><span>{floor === -1 ? "Basement 1" : `Floor ${floor}`}</span></div>)}
-          {cars.map((car) => <div className={`sim-car ${isEmergencyCar(car) ? "emergency-car" : ""} ${car.state === "MAINTENANCE" ? "maintenance-car" : ""}`} key={car.elevator_id} style={{ bottom: `${((car.current_floor === -1 ? 0 : car.current_floor) / 30) * 100}%`, left: `${(Number(car.elevator_id.slice(1)) - 1) * 20 + 1}%` }} title={`${car.elevator_id}: ${floorLabel(car.current_floor)}`}>
+          {cars.map((car) => <div className={`sim-car ${isEmergencyCar(car) ? "emergency-car" : ""} ${car.state === "MAINTENANCE" ? "maintenance-car" : ""}`} key={car.elevator_id} style={{ bottom: `${(((car.current_floor === -1 ? 0 : car.current_floor) + 0.5) / SIM_FLOORS.length) * 100}%`, left: `${(Number(car.elevator_id.slice(1)) - 1) * 20 + 1}%` }} title={`${car.elevator_id}: ${floorLabel(car.current_floor)}`}>
             <div className="sim-car-header"><strong>{car.elevator_id}</strong><span>{car.direction === "UP" ? "↑" : car.direction === "DOWN" ? "↓" : "·"}</span></div>
             <small>{floorLabel(car.current_floor)}</small>
           </div>)}
@@ -680,399 +479,6 @@ function Simulation({ fleet, onFleetRefresh }: { fleet: FleetResponse | null; on
         <div className="panel"><div className="section-heading"><div><p className="eyebrow">UI-8 · SEC-2.6</p><h2>{selectedId} operating panel</h2></div><span className={`state-pill ${selectedCar?.available ? "ok" : isEmergencyCar(selectedCar) ? "danger" : "warn"}`}>{carDisplayState(selectedCar)}</span></div><div className="simulation-toolbar"><label>Selected car<select value={selectedId} onChange={(event) => setSelectedId(event.target.value)}>{["E1", "E2", "E3", "E4", "E5"].map((id) => <option key={id}>{id}</option>)}</select></label><label className="card-reader-field">Card reader<input value={cardId} onChange={(event) => setCardId(event.target.value)} aria-label="Simulated card credential" /></label><button className="button secondary" disabled={busy || !selectedCar} onClick={swipe}>Present card</button></div><div className="car-state-grid"><div><span>Floor</span><strong>{floorLabel(selectedCar?.current_floor ?? null)}</strong></div><div><span>Direction</span><strong>{selectedCar?.direction ?? "—"}</strong></div><div><span>Door</span><strong>{selectedCar?.door_state ?? "—"}</strong></div><div><span>Next stop</span><strong>{floorLabel(selectedCar?.target_floor ?? null)}</strong></div></div><p className={isWarningOrError(announcement) ? "authorization-feedback danger-text" : "authorization-feedback"} aria-live="polite">{announcement}</p><div className="control-row"><button className="button secondary" disabled={busy || !selectedCar} onClick={() => doorCommand("OPEN")}>Door open</button><button className="button secondary" disabled={busy || !selectedCar || Boolean(selectedCar?.rescue_active)} title={selectedCar?.rescue_active ? "Door close disabled during active rescue wait" : undefined} onClick={() => doorCommand("CLOSE")}>Door close</button><button className="button emergency-button" disabled={busy || !selectedCar} onClick={() => emergency("HELP")}>Emergency / help</button><button className="button medical-button" disabled={busy || !selectedCar} onClick={() => emergency("MEDICAL")}>Medical</button></div>{selectedId === "E5" && <div className="hall-controls" style={{ marginTop: "12px" }}><label>E5 service floor<select value={serviceFloor} onChange={(e) => setServiceFloor(e.target.value)}>{Array.from({ length: 30 }, (_, i) => i + 1).map((f) => <option key={f} value={f}>Floor {f}</option>)}</select></label><label>Purpose<input value={servicePurpose} onChange={(e) => setServicePurpose(e.target.value)} /></label><button className="button secondary freight-button" disabled={busy || !selectedCar?.available} onClick={startE5ServiceRun}>Start E5 Service Run</button></div>}<div className="destination-panel"><strong>Destination keys</strong><div className="destination-keys"><button disabled={busy || !selectedCar?.available || selectedId === "E5"} onClick={() => selectDestination(-1)}>B1</button>{Array.from({ length: 30 }, (_, index) => index + 1).map((floor) => <button disabled={busy || !selectedCar?.available} key={floor} onClick={() => selectDestination(floor)}>{floor}</button>)}</div></div></div>
         <div className="panel"><div className="section-heading"><div><p className="eyebrow">UI-9 · FR-1.3 to FR-1.7</p><h2>Hall panel</h2></div></div><div className="hall-controls"><label>Call floor<select value={hallFloor} onChange={(event) => setHallFloor(event.target.value)}>{SIM_FLOORS.map((floor) => <option key={floor} value={floor}>{floor === -1 ? "B1" : `Floor ${floor}`}</option>)}</select></label><button className="button secondary" disabled={busy || hallFloor === "30"} onClick={() => hallCall("ORDINARY", "UP")}>↑ Up</button><button className="button secondary" disabled={busy || hallFloor === "-1"} onClick={() => hallCall("ORDINARY", "DOWN")}>↓ Down</button><button className="button secondary freight-button" disabled={busy || hallFloor === "-1"} onClick={() => hallCall("FREIGHT")}>E5 Freight</button></div>{hallRequest && <div className="request-feedback" aria-live="polite"><strong>Request status: </strong>{hallRequest.status} · {hallRequest.assigned_car ?? "Unassigned"} · wait {hallRequest.wait_seconds ?? "—"}s</div>}</div>
         <div className="panel"><div className="section-heading"><div><p className="eyebrow">UI-3 · monitoring</p><h2>Fleet state and calls</h2></div></div><div className="sim-car-list">{cars.map((car) => <div className="sim-car-row" key={car.elevator_id}><span className="elevator-id">{car.elevator_id}</span><span className="sim-direction">{car.direction}</span><strong>{floorLabel(car.current_floor)}</strong><span>{carDisplayState(car)}</span><span className="weight">{car.pending_stops} stops</span></div>)}</div><p className="muted dark">{calls.filter((request) => request.status !== "COMPLETED").length} active hall requests. Data resets when the application restarts.</p></div>
-      </div>
-    </div>
-
-    {/* Dedicated Section for Live Benchmark & High-Volume Load Generator */}
-    <div className="sim-tools-grid">
-      {/* High-Volume Simulated Load & Continuous Auto-Pilot */}
-      <div className="panel">
-        <div className="section-heading">
-          <div>
-            <p className="eyebrow">CAP-1 · Load Testing</p>
-            <h2>Simulated Load Generator</h2>
-          </div>
-          <span className={`state-pill ${autoTrafficRunning ? "ok" : "warn"}`}>
-            {autoTrafficRunning ? "Auto-Traffic Active" : "Manual / Ready"}
-          </span>
-        </div>
-
-        <p className="muted dark" style={{ marginTop: 0 }}>
-          Inject reproducible high-volume bursts or enable auto-pilot traffic into the live simulator.
-        </p>
-
-        <div className="simulation-toolbar" style={{ marginTop: "10px" }}>
-          <label>
-            Traffic Profile
-            <select value={loadProfile} onChange={(e) => setLoadProfile(e.target.value)}>
-              <option value="RANDOM">Uniform Random Distribution</option>
-              <option value="MORNING_PEAK">Morning Peak (80% Up-Peak from B1/L1)</option>
-              <option value="EVENING_PEAK">Evening Peak (80% Down-Peak to L1)</option>
-              <option value="TWO_WAY">Two-Way Inter-Floor Traffic</option>
-              <option value="FREIGHT_E5">Freight E5 Exclusive Service</option>
-            </select>
-          </label>
-
-          <label>
-            Simulation Step
-            <select value={autoStepSeconds} onChange={(e) => setAutoStepSeconds(Number(e.target.value))}>
-              <option value={0}>0s (Real-time live animation)</option>
-              <option value={30}>Advance 30s</option>
-              <option value={60}>Advance 60s</option>
-              <option value={120}>Advance 120s</option>
-              <option value={300}>Advance 300s (Fast-forward)</option>
-            </select>
-          </label>
-        </div>
-
-        <div style={{ marginTop: "14px" }}>
-          <strong style={{ fontSize: "11px", textTransform: "uppercase", letterSpacing: "0.06em", color: "#6f7c92" }}>
-            Quick Burst Injections
-          </strong>
-          <div className="burst-button-row">
-            <button className="burst-btn" disabled={busy || benchRunning} onClick={() => void handleInjectBurst(25)}>
-              +25 Calls
-            </button>
-            <button className="burst-btn" disabled={busy || benchRunning} onClick={() => void handleInjectBurst(50)}>
-              +50 Calls
-            </button>
-            <button className="burst-btn stress" disabled={busy || benchRunning} onClick={() => void handleInjectBurst(100)}>
-              +100 Calls (CAP-1 Stress)
-            </button>
-            <button className="burst-btn" disabled={busy || benchRunning} onClick={() => void handleInjectBurst(250)}>
-              +250 Calls
-            </button>
-            <button className="burst-btn stress" disabled={busy || benchRunning} onClick={() => void handleInjectBurst(500)}>
-              +500 Mega-Burst
-            </button>
-          </div>
-        </div>
-
-        <div className="simulation-toolbar" style={{ marginTop: "10px" }}>
-          <label style={{ flex: 1, minWidth: "120px" }}>
-            Custom Count
-            <input
-              type="number"
-              min={1}
-              max={1000}
-              value={customBurstCount}
-              onChange={(e) => setCustomBurstCount(Math.max(1, Number(e.target.value)))}
-            />
-          </label>
-          <button
-            className="button secondary"
-            disabled={busy || benchRunning}
-            onClick={() => void handleInjectBurst(customBurstCount)}
-          >
-            Inject {customBurstCount} Calls
-          </button>
-        </div>
-
-        {/* Automatic Traffic Generator */}
-        <div className="auto-traffic-bar">
-          <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
-            <span className={`pulse-indicator ${autoTrafficRunning ? "active" : "inactive"}`} />
-            <div>
-              <strong style={{ fontSize: "12px", color: "#354156", display: "block" }}>
-                Auto-Pilot Traffic Generator
-              </strong>
-              <small style={{ color: "#7d899d", fontSize: "11px" }}>
-                {autoTrafficRunning
-                  ? `Injecting ${autoTrafficRate} calls / 1.6s · Total injected: ${autoTrafficInjected}`
-                  : "Continuous automated passenger flow is paused"}
-              </small>
-            </div>
-          </div>
-
-          <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-            <label style={{ display: "flex", alignItems: "center", gap: "6px", fontSize: "11px", color: "#596a7d" }}>
-              Rate:
-              <select
-                value={autoTrafficRate}
-                disabled={autoTrafficRunning}
-                onChange={(e) => setAutoTrafficRate(Number(e.target.value))}
-                style={{ padding: "4px 8px", fontSize: "11px" }}
-              >
-                <option value={1}>Light (1 / 1.6s)</option>
-                <option value={3}>Medium (3 / 1.6s)</option>
-                <option value={6}>Rush (6 / 1.6s)</option>
-                <option value={10}>Heavy (10 / 1.6s)</option>
-              </select>
-            </label>
-            <button
-              className={`button ${autoTrafficRunning ? "emergency-button" : "primary"}`}
-              style={{ padding: "7px 14px", fontSize: "11px" }}
-              onClick={() => setAutoTrafficRunning((prev) => !prev)}
-            >
-              {autoTrafficRunning ? "Stop Auto-Traffic" : "Start Auto-Traffic"}
-            </button>
-          </div>
-        </div>
-
-        {loadStatus && (
-          <p className="authorization-feedback" style={{ marginTop: "12px" }}>
-            {loadStatus}
-          </p>
-        )}
-      </div>
-
-      {/* Live Simulation CIBSE Guide D Benchmark Runner */}
-      <div className="panel">
-        <div className="section-heading">
-          <div>
-            <p className="eyebrow">CIBSE Guide D · Live Benchmark</p>
-            <h2>Run Benchmark in Live Simulation</h2>
-          </div>
-          <span className="wear-badge info">Standardized</span>
-        </div>
-
-        <p className="muted dark" style={{ marginTop: 0 }}>
-          Execute standardized CIBSE traffic benchmarks directly on the active simulation fleet.
-        </p>
-
-        <div className="simulation-toolbar" style={{ marginTop: "10px" }}>
-          <label style={{ flex: 1 }}>
-            Benchmark Scenario
-            <select value={benchScenario} onChange={(e) => setBenchScenario(e.target.value)}>
-              <option value="MORNING_PEAK">CIBSE Morning Peak (50 calls, 80% up)</option>
-              <option value="EVENING_PEAK">CIBSE Evening Peak (50 calls, 80% down)</option>
-              <option value="OFF_PEAK">CIBSE Off-Peak (30 calls, balanced)</option>
-              <option value="STRESS">CAP-1 Stress Burst (100 calls)</option>
-            </select>
-          </label>
-
-          <label style={{ flex: 1 }}>
-            Wear &amp; Tear Strategy
-            <select
-              value={benchWearStrategy}
-              disabled={!benchWearEnabled}
-              onChange={(e) => setBenchWearStrategy(e.target.value)}
-            >
-              <option value="BOTTOM_PRIORITY">1. Bottom Threshold Priority</option>
-              <option value="TOP_HALT">2. Top Threshold Halt</option>
-              <option value="LEAST_RUN_FIRST">3. Least-Run Priority</option>
-              <option value="OFF_PEAK_REBALANCE">4. Off-Peak Rebalance</option>
-              <option value="OUTLIER_CORRECTION">5. Statistical Outlier</option>
-            </select>
-          </label>
-        </div>
-
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: "12px", gap: "12px", flexWrap: "wrap" }}>
-          <div style={{ display: "flex", gap: "16px", flexWrap: "wrap" }}>
-            <label style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "12px", color: "#596a7d", cursor: "pointer" }}>
-              <input
-                type="checkbox"
-                checked={benchWearEnabled}
-                onChange={(e) => setBenchWearEnabled(e.target.checked)}
-              />
-              Follow Wear &amp; Tear Balancing
-            </label>
-
-            <label style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "12px", color: "#596a7d", cursor: "pointer" }}>
-              <input
-                type="checkbox"
-                checked={benchResetSim}
-                onChange={(e) => setBenchResetSim(e.target.checked)}
-              />
-              Reset simulator before benchmark
-            </label>
-          </div>
-
-          <button
-            className="button primary"
-            disabled={benchRunning || busy}
-            onClick={() => void handleRunLiveBenchmark()}
-          >
-            {benchRunning ? "Running Benchmark..." : "▶ Run Live Benchmark"}
-          </button>
-        </div>
-
-        {/* Benchmark Results Display */}
-        {benchResult && (
-          <div style={{ marginTop: "18px", borderTop: "1px solid #edf0f4", paddingTop: "14px" }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "8px" }}>
-              <strong style={{ fontSize: "13px", color: "#172033" }}>{benchResult.metrics.scenario}</strong>
-              <small style={{ color: "#7d899d" }}>
-                {benchResult.metrics.completed_calls} / {benchResult.metrics.total_calls} calls completed
-              </small>
-            </div>
-
-            {/* Compliance Pills */}
-            <div className="bench-compliance-row">
-              <span className={`wear-badge ${benchResult.metrics.awt_target_met ? "pass" : "fail"}`}>
-                AWT &lt; 30s: {benchResult.metrics.awt_target_met ? "PASSED" : "FAILED"} ({benchResult.metrics.mean_wait_time.toFixed(1)}s)
-              </span>
-              <span className={`wear-badge ${benchResult.metrics.p95_target_met ? "pass" : "fail"}`}>
-                P95 &lt; 60s: {benchResult.metrics.p95_target_met ? "PASSED" : "FAILED"} ({benchResult.metrics.p95_wait_time.toFixed(1)}s)
-              </span>
-              <span className={`wear-badge ${benchResult.metrics.queue_target_met ? "pass" : "fail"}`}>
-                Queue &lt; 15: {benchResult.metrics.queue_target_met ? "PASSED" : "FAILED"} (Peak: {benchResult.metrics.max_hall_queue_depth})
-              </span>
-              {benchResult.metrics.wear_spread_pct !== undefined && (
-                <span className={`wear-badge ${benchResult.metrics.wear_target_met ? "pass" : "fail"}`}>
-                  Wear Spread: {benchResult.metrics.wear_spread_pct.toFixed(2)}% ({benchResult.metrics.wear_target_met ? "PASSED [<= 1.8%]" : "EXCEEDED"})
-                </span>
-              )}
-            </div>
-
-            {/* KPI Metric Tiles */}
-            <div className="bench-kpi-grid">
-              <div className="bench-kpi-tile">
-                <span>Avg Wait (AWT)</span>
-                <strong>{benchResult.metrics.mean_wait_time.toFixed(1)}s</strong>
-                <small>Target: &lt; 30.0s</small>
-              </div>
-              <div className="bench-kpi-tile">
-                <span>P95 Wait</span>
-                <strong>{benchResult.metrics.p95_wait_time.toFixed(1)}s</strong>
-                <small>Target: &lt; 60.0s</small>
-              </div>
-              <div className="bench-kpi-tile">
-                <span>Median Wait</span>
-                <strong>{benchResult.metrics.median_wait_time.toFixed(1)}s</strong>
-                <small>P90: {benchResult.metrics.p90_wait_time.toFixed(1)}s</small>
-              </div>
-              <div className="bench-kpi-tile">
-                <span>Max Wait</span>
-                <strong>{benchResult.metrics.max_wait_time.toFixed(1)}s</strong>
-                <small>Worst case</small>
-              </div>
-              <div className="bench-kpi-tile">
-                <span>Mean Transit</span>
-                <strong>{benchResult.metrics.mean_transit_time.toFixed(1)}s</strong>
-                <small>In-cab ride</small>
-              </div>
-              <div className="bench-kpi-tile">
-                <span>Total Journey</span>
-                <strong>{benchResult.metrics.mean_journey_time.toFixed(1)}s</strong>
-                <small>Wait + Transit</small>
-              </div>
-            </div>
-
-            {/* Car Trip Distribution */}
-            <div style={{ marginTop: "12px", background: "#f8fafc", padding: "10px", borderRadius: "8px", border: "1px solid #e2e8f0" }}>
-              <span style={{ fontSize: "11px", fontWeight: 700, color: "#64748b", textTransform: "uppercase", letterSpacing: "0.06em", display: "block", marginBottom: "6px" }}>
-                Fleet Dispatch Distribution (Completed Trips)
-              </span>
-              <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
-                {Object.entries(benchResult.metrics.car_trips).map(([cid, trips]) => (
-                  <div key={cid} style={{ background: "#fff", border: "1px solid #dfe6ef", borderRadius: "6px", padding: "4px 10px", fontSize: "12px" }}>
-                    <strong style={{ color: "#147aca" }}>{cid}: </strong>
-                    <span style={{ color: "#354156", fontWeight: 600 }}>{trips} trips</span>
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            {/* Individual Benchmark Trips Section */}
-            <div style={{ marginTop: "16px", borderTop: "1px solid #edf0f4", paddingTop: "12px" }}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "10px", flexWrap: "wrap", gap: "8px" }}>
-                <div>
-                  <strong style={{ fontSize: "12px", color: "#172033" }}>Individual Benchmark Trips Log</strong>
-                  <span style={{ fontSize: "11px", color: "#7d899d", marginLeft: "8px" }}>
-                    ({filteredBenchmarkTrips.length} of {allBenchmarkTrips.length} trips)
-                  </span>
-                </div>
-                <div style={{ display: "flex", gap: "6px", alignItems: "center" }}>
-                  <button
-                    className="button secondary"
-                    style={{ padding: "4px 8px", fontSize: "10px" }}
-                    onClick={() => setShowBenchTripsTable((prev) => !prev)}
-                  >
-                    {showBenchTripsTable ? "Hide Trips Table" : "Show Trips Table"}
-                  </button>
-                </div>
-              </div>
-
-              {showBenchTripsTable && (
-                <>
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "8px", marginBottom: "10px", flexWrap: "wrap" }}>
-                    <div style={{ display: "flex", gap: "4px" }}>
-                      {["ALL", "E1", "E2", "E3", "E4", "E5"].map((cid) => (
-                        <button
-                          key={cid}
-                          className={`burst-btn ${benchTripFilter === cid ? "stress" : ""}`}
-                          style={{ padding: "3px 8px", fontSize: "10px" }}
-                          onClick={() => setBenchTripFilter(cid)}
-                        >
-                          {cid}
-                        </button>
-                      ))}
-                    </div>
-                    <input
-                      type="text"
-                      placeholder="Filter floor or profile..."
-                      value={benchTripSearch}
-                      onChange={(e) => setBenchTripSearch(e.target.value)}
-                      style={{ padding: "4px 8px", fontSize: "11px", width: "170px", border: "1px solid #dfe6ef", borderRadius: "6px" }}
-                    />
-                  </div>
-
-                  <div className="table-wrap" style={{ maxHeight: "260px", overflowY: "auto", border: "1px solid #edf0f4", borderRadius: "8px" }}>
-                    <table className="operations-table" style={{ fontSize: "11px", width: "100%" }}>
-                      <thead style={{ position: "sticky", top: 0, background: "#f8fafc", zIndex: 2 }}>
-                        <tr>
-                          <th>#</th>
-                          <th>Unit</th>
-                          <th>Route (Origin &rarr; Dest)</th>
-                          <th>Distance</th>
-                          <th>Travel Time</th>
-                          <th>Type / Profile</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {filteredBenchmarkTrips.length === 0 ? (
-                          <tr>
-                            <td colSpan={6} style={{ textAlign: "center", color: "#8d99ad", padding: "16px" }}>
-                              No benchmark trips match filter.
-                            </td>
-                          </tr>
-                        ) : (
-                          filteredBenchmarkTrips.map((t, idx) => (
-                            <tr key={t.trip_id || idx}>
-                              <td><span style={{ color: "#7d899d" }}>#{idx + 1}</span></td>
-                              <td>
-                                <strong style={{ color: t.elevator_id === "E5" ? "#b57d18" : "#147aca" }}>
-                                  {t.elevator_id}
-                                </strong>
-                              </td>
-                              <td>
-                                {floorLabel(t.origin_floor)} &rarr; {floorLabel(t.destination_floor)}
-                              </td>
-                              <td>{t.floors_traversed} fl</td>
-                              <td>{t.travel_time_seconds.toFixed(1)}s</td>
-                              <td>
-                                <span className={`wear-badge ${t.is_service_run ? "warn" : "info"}`} style={{ fontSize: "9px", padding: "2px 6px" }}>
-                                  {t.is_service_run ? "FREIGHT" : t.traffic_profile}
-                                </span>
-                              </td>
-                            </tr>
-                          ))
-                        )}
-                      </tbody>
-                    </table>
-                  </div>
-                </>
-              )}
-            </div>
-
-            {/* Expandable Raw Text Summary */}
-            <div style={{ marginTop: "12px" }}>
-              <button
-                className="button secondary"
-                style={{ padding: "5px 10px", fontSize: "11px" }}
-                onClick={() => setShowBenchSummaryText((prev) => !prev)}
-              >
-                {showBenchSummaryText ? "Hide Raw Summary Log" : "Show Raw Summary Log"}
-              </button>
-              {showBenchSummaryText && (
-                <pre className="event-row" style={{ marginTop: "8px", fontSize: "11px", maxHeight: "200px", overflowY: "auto" }}>
-                  {benchResult.summary_text}
-                </pre>
-              )}
-            </div>
-          </div>
-        )}
       </div>
     </div>
   </section>;
@@ -1777,675 +1183,6 @@ function Analytics({ summary, token, role }: { summary: Summary | null; token?: 
   </>;
 }
 
-type WearTearConfigState = {
-  enabled: boolean;
-  strategy: string;
-  monthly_target_pct: number;
-  monthly_ceiling_pct: number;
-  six_month_target_pct: number;
-  six_month_ceiling_pct: number;
-  safety_margin_pct: number;
-  off_peak_start_hour: number;
-  off_peak_end_hour: number;
-};
-
-type WearTearCarStat = {
-  elevator_id: string;
-  total_floors: number;
-  total_trips: number;
-  floors_monthly: number;
-  trips_monthly: number;
-  floors_six_months: number;
-  trips_six_months: number;
-};
-
-type WearTearMetricsData = {
-  min_distance: number;
-  max_distance: number;
-  mean_distance: number;
-  delta_floors: number;
-  spread_pct: number;
-  monthly_target_met?: boolean;
-  six_month_target_met?: boolean;
-  outlier_car: string | null;
-  outlier_type: string | null;
-};
-
-type WearTearStatusResponse = {
-  config: WearTearConfigState;
-  car_stats: Record<string, WearTearCarStat>;
-  monthly: WearTearMetricsData;
-  six_months: WearTearMetricsData;
-};
-
-type BenchmarkDailyPoint = {
-  day: number;
-  date_str: string;
-  E1_floors: number;
-  E2_floors: number;
-  E3_floors: number;
-  E4_floors: number;
-  min_floors: number;
-  max_floors: number;
-  delta_floors: number;
-  spread_pct: number;
-  monthly_pass: boolean;
-  six_month_pass: boolean;
-};
-
-type BenchmarkResponse = {
-  strategy: string;
-  strategy_description: string;
-  enabled: boolean;
-  seed: number;
-  simulated_months: number;
-  simulated_days: number;
-  total_calls_generated: number;
-  total_floors_traversed: number;
-  car_floors: Record<string, number>;
-  car_trips: Record<string, number>;
-  monthly_delta_floors: number;
-  monthly_spread_pct: number;
-  monthly_target_met: boolean;
-  monthly_requirement_met: boolean;
-  six_month_delta_floors: number;
-  six_month_spread_pct: number;
-  six_month_target_met: boolean;
-  six_month_requirement_met: boolean;
-  time_series: BenchmarkDailyPoint[];
-  baseline_comparison?: {
-    unmitigated_car_floors: Record<string, number>;
-    unmitigated_monthly_spread_pct: number;
-    unmitigated_six_month_spread_pct: number;
-    improvement_pct_points: number;
-  };
-};
-
-function WearTearChart({ points }: { points: BenchmarkDailyPoint[] }) {
-  const [hoverIndex, setHoverIndex] = useState<number | null>(null);
-
-  if (!points || points.length === 0) return null;
-
-  const width = 840;
-  const height = 260;
-  const padLeft = 60;
-  const padRight = 30;
-  const padTop = 25;
-  const padBottom = 35;
-  const plotW = width - padLeft - padRight;
-  const plotH = height - padTop - padBottom;
-
-  const maxFloor = Math.max(
-    ...points.map((p) => Math.max(p.E1_floors, p.E2_floors, p.E3_floors, p.E4_floors)),
-    100
-  );
-  const yMax = Math.ceil(maxFloor * 1.05);
-
-  const getX = (idx: number) => padLeft + (idx / (points.length - 1 || 1)) * plotW;
-  const getY = (val: number) => padTop + plotH - (val / yMax) * plotH;
-
-  const makePath = (key: "E1_floors" | "E2_floors" | "E3_floors" | "E4_floors") => {
-    return points
-      .map((p, idx) => `${idx === 0 ? "M" : "L"} ${getX(idx).toFixed(1)} ${getY(p[key]).toFixed(1)}`)
-      .join(" ");
-  };
-
-  const activePoint = hoverIndex !== null && hoverIndex >= 0 && hoverIndex < points.length ? points[hoverIndex] : points[points.length - 1];
-
-  const monthMarkers = [30, 60, 90, 120, 150, 180].filter((d) => d <= points.length);
-
-  return (
-    <div className="wear-chart-box">
-      <div className="wear-chart-header">
-        <div>
-          <strong style={{ fontSize: "14px" }}>Accumulated Floors by Elevator Unit Over Time</strong>
-          <p style={{ margin: "4px 0 0", color: "#8ec8f4", fontSize: "12px" }}>
-            {activePoint ? `Day ${activePoint.day} (${activePoint.date_str}) · Delta: ${activePoint.delta_floors} fl · Spread: ${activePoint.spread_pct.toFixed(2)}% · ${activePoint.six_month_pass ? "TARGET MET (<= 4.0%)" : "EXCEEDED"}` : "180-Day Progression"}
-          </p>
-        </div>
-        <div className="wear-legend">
-          <div className="wear-legend-item"><span className="wear-dot" style={{ background: "#38bdf8" }} /> E1: {activePoint?.E1_floors?.toLocaleString() ?? 0} fl</div>
-          <div className="wear-legend-item"><span className="wear-dot" style={{ background: "#34d399" }} /> E2: {activePoint?.E2_floors?.toLocaleString() ?? 0} fl</div>
-          <div className="wear-legend-item"><span className="wear-dot" style={{ background: "#a78bfa" }} /> E3: {activePoint?.E3_floors?.toLocaleString() ?? 0} fl</div>
-          <div className="wear-legend-item"><span className="wear-dot" style={{ background: "#fbbf24" }} /> E4: {activePoint?.E4_floors?.toLocaleString() ?? 0} fl</div>
-        </div>
-      </div>
-
-      <svg
-        className="wear-svg"
-        viewBox={`0 0 ${width} ${height}`}
-        onMouseMove={(e) => {
-          const rect = e.currentTarget.getBoundingClientRect();
-          const svgX = ((e.clientX - rect.left) / rect.width) * width;
-          const ratio = Math.max(0, Math.min(1, (svgX - padLeft) / plotW));
-          const idx = Math.round(ratio * (points.length - 1));
-          setHoverIndex(idx);
-        }}
-        onMouseLeave={() => setHoverIndex(null)}
-      >
-        {/* Y Axis Grid Lines */}
-        {[0, 0.25, 0.5, 0.75, 1.0].map((frac, i) => {
-          const y = padTop + plotH * (1 - frac);
-          const val = Math.round(yMax * frac);
-          return (
-            <g key={i}>
-              <line x1={padLeft} y1={y} x2={width - padRight} y2={y} stroke="#1e324d" strokeDasharray="3 3" />
-              <text x={padLeft - 10} y={y + 4} fill="#8ec8f4" fontSize="10" textAnchor="end">{val.toLocaleString()}</text>
-            </g>
-          );
-        })}
-
-        {/* Month Vertical Dividers */}
-        {monthMarkers.map((day) => {
-          const x = getX(day - 1);
-          const monthNum = Math.round(day / 30);
-          return (
-            <g key={day}>
-              <line x1={x} y1={padTop} x2={x} y2={height - padBottom} stroke="#2c4c70" strokeDasharray="4 4" />
-              <text x={x} y={height - padBottom + 16} fill="#8ec8f4" fontSize="10" textAnchor="middle">M{monthNum} (D{day})</text>
-            </g>
-          );
-        })}
-
-        {/* Elevator distance curves */}
-        <path d={makePath("E1_floors")} fill="none" stroke="#38bdf8" strokeWidth="2.5" />
-        <path d={makePath("E2_floors")} fill="none" stroke="#34d399" strokeWidth="2.5" />
-        <path d={makePath("E3_floors")} fill="none" stroke="#a78bfa" strokeWidth="2.5" />
-        <path d={makePath("E4_floors")} fill="none" stroke="#fbbf24" strokeWidth="2.5" />
-
-        {/* Hover vertical line */}
-        {hoverIndex !== null && hoverIndex >= 0 && hoverIndex < points.length && (
-          <line
-            x1={getX(hoverIndex)}
-            y1={padTop}
-            x2={getX(hoverIndex)}
-            y2={height - padBottom}
-            stroke="#ffffff"
-            strokeWidth="1.5"
-            strokeDasharray="2 2"
-          />
-        )}
-      </svg>
-    </div>
-  );
-}
-
-function WearTearView({ token: _token, role: _role, onFleetRefresh }: { token?: string; role?: string; onFleetRefresh?: () => Promise<void> }) {
-  const [status, setStatus] = useState<WearTearStatusResponse | null>(null);
-  const [configForm, setConfigForm] = useState<WearTearConfigState>({
-    enabled: true,
-    strategy: "BOTTOM_PRIORITY",
-    monthly_target_pct: 1.8,
-    monthly_ceiling_pct: 2.0,
-    six_month_target_pct: 4.0,
-    six_month_ceiling_pct: 5.0,
-    safety_margin_pct: 0.2,
-    off_peak_start_hour: 22,
-    off_peak_end_hour: 5,
-  });
-  const [benchmarkResult, setBenchmarkResult] = useState<BenchmarkResponse | null>(null);
-  const [benchDuration, setBenchDuration] = useState<number>(6);
-  const [benchSeed, setBenchSeed] = useState<number>(42);
-  const [benchCallsPerDay, setBenchCallsPerDay] = useState<number>(240);
-  const [compareBaseline, setCompareBaseline] = useState<boolean>(true);
-  const [loadingBench, setLoadingBench] = useState<boolean>(false);
-  const [savingConfig, setSavingConfig] = useState<boolean>(false);
-  const [feedback, setFeedback] = useState<string>("");
-  const [error, setError] = useState<string>("");
-
-  const loadStatus = useCallback(async () => {
-    try {
-      const res = await fetch("/api/v1/operational/wear-tear/status");
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = (await res.json()) as WearTearStatusResponse;
-      setStatus(data);
-      if (data.config) {
-        setConfigForm(data.config);
-      }
-      setError("");
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to load wear & tear status");
-    }
-  }, []);
-
-  useEffect(() => {
-    void loadStatus();
-    const timer = setInterval(() => { void loadStatus(); }, 1500);
-    return () => clearInterval(timer);
-  }, [loadStatus]);
-
-  const saveConfig = async () => {
-    setSavingConfig(true);
-    setError("");
-    try {
-      const res = await fetch("/api/v1/operational/wear-tear/config", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(configForm),
-      });
-      if (!res.ok) throw new Error(`Failed to save config: HTTP ${res.status}`);
-      setFeedback("Configuration updated successfully!");
-      setTimeout(() => setFeedback(""), 3500);
-      await loadStatus();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Error saving config");
-    } finally {
-      setSavingConfig(false);
-    }
-  };
-
-  const resetCounters = async (scope: string) => {
-    setError("");
-    try {
-      const res = await fetch("/api/v1/operational/wear-tear/reset", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ scope }),
-      });
-      if (!res.ok) throw new Error(`Reset failed: HTTP ${res.status}`);
-      setFeedback(`Trip & floor counters reset (${scope})`);
-      setTimeout(() => setFeedback(""), 3500);
-      await loadStatus();
-      if (onFleetRefresh) await onFleetRefresh();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Error resetting counters");
-    }
-  };
-
-  const runBenchmark = async () => {
-    setLoadingBench(true);
-    setError("");
-    try {
-      const res = await fetch("/api/v1/operational/wear-tear/benchmark", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          seed: benchSeed,
-          months: benchDuration,
-          days_per_month: 30,
-          calls_per_day: benchCallsPerDay,
-          strategy: configForm.strategy,
-          enabled: configForm.enabled,
-          compare_baseline: compareBaseline,
-        }),
-      });
-      if (!res.ok) throw new Error(`Benchmark failed: HTTP ${res.status}`);
-      const data = (await res.json()) as BenchmarkResponse;
-      setBenchmarkResult(data);
-      setFeedback(`Simulated ${data.simulated_days} days (${data.simulated_months} months) successfully!`);
-      setTimeout(() => setFeedback(""), 3500);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Benchmark execution error");
-    } finally {
-      setLoadingBench(false);
-    }
-  };
-
-  useEffect(() => {
-    void runBenchmark();
-  }, []);
-
-  const monthlyMet = status?.monthly.monthly_target_met ?? true;
-  const sixMonthMet = status?.six_months.six_month_target_met ?? true;
-
-  return (
-    <>
-      <PageHeader
-        eyebrow="Non-Functional Optimization · Fleet Wear &amp; Tear Balancing"
-        title="Elevator Wear &amp; Tear Balancer"
-        detail="Balances accumulated travel distance (floors traversed) across residential units E1–E4. Enforces strict safety targets of < 1.8% deviation per month and < 4.0% in 6 months with dual monthly/6-month trip counters."
-        action={
-          <div style={{ display: "flex", gap: "8px" }}>
-            <button className="button secondary" onClick={() => { void resetCounters("MONTHLY"); }}>Reset Monthly Counter</button>
-            <button className="button secondary" onClick={() => { void resetCounters("ALL"); }}>Reset All Counters</button>
-          </div>
-        }
-      />
-
-      {feedback && <p className="authorization-feedback" role="status">{feedback}</p>}
-      {error && <p className="error-banner" role="alert">{error}</p>}
-
-      <section className="panel section" style={{ marginTop: "18px" }}>
-        <div className="table-heading">
-          <strong>Live Fleet Distance Spread &amp; Compliance (E1–E4)</strong>
-          <span>Dual Trip Counters: 30-Day Monthly &amp; 180-Day 6-Month Reset</span>
-        </div>
-        <div className="kpi-grid" style={{ marginTop: "14px" }}>
-          <article className="kpi-card">
-            <span>Monthly Spread (Target &lt; 1.8%)</span>
-            <strong>{status?.monthly.spread_pct.toFixed(2) ?? "0.00"}%</strong>
-            <small>
-              Delta: {status?.monthly.delta_floors ?? 0} floors (Min {status?.monthly.min_distance ?? 0} / Max {status?.monthly.max_distance ?? 0}) ·{" "}
-              <span className={`wear-badge ${monthlyMet ? "pass" : "fail"}`}>{monthlyMet ? "PASS (<= 1.8%)" : "EXCEEDED"}</span>
-            </small>
-          </article>
-          <article className="kpi-card">
-            <span>6-Month Spread (Target &lt; 4.0%)</span>
-            <strong>{status?.six_months.spread_pct.toFixed(2) ?? "0.00"}%</strong>
-            <small>
-              Delta: {status?.six_months.delta_floors ?? 0} floors (Min {status?.six_months.min_distance ?? 0} / Max {status?.six_months.max_distance ?? 0}) ·{" "}
-              <span className={`wear-badge ${sixMonthMet ? "pass" : "fail"}`}>{sixMonthMet ? "PASS (<= 4.0%)" : "EXCEEDED"}</span>
-            </small>
-          </article>
-          <article className="kpi-card">
-            <span>Statistical Outlier Detection</span>
-            <strong style={{ fontSize: "18px", marginTop: "12px" }}>
-              {status?.monthly.outlier_car ? `Car ${status.monthly.outlier_car} (${status.monthly.outlier_type})` : "Balanced Fleet"}
-            </strong>
-            <small>
-              {status?.monthly.outlier_car
-                ? status.monthly.outlier_type === "LOW"
-                  ? "Car is lagging behind peer cluster; prioritized for assignments."
-                  : "Car is leading peer cluster; paused for preventive rest."
-                : "All units within ±1.5% cluster median deviation."}
-            </small>
-          </article>
-        </div>
-
-        <div className="table-wrap" style={{ marginTop: "18px" }}>
-          <table className="operations-table">
-            <thead>
-              <tr>
-                <th>Unit</th>
-                <th>Role</th>
-                <th>Total Traversed</th>
-                <th>Total Trips</th>
-                <th>Monthly Floors (30d)</th>
-                <th>Monthly Trips</th>
-                <th>6-Month Floors (180d)</th>
-                <th>6-Month Trips</th>
-              </tr>
-            </thead>
-            <tbody>
-              {status && Object.values(status.car_stats).map((c) => (
-                <tr key={c.elevator_id}>
-                  <td><strong>{c.elevator_id}</strong></td>
-                  <td>{c.elevator_id === "E5" ? "Freight / Service" : "Residential Passenger"}</td>
-                  <td>{c.total_floors.toLocaleString()} fl</td>
-                  <td>{c.total_trips.toLocaleString()}</td>
-                  <td><strong>{c.floors_monthly.toLocaleString()} fl</strong></td>
-                  <td>{c.trips_monthly.toLocaleString()}</td>
-                  <td><strong>{c.floors_six_months.toLocaleString()} fl</strong></td>
-                  <td>{c.trips_six_months.toLocaleString()}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </section>
-
-      <section className="panel section">
-        <div className="table-heading">
-          <strong>Wear &amp; Tear Controller Configurator</strong>
-          <span>Configurable Balancing Implementations (Strategies 1–5)</span>
-        </div>
-        <div className="wear-controls-grid">
-          <div className="wear-card">
-            <h3>Feature Toggle</h3>
-            <div className="wear-field-row">
-              <label>Wear Balancing Active</label>
-              <select
-                value={configForm.enabled ? "true" : "false"}
-                onChange={(e) => setConfigForm({ ...configForm, enabled: e.target.value === "true" })}
-              >
-                <option value="true">ENABLED (Active)</option>
-                <option value="false">DISABLED (Standard ETA)</option>
-              </select>
-            </div>
-            <p style={{ margin: "6px 0 0", fontSize: "11px", color: "#7d899d" }}>
-              When enabled, incoming hall calls are dispatched to balance mileage across E1–E4.
-            </p>
-          </div>
-
-          <div className="wear-card" style={{ gridColumn: "span 2" }}>
-            <h3>Balancing Strategy (Dropdown Menu)</h3>
-            <div className="wear-field-row">
-              <label>Active Implementation</label>
-              <select
-                style={{ width: "100%", maxWidth: "480px" }}
-                value={configForm.strategy}
-                onChange={(e) => setConfigForm({ ...configForm, strategy: e.target.value })}
-              >
-                <option value="BOTTOM_PRIORITY">1. Bottom Threshold Priority (Prioritize until 0.2% safety margin)</option>
-                <option value="TOP_HALT">2. Top Threshold Halt (Pause leading car until 0.2% safety margin)</option>
-                <option value="LEAST_RUN_FIRST">3. Least-Run Elevator Priority (Most worked unit rests naturally)</option>
-                <option value="OFF_PEAK_REBALANCE">4. Off-Peak Rebalancing (Aggressive rebalancing during night window)</option>
-                <option value="OUTLIER_CORRECTION">5. Statistical Outlier Correction (Prioritize low / Halt high outlier)</option>
-              </select>
-            </div>
-            <p style={{ margin: "6px 0 0", fontSize: "11px", color: "#7d899d" }}>
-              Choose among the 5 distinct wear mitigation approaches to keep mileage delta under 1.8% monthly and 4.0% over 6 months.
-            </p>
-          </div>
-
-          <div className="wear-card">
-            <h3>Threshold Safety Margins</h3>
-            <div className="wear-field-row">
-              <label>Monthly Target %</label>
-              <input
-                type="number"
-                step="0.1"
-                min="0.5"
-                max="5.0"
-                value={configForm.monthly_target_pct}
-                onChange={(e) => setConfigForm({ ...configForm, monthly_target_pct: parseFloat(e.target.value) || 1.8 })}
-              />
-            </div>
-            <div className="wear-field-row">
-              <label>6-Month Target %</label>
-              <input
-                type="number"
-                step="0.1"
-                min="1.0"
-                max="10.0"
-                value={configForm.six_month_target_pct}
-                onChange={(e) => setConfigForm({ ...configForm, six_month_target_pct: parseFloat(e.target.value) || 4.0 })}
-              />
-            </div>
-            <div className="wear-field-row">
-              <label>Safety Margin Buffer %</label>
-              <input
-                type="number"
-                step="0.05"
-                min="0.05"
-                max="1.0"
-                value={configForm.safety_margin_pct}
-                onChange={(e) => setConfigForm({ ...configForm, safety_margin_pct: parseFloat(e.target.value) || 0.2 })}
-              />
-            </div>
-          </div>
-
-          <div className="wear-card">
-            <h3>Off-Peak Schedule (Strategy 4)</h3>
-            <div className="wear-field-row">
-              <label>Off-Peak Start Hour (24h)</label>
-              <input
-                type="number"
-                min="0"
-                max="23"
-                value={configForm.off_peak_start_hour}
-                onChange={(e) => setConfigForm({ ...configForm, off_peak_start_hour: parseInt(e.target.value, 10) || 22 })}
-              />
-            </div>
-            <div className="wear-field-row">
-              <label>Off-Peak End Hour (24h)</label>
-              <input
-                type="number"
-                min="0"
-                max="23"
-                value={configForm.off_peak_end_hour}
-                onChange={(e) => setConfigForm({ ...configForm, off_peak_end_hour: parseInt(e.target.value, 10) || 5 })}
-              />
-            </div>
-            <div style={{ marginTop: "14px" }}>
-              <button className="button primary" disabled={savingConfig} onClick={() => { void saveConfig(); }}>
-                {savingConfig ? "Saving..." : "Save Configuration"}
-              </button>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      <section className="panel section">
-        <div className="table-heading">
-          <strong>Reproducible 6-Month Benchmark Simulator (Random Synthetic Load)</strong>
-          <span>Deterministic Seeded Simulation with Multi-Car Time-Series Analytics</span>
-        </div>
-        <div className="hall-controls" style={{ marginTop: "14px" }}>
-          <label>
-            Simulation Duration
-            <select value={benchDuration} onChange={(e) => setBenchDuration(parseInt(e.target.value, 10))}>
-              <option value="6">6 Months (180 Days) · SRS Target &lt;= 4.0%</option>
-              <option value="1">1 Month (30 Days) · SRS Target &lt;= 1.8%</option>
-              <option value="3">3 Months (90 Days)</option>
-            </select>
-          </label>
-
-          <label>
-            Random Seed (Reproducible)
-            <div style={{ display: "flex", gap: "6px" }}>
-              <input
-                type="number"
-                value={benchSeed}
-                onChange={(e) => setBenchSeed(parseInt(e.target.value, 10) || 1)}
-                style={{ width: "90px" }}
-              />
-              <button
-                className="button secondary"
-                onClick={() => setBenchSeed(Math.floor(Math.random() * 90000) + 1000)}
-                title="Generate new random seed"
-              >
-                🎲 Random
-              </button>
-            </div>
-          </label>
-
-          <label>
-            Daily Intensity
-            <select value={benchCallsPerDay} onChange={(e) => setBenchCallsPerDay(parseInt(e.target.value, 10))}>
-              <option value="150">Normal Demand (~150 calls/day)</option>
-              <option value="240">Standard CIBSE Peak (~240 calls/day)</option>
-              <option value="360">High Traffic Burst (~360 calls/day)</option>
-            </select>
-          </label>
-
-          <label style={{ display: "flex", alignItems: "center", gap: "8px", cursor: "pointer", textTransform: "none", fontSize: "12px", color: "#354156" }}>
-            <input
-              type="checkbox"
-              checked={compareBaseline}
-              onChange={(e) => setCompareBaseline(e.target.checked)}
-              style={{ width: "auto" }}
-            />
-            Compare with Unmitigated Baseline
-          </label>
-
-          <button className="button primary" disabled={loadingBench} onClick={() => { void runBenchmark(); }}>
-            {loadingBench ? "Simulating..." : "▶ Run Benchmark Simulation"}
-          </button>
-        </div>
-
-        {benchmarkResult && (
-          <div style={{ marginTop: "20px" }}>
-            <div className="kpi-grid">
-              <article className="kpi-card">
-                <span>Simulation Scope</span>
-                <strong>{benchmarkResult.simulated_days} Days</strong>
-                <small>{benchmarkResult.total_calls_generated.toLocaleString()} calls · {benchmarkResult.total_floors_traversed.toLocaleString()} floors · Seed {benchmarkResult.seed}</small>
-              </article>
-
-              <article className="kpi-card">
-                <span>Monthly Spread (Last 30 Days)</span>
-                <strong>{benchmarkResult.monthly_spread_pct.toFixed(2)}%</strong>
-                <small>
-                  Delta: {benchmarkResult.monthly_delta_floors} fl ·{" "}
-                  <span className={`wear-badge ${benchmarkResult.monthly_target_met ? "pass" : "fail"}`}>
-                    {benchmarkResult.monthly_target_met ? "PASSED [<= 1.8%]" : "FAILED [> 1.8%]"}
-                  </span>
-                </small>
-              </article>
-
-              <article className="kpi-card">
-                <span>6-Month Spread (Full Period)</span>
-                <strong>{benchmarkResult.six_month_spread_pct.toFixed(2)}%</strong>
-                <small>
-                  Delta: {benchmarkResult.six_month_delta_floors} fl ·{" "}
-                  <span className={`wear-badge ${benchmarkResult.six_month_target_met ? "pass" : "fail"}`}>
-                    {benchmarkResult.six_month_target_met ? "PASSED [<= 4.0%]" : "FAILED [> 4.0%]"}
-                  </span>
-                </small>
-              </article>
-
-              {benchmarkResult.baseline_comparison && (
-                <article className="kpi-card" style={{ gridColumn: "span 3", background: "#f8fafd", border: "1px solid #d3e4f7" }}>
-                  <span>Unmitigated Baseline vs. Wear-Balanced Comparison</span>
-                  <div style={{ display: "flex", gap: "24px", marginTop: "8px", alignItems: "center" }}>
-                    <div>
-                      <small style={{ color: "#7d899d" }}>WITHOUT BALANCING (UNMITIGATED):</small>
-                      <div style={{ fontSize: "18px", fontWeight: 700, color: "#c83832" }}>
-                        {benchmarkResult.baseline_comparison.unmitigated_six_month_spread_pct.toFixed(2)}% spread (FAILED)
-                      </div>
-                    </div>
-                    <div style={{ fontSize: "24px", color: "#147aca" }}>➔</div>
-                    <div>
-                      <small style={{ color: "#7d899d" }}>WITH {benchmarkResult.strategy} BALANCING:</small>
-                      <div style={{ fontSize: "18px", fontWeight: 700, color: "#1e8751" }}>
-                        {benchmarkResult.six_month_spread_pct.toFixed(2)}% spread (PASSED)
-                      </div>
-                    </div>
-                    <div style={{ marginLeft: "auto", textAlign: "right" }}>
-                      <span className="wear-badge pass" style={{ fontSize: "12px", padding: "6px 12px" }}>
-                        +{benchmarkResult.baseline_comparison.improvement_pct_points.toFixed(2)}% percentage points more even wear!
-                      </span>
-                    </div>
-                  </div>
-                </article>
-              )}
-            </div>
-
-            <div className="table-wrap" style={{ marginTop: "16px" }}>
-              <table className="operations-table">
-                <thead>
-                  <tr>
-                    <th>Elevator</th>
-                    <th>6-Month Distance</th>
-                    <th>Completed Trips</th>
-                    <th>Share of Total Fleet Mileage</th>
-                    <th>Deviation from Mean</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {["E1", "E2", "E3", "E4"].map((cid) => {
-                    const floors = benchmarkResult.car_floors[cid] ?? 0;
-                    const trips = benchmarkResult.car_trips[cid] ?? 0;
-                    const totalFloors = Object.values(benchmarkResult.car_floors).reduce((a, b) => a + b, 0);
-                    const meanFloors = totalFloors / 4.0;
-                    const sharePct = totalFloors > 0 ? (floors / totalFloors) * 100 : 25;
-                    const devPct = meanFloors > 0 ? ((floors - meanFloors) / meanFloors) * 100 : 0;
-                    return (
-                      <tr key={cid}>
-                        <td><strong>{cid}</strong></td>
-                        <td><strong>{floors.toLocaleString()} floors</strong></td>
-                        <td>{trips.toLocaleString()} trips</td>
-                        <td>{sharePct.toFixed(2)}% (Target: ~25.0%)</td>
-                        <td style={{ color: Math.abs(devPct) <= 1.0 ? "#1e8751" : "#d97706" }}>
-                          {devPct >= 0 ? `+${devPct.toFixed(2)}%` : `${devPct.toFixed(2)}%`}
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-
-            <WearTearChart points={benchmarkResult.time_series} />
-          </div>
-        )}
-      </section>
-    </>
-  );
-}
-
-
 type SelectGroup = { group: string; options: string[] };
 
 function SearchSelect({
@@ -2736,7 +1473,6 @@ function Audit({ token, role }: { token: string; role: string }) {
 
 function App() {
   const [view, setView] = useState<View>("overview");
-  const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(true);
   const [fleet, setFleet] = useState<FleetResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [summary, setSummary] = useState<Summary | null>(null);
@@ -2744,7 +1480,28 @@ function App() {
   const [token, setToken] = useState("");
   const [role, setRole] = useState("");
   const [loginError, setLoginError] = useState("");
+  const [voiceOn, setVoiceOn] = useState<boolean>(() => initialVoiceEnabled());
+  const [lastAnnouncement, setLastAnnouncement] = useState("");
   const active = useMemo(() => navigation.find((item) => item.id === view) ?? navigation[0], [view]);
+
+  // UI-6: announcements go to an aria-live region; speech only when the user enables it.
+  useEffect(() => { setVoiceEnabled(voiceOn); }, [voiceOn]);
+  useEffect(() => subscribeAnnouncements((text) => setLastAnnouncement(text)), []);
+  const prevStates = useRef<Record<string, string>>({});
+  useEffect(() => {
+    if (!fleet) return;
+    const prev = prevStates.current;
+    for (const car of fleet.elevators) {
+      const was = prev[car.elevator_id];
+      if (was === undefined || was === car.state) continue;
+      if (car.state === "EMERGENCY_UNAVAILABLE") {
+        announce(`Emergency. Car ${car.elevator_id} is out of service at ${spokenFloor(car.current_floor)}. Help has been requested.`, { urgent: true });
+      } else if (was === "EMERGENCY_UNAVAILABLE" && car.state === "IN_SERVICE") {
+        announce(`Car ${car.elevator_id} is back in service.`);
+      }
+    }
+    prevStates.current = Object.fromEntries(fleet.elevators.map((car) => [car.elevator_id, car.state]));
+  }, [fleet]);
 
   const onFleetRefresh = useCallback(async () => {
     try {
@@ -2781,67 +1538,11 @@ function App() {
     catch { /* Clear client session even when the server has expired it. */ }
     setToken(""); setRole("");
   };
-  const page =
-    view === "overview" ? <Overview fleet={fleet} summary={summary} token={token} /> :
-    view === "simulation" ? <Simulation fleet={fleet} onFleetRefresh={onFleetRefresh} /> :
-    view === "wear_tear" ? <WearTearView token={token} role={role} onFleetRefresh={onFleetRefresh} /> :
-    view === "elevators" ? <Elevators fleet={fleet} refresh={onFleetRefresh} token={token} role={role} /> :
-    view === "credentials" ? <Credentials token={token} role={role} /> :
-    view === "security" ? <Security token={token} role={role} refreshFleet={onFleetRefresh} /> :
-    view === "analytics" ? <Analytics summary={summary} token={token} role={role} /> :
-    <Audit token={token} role={role} />;
+  const page = view === "overview" ? <Overview fleet={fleet} summary={summary} token={token} /> : view === "simulation" ? <Simulation fleet={fleet} onFleetRefresh={onFleetRefresh} /> : view === "elevators" ? <Elevators fleet={fleet} refresh={onFleetRefresh} token={token} role={role} /> : view === "wear" ? <WearPanel token={token} role={role} /> : view === "credentials" ? <Credentials token={token} role={role} /> : view === "security" ? <Security token={token} role={role} refreshFleet={onFleetRefresh} /> : view === "analytics" ? <Analytics summary={summary} token={token} role={role} /> : <Audit token={token} role={role} />;
   return <div className="app-shell">
-    <aside className={`sidebar ${sidebarCollapsed ? "collapsed" : ""}`}>
-      <div className="brand">
-        <button
-          className="brand-toggle"
-          onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
-          title={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
-          aria-label={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
-        >
-          <span className="brand-mark">S</span>
-        </button>
-        {!sidebarCollapsed && (
-          <div className="brand-text">
-            <strong>SREMS</strong>
-            <span>Operations</span>
-          </div>
-        )}
-        <button
-          className="sidebar-toggle"
-          onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
-          title={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
-          aria-label={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
-        >
-          {sidebarCollapsed ? "»" : "«"}
-        </button>
-      </div>
-      <nav aria-label="Primary navigation">
-        {navigation.map((item) => (
-          <button
-            className={`nav-item ${item.id === view ? "active" : ""}`}
-            key={item.id}
-            onClick={() => setView(item.id)}
-            title={item.label}
-          >
-            {sidebarCollapsed ? (
-              <span className="nav-icon">{item.icon}</span>
-            ) : (
-              <span className="nav-label">{item.label}</span>
-            )}
-          </button>
-        ))}
-      </nav>
-      <div className="sidebar-footer">
-        <span className="status-dot" />
-        {!sidebarCollapsed && (
-          <span className="sidebar-footer-text">
-            {error ? "API unavailable" : fleet ? "Test stub connected" : "Connecting"}
-          </span>
-        )}
-      </div>
-    </aside>
-    <main className="content"><header className="topbar"><div><p className="eyebrow">Building operations</p><div className="breadcrumb">SREMS / {active.label}</div></div><div className="operator">{token ? <><span className="avatar">{role.slice(0, 1)}</span><span><strong>{role}</strong><small>ACS session</small></span><button className="button secondary" onClick={() => { void logout(); }}>Log out</button></> : <><label className="login-field">Dashboard card<input aria-label="Dashboard card" value={credential} onChange={(event) => setCredential(event.target.value)} /></label><button className="button secondary" onClick={() => { void login(); }}>Sign in</button></>}</div></header>{summary?.backlog_exceeded && <div className="error-banner" role="alert">Request backlog exceeded: {summary.active_requests} active requests (limit {summary.backlog_limit ?? 100}, +{summary.backlog_count ?? 0} queued above limit).</div>}{(summary?.active_incidents ?? 0) > 0 && <div className="error-banner" role="alert">Critical alert: {summary?.active_incidents} active incident(s) require review.</div>}{loginError && <div className="error-banner" role="alert">{loginError}</div>}{error && <div className="error-banner" role="alert">{error}</div>}<div className="page-content">{page}</div></main>
+    <aside className="sidebar"><div className="brand"><span className="brand-mark">S</span><div><strong>SREMS</strong><span>Operations</span></div></div><nav aria-label="Primary navigation">{navigation.map((item) => <button className={`nav-item ${item.id === view ? "active" : ""}`} key={item.id} onClick={() => setView(item.id)}><span className="nav-icon">{item.icon}</span>{item.label}</button>)}<a className="nav-item nav-link" href="/player/" title="Play the recorded validation scenarios (VT-01 … VT-36) in a building cross-section"><span className="nav-icon">▶</span>Scenario player</a></nav><div className="sidebar-footer"><span className="status-dot" /> {error ? "API unavailable" : fleet ? "Test stub connected" : "Connecting"}</div></aside>
+    <main className="content"><header className="topbar"><div><p className="eyebrow">Building operations</p><div className="breadcrumb">SREMS / {active.label}</div></div><div className="topbar-tools"><span className="last-announcement" aria-hidden="true" title={lastAnnouncement}>{lastAnnouncement}</span><button className="button secondary voice-toggle" aria-pressed={voiceOn} onClick={() => setVoiceOn((on) => !on)} title={speechSupported() ? "Speak floor, direction, arrival and emergency announcements (UI-6)" : "Speech is not available in this browser; announcements still go to screen readers (UI-6)"}>{voiceOn ? "Voice: on" : "Voice: off"}</button></div><div className="operator">{token ? <><span className="avatar">{role.slice(0, 1)}</span><span><strong>{role}</strong><small>ACS session</small></span><button className="button secondary" onClick={() => { void logout(); }}>Log out</button></> : <><label className="login-field">Dashboard card<input aria-label="Dashboard card" value={credential} onChange={(event) => setCredential(event.target.value)} /></label><button className="button secondary" onClick={() => { void login(); }}>Sign in</button></>}</div></header>{summary?.backlog_exceeded && <div className="error-banner" role="alert">Request backlog exceeded: {summary.active_requests} active requests (limit {summary.backlog_limit ?? 100}, +{summary.backlog_count ?? 0} queued above limit).</div>}{(summary?.active_incidents ?? 0) > 0 && <div className="error-banner" role="alert">Critical alert: {summary?.active_incidents} active incident(s) require review.</div>}{loginError && <div className="error-banner" role="alert">{loginError}</div>}{error && <div className="error-banner" role="alert">{error}</div>}<div className="page-content">{page}</div></main>
+    <div className="sr-only" role="status" aria-live="polite" aria-atomic="true">{lastAnnouncement}</div>
   </div>;
 }
 

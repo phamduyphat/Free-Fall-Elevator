@@ -9,6 +9,8 @@ from api.analytics import router as analytics_router
 from api.emulator.system import router as system_router
 from api.operational import router as operational_router
 from api.incident import router as incident_router
+from api.wear import router as wear_router
+from api.stories import router as stories_router
 from simulation.operational import operational_simulator
 
 router = APIRouter()
@@ -36,5 +38,7 @@ async def fleet_status() -> dict:
 router.include_router(system_router)
 router.include_router(operational_router)
 router.include_router(incident_router)
+router.include_router(wear_router)
+router.include_router(stories_router)
 router.include_router(acs_router)
 router.include_router(analytics_router)

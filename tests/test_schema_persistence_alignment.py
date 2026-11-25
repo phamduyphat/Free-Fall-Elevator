@@ -293,7 +293,8 @@ class TestSchemaAndPersistenceAlignment(unittest.TestCase):
 
         seed_tables = _parse_seed_tables(seed_sql)
         sync_inserts = _extract_sync_inserts(operational_py)
-        self.assertEqual(len(sync_inserts), 7)
+        # 7 operational tables + 2 wear-and-tear tables (elevator_wear_counters/history).
+        self.assertEqual(len(sync_inserts), 9)
 
         for table_name, cols in sync_inserts:
             self.assertIn(table_name, seed_tables, f"Missing table {table_name} in seed.sql")

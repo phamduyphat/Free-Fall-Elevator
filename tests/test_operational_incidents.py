@@ -93,7 +93,13 @@ class TestIncidentsAndRecovery(unittest.TestCase):
         self.assertEqual(self.sim.cars["E1"].current_floor, 1)
         self.assertEqual(len([i for i in self.sim.incidents.values()
                               if i.kind == "DOOR_OBSTRUCTION"]), 1)
+        # FR-1.15: the door stayed OBSTRUCTED (never closed by the dwell timer).
+        self.assertEqual(self.sim.cars["E1"].door_state, "OBSTRUCTED")
         self.sim.door_obstruction("E1", False)
+        # After clearing, the doors close first; the car never travels with open doors.
+        self.sim.advance(1)
+        self.assertEqual(self.sim.cars["E1"].current_floor, 1)
+        self.assertEqual(self.sim.cars["E1"].door_state, "CLOSED")
         self.sim.advance(3)
         self.assertEqual(self.sim.cars["E1"].current_floor, 4)
 

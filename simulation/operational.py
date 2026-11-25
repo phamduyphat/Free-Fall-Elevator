@@ -18,12 +18,8 @@ from typing import Literal
 from uuid import uuid4
 from db import DbConnectionPool
 import asyncio
-from simulation.wear_tear import (
-    WearTearConfig,
-    calculate_wear_metrics,
-    run_wear_tear_benchmark,
-    select_best_car_for_wear,
-)
+
+from simulation.wear import WearConfig, WearTracker
 
 CarAvailability = Literal["IN_SERVICE", "OCCUPIED", "MAINTENANCE", "FAULT", "EMERGENCY_UNAVAILABLE", "STALE"]
 HallDirection = Literal["UP", "DOWN"]
@@ -31,12 +27,27 @@ CallType = Literal["ORDINARY", "FREIGHT"]
 TERMINAL_STATUSES = {"COMPLETED", "CANCELLED", "FAILED"}
 CAR_TERMINAL_STATUSES = {"COMPLETED", "REJECTED", "CANCELLED", "FAILED"}
 DEFAULT_BACKLOG_LIMIT = 100
+DOOR_DWELL_SECONDS = 2  # simulated door open/close dwell per served stop
+BOARDING_WINDOW_SECONDS = 30  # FR-1.21 default
+
+
+def _building_utc_offset() -> timedelta:
+    """Building local time offset (PERF-8 windows are local clock times).
+
+    The simulator clock runs in UTC. For a building in Hanoi set
+    ``SREMS_BUILDING_UTC_OFFSET_HOURS=7`` (start.ps1 does this by default); otherwise
+    07:00 local is classified as 00:00 UTC (OFF_PEAK). Default 0 keeps tests unchanged.
+    """
+    try:
+        return timedelta(hours=float(os.getenv("SREMS_BUILDING_UTC_OFFSET_HOURS", "0") or 0))
+    except ValueError:
+        return timedelta(0)
 
 
 def classify_traffic_profile(ts: datetime) -> str:
     """Classify a timestamp into PEAK, OFF_PEAK, or NORMAL using SRS PERF-8 default windows."""
-    utc_ts = _normalize_utc(ts)
-    hour = utc_ts.hour
+    local_ts = _normalize_utc(ts) + _building_utc_offset()
+    hour = local_ts.hour
     if (7 <= hour < 9) or (17 <= hour < 20):
         return "PEAK"
     if hour >= 22 or hour < 5:
@@ -89,13 +100,9 @@ class Car:
     obstruction_started: int | None = None
     obstruction_alerted: bool = False
     message: str = ""
-    # Dual wear-and-tear counters
-    total_floors: int = 0
-    total_trips: int = 0
-    floors_monthly: int = 0
-    trips_monthly: int = 0
-    floors_six_months: int = 0
-    trips_six_months: int = 0
+    # FR-1.14 / CAP-2: load as a fraction of rated capacity, when a load source exists
+    # (test-stub load sensor). None = no load data: dispatch behaves as before.
+    load_fraction: float | None = None
 
 
 @dataclass
@@ -186,9 +193,11 @@ class OperationalSimulator:
         auto_advance: bool = False,
         load_from_db: bool = True,
         backlog_limit: int | None = None,
+        wear_config: WearConfig | None = None,
     ) -> None:
         self._lock = threading.RLock()
         self._auto_advance = auto_advance
+        self._wear_config = wear_config or WearConfig.from_env()
         env_limit = os.getenv("SREMS_BACKLOG_LIMIT")
         resolved_limit = (
             backlog_limit
@@ -214,10 +223,10 @@ class OperationalSimulator:
             return
 
         async def _connect_and_load() -> None:
-            import asyncpg
+            from db import connect_db
 
             dsn = os.getenv("DATABASE_URL", DEFAULT_DSN)
-            conn = await asyncpg.connect(dsn=dsn, timeout=1.0)
+            conn = await connect_db(dsn=dsn, timeout=1.0)
             try:
                 await self.load_from_db(conn)
             finally:
@@ -250,8 +259,6 @@ class OperationalSimulator:
 
     def reset(self, *, base_time: datetime | None = None, backlog_limit: int | None = None) -> None:
         with self._lock:
-            if not hasattr(self, "wear_tear_config"):
-                self.wear_tear_config = WearTearConfig()
             if backlog_limit is not None:
                 self.backlog_limit = max(1, backlog_limit)
             self.cars: dict[str, Car] = {eid: Car(eid) for eid in self.ELEVATOR_IDS}
@@ -280,10 +287,60 @@ class OperationalSimulator:
             self.commands: list[dict] = []
             self._synced_commands_idx = 0
             self._timeout_armed: set[str] = set()
+            # Optional explanation trace of every dispatch decision (scenario player only).
+            self.decision_trace: list[dict] | None = None
+            # O(active) indexes so per-tick work does not grow with the full request history
+            # (insertion-ordered dicts used as ordered sets keep dispatch deterministic, BEN-2).
+            self._active_hall: dict[str, None] = {}
+            self._active_car: dict[str, None] = {}
+            self._boarding_watch: dict[str, None] = {}
+            self._hall_recently_closed: list[str] = []
+            self._car_recently_closed: list[str] = []
+            self._hall_synced_fp: dict[str, tuple] = {}
+            self._car_synced_fp: dict[str, tuple] = {}
+            self._wear_synced_fp: tuple | None = None
+            # Wear-and-tear trip counters (instructor NFR, WEAR-1..WEAR-6).
+            self.wear = WearTracker(self.ELEVATOR_IDS, self.base_time, self._wear_config)
+            self._wear_boundary_tick = self._tick_for(self.wear.next_boundary())
             self.heartbeats.append({"timestamp": self._now(), "status": "UP"})
 
     def _now(self) -> datetime:
         return self.base_time + timedelta(seconds=self.sim_tick)
+
+    def _tick_for(self, ts: datetime) -> int:
+        """First simulator tick at or after ``ts``."""
+        from math import ceil
+
+        return int(ceil((_normalize_utc(ts) - self.base_time).total_seconds()))
+
+    # ------------------------------------------------------------------ wear
+    def _roll_wear_windows(self) -> None:
+        """Close calendar-month / 6-month counter windows that ended (WEAR-4, WEAR-5)."""
+        closed = self.wear.advance_to(self._now())
+        for row in closed:
+            label = "Monthly" if row["window_type"] == "MONTH" else "6-month"
+            verdict = "within limit" if row["within_limit"] else "LIMIT EXCEEDED"
+            self._event(
+                "WEAR_WINDOW_CLOSED" if row["within_limit"] else "WEAR_LIMIT_EXCEEDED",
+                None,
+                f"{label} wear spread {row['wear_group']} {row['spread_pct']:.2f}% "
+                f"(limit {row['limit_pct']}%): {verdict}",
+            )
+            if row["window_type"] == "PERIOD":
+                self._event("TRIP_COUNTER_RESET", None,
+                            f"6-month trip counters reset for {row['wear_group']}")
+        self._wear_boundary_tick = self._tick_for(self.wear.next_boundary())
+
+    def wear_status(self) -> dict:
+        """Live trip counters and balance compliance (WEAR-1..WEAR-6)."""
+        with self._lock:
+            self._update_auto()
+            if self.sim_tick >= self._wear_boundary_tick:
+                self._roll_wear_windows()
+            status = self.wear.status(self._now())
+            status["source"] = "labelled-test-stub"
+            status["sim_time"] = self._now().isoformat()
+            return status
 
     @staticmethod
     def _valid_floor(elevator_id: str, floor: int) -> bool:
@@ -306,31 +363,80 @@ class OperationalSimulator:
                 self._wall_reference = now
 
     def _eta_and_insertion(self, car: Car, floor: int, direction: HallDirection | None) -> tuple[int, int]:
-        """Predicted pickup time and insertion position in committed stop order.
+        """Predicted pickup time and insertion position in the committed stop order.
 
-        A matching-direction request on the current route may be picked up on
-        the way. All other requests are appended after existing commitments.
-        Equal ETA ties are resolved by lower car ID in _assign_request.
+        The committed route is walked leg by leg. A request whose floor lies on a
+        leg that travels in the requested direction is picked up on the way (no
+        detour, only the door dwell of the stops before it). Otherwise it is
+        appended after all existing commitments. ``direction=None`` (freight or
+        rescue) accepts any leg. Ties are resolved in ``_assign_request``.
         """
         position = _position(car.current_floor)
         target = _position(floor)
-        if not car.stops:
-            return abs(position - target) + car.dwell_remaining, 0
-
-        first = _position(car.stops[0].floor)
-        travel_direction = "UP" if first > position else "DOWN" if first < position else "IDLE"
-        along_first_leg = (min(position, first) <= target <= max(position, first))
-        if along_first_leg and direction == travel_direction and car.dwell_remaining == 0:
-            return abs(position - target), 0
-
         estimate = car.dwell_remaining
         previous = position
-        for stop in car.stops:
+        for index, stop in enumerate(car.stops):
             next_pos = _position(stop.floor)
-            estimate += abs(next_pos - previous) + 2  # 2s door dwell per scheduled stop
+            if next_pos != previous:
+                leg_direction = "UP" if next_pos > previous else "DOWN"
+                if (min(previous, next_pos) <= target <= max(previous, next_pos)
+                        and (direction is None or direction == leg_direction)):
+                    return estimate + abs(target - previous), index
+            estimate += abs(next_pos - previous) + DOOR_DWELL_SECONDS
             previous = next_pos
         estimate += abs(previous - target)
         return estimate, len(car.stops)
+
+    def _route_insert_index(self, car: Car, floor: int) -> int:
+        """Collective (SCAN) position for a car call: first committed leg that passes ``floor``.
+
+        A car call never reverses the car early; it is served on the way when the car
+        will pass the floor anyway, otherwise after the existing commitments.
+        """
+        target = _position(floor)
+        previous = _position(car.current_floor)
+        for index, stop in enumerate(car.stops):
+            if stop.kind not in ("HALL", "CAR"):
+                return len(car.stops)  # never reorder exclusive service/medical/rescue runs
+            next_pos = _position(stop.floor)
+            if min(previous, next_pos) <= target <= max(previous, next_pos):
+                return index
+            previous = next_pos
+        return len(car.stops)
+
+    # Full-load bypass (FR-1.14, CAP-2): a car at or above this load takes no new hall calls
+    # and passes the pickups it already has; they go back to the queue for another car.
+    full_load_fraction: float = 1.0
+    # WEAR-3 busy gate: the wear penalty applies only while the group is not busy, i.e. while
+    # active ordinary hall calls <= this many per eligible car. In a rush every car is needed and
+    # steering calls to the least-used one overloads it (found with custom scenarios). None = off.
+    wear_busy_calls_per_car: float | None = 1.0
+    # Overload risk: seconds added when the car's load plus the pickups it has already been
+    # given would reach rated load before this pickup (load data only). 0 = off: measured with
+    # simulation.dispatch_benchmark, it did not improve waits once the busy gate was on.
+    overload_risk_seconds: float = 0.0
+    # Expected boarding per committed pickup, as a fraction of rated load (1 person of 13).
+    pickup_load_fraction: float = 1 / 13
+
+    def _full(self, car: Car) -> bool:
+        return car.load_fraction is not None and car.load_fraction >= self.full_load_fraction
+
+    def report_load(self, elevator_id: str, fraction: float) -> None:
+        """Test-stub load sensor (FR-1.14): load as a fraction of the car's rated capacity."""
+        with self._lock:
+            car = self._car(elevator_id)
+            was_full = self._full(car)
+            car.load_fraction = max(0.0, float(fraction))
+            if self._full(car) and not was_full:
+                self._event("LOAD_FULL", elevator_id, f"Car full ({car.load_fraction:.0%} of rated load)")
+
+    # "SREMS": FR-1.4 cost (predicted service time + bounded wear penalty). "NEAREST" is a
+    # naive baseline used only to compare custom scenarios; production never sets it.
+    dispatch_policy: str = "SREMS"
+
+    @staticmethod
+    def _pos(floor: int) -> int:
+        return 0 if floor == -1 else floor
 
     def _assign_request(self, request: HallRequest) -> None:
         if request.status in TERMINAL_STATUSES or request.assigned_car is not None:
@@ -338,44 +444,121 @@ class OperationalSimulator:
         if request.call_type == "FREIGHT":
             eligible = [self.cars["E5"]] if self._eligible(self.cars["E5"]) else []
         else:
-            eligible = [self.cars[eid] for eid in self.ELEVATOR_IDS[:4] if self._eligible(self.cars[eid])]
+            eligible = [self.cars[eid] for eid in self.ELEVATOR_IDS[:4]
+                        if self._eligible(self.cars[eid]) and not self._full(self.cars[eid])]
         if not eligible:
             request.transition("QUEUED")
             return
-
-        choices = [(self._eta_and_insertion(car, request.origin_floor, request.direction),
-                    int(car.elevator_id[1:]), car) for car in eligible]
-
-        if request.call_type != "FREIGHT" and getattr(self, "wear_tear_config", None) and self.wear_tear_config.enabled:
-            eta_scores = {car.elevator_id: eta_info[0] for eta_info, _, car in choices}
-            insertion_indices = {car.elevator_id: eta_info[1] for eta_info, _, car in choices}
-            active_distances = {
-                cid: self.cars[cid].floors_six_months
-                if self.wear_tear_config.strategy in ("BOTTOM_PRIORITY", "TOP_HALT")
-                else self.cars[cid].floors_monthly
-                for cid in ("E1", "E2", "E3", "E4")
-                if cid in self.cars
-            }
-            chosen = select_best_car_for_wear(
-                eligible_cars=eligible,
-                car_distances=active_distances,
-                config=self.wear_tear_config,
-                current_time=self._now(),
-                eta_scores=eta_scores,
-            )
-            index = insertion_indices[chosen.elevator_id]
-        else:
-            (eta, index), _, chosen = min(choices, key=lambda entry: (len(entry[2].stops), entry[0][0], entry[1]))
-
+        # FR-1.4 as amended by WEAR-3: predicted service time plus a bounded usage
+        # penalty for cars that are ahead of the least-used eligible car of the group.
+        penalties = self.wear.usage_penalties(car.elevator_id for car in eligible)
+        balancing = self.wear.config.balancing_enabled
+        busy_gate = False
+        if balancing and self.wear_busy_calls_per_car is not None and request.call_type == "ORDINARY":
+            active = sum(1 for rid in self._active_hall
+                         if (r := self.hall_calls[rid]).call_type == "ORDINARY" and r.status not in TERMINAL_STATUSES)
+            if active > self.wear_busy_calls_per_car * len(eligible):
+                busy_gate = True
+                penalties = {eid: 0.0 for eid in penalties}
+        best_key: tuple | None = None
+        best: tuple[Car, int, int, float] | None = None
+        trace_rows: list[dict] = []
+        nearest = self.dispatch_policy == "NEAREST"
+        for car in eligible:
+            eta, index = self._eta_and_insertion(car, request.origin_floor, request.direction)
+            penalty = penalties.get(car.elevator_id, 0.0)
+            if self.overload_risk_seconds and car.load_fraction is not None:
+                pickups_before = sum(1 for st in car.stops[:index] if st.kind == "HALL")
+                if car.load_fraction + pickups_before * self.pickup_load_fraction >= self.full_load_fraction:
+                    eta += int(self.overload_risk_seconds)
+            car_no = int(car.elevator_id[1:])
+            # FR-1.5 tie-break: equal cost -> less-travelled car this month -> lower ID.
+            key = ((eta + penalty, self.wear.cars[car.elevator_id].floors_month, car_no)
+                   if balancing else (eta, car_no))
+            if nearest:
+                # Comparison baseline only (custom scenarios): the car physically closest
+                # to the call, ignoring its direction, queued stops and wear.
+                penalty = 0.0
+                key = (abs(self._pos(car.current_floor) - self._pos(request.origin_floor)), car_no)
+            if self.decision_trace is not None:
+                trace_rows.append({"car": car.elevator_id, "eta": eta, "penalty": round(penalty, 2),
+                                   "cost": round(eta + penalty, 2), "index": index,
+                                   "floors_month": self.wear.cars[car.elevator_id].floors_month,
+                                   "floor": car.current_floor, "direction": car.direction,
+                                   "stops": len(car.stops)})
+            if best_key is None or key < best_key:
+                best_key, best = key, (car, index, eta, penalty)
+        chosen, index, eta, penalty = best  # type: ignore[misc]
+        if self.decision_trace is not None:
+            group = ("E5",) if request.call_type == "FREIGHT" else self.ELEVATOR_IDS[:4]
+            excluded = []
+            for eid in group:
+                car = self.cars[eid]
+                if car in eligible:
+                    continue
+                reason = ("full load" if self._eligible(car) and self._full(car) else
+                          "rescue car" if car.rescue_active else
+                          "stale state" if not car.connected or self.sim_tick - car.last_seen_tick > 5 else
+                          car.availability.replace("_", " ").lower())
+                excluded.append({"car": eid, "reason": reason})
+            self.decision_trace.append({
+                "tick": self.sim_tick, "request_id": request.request_id,
+                "floor": request.origin_floor, "direction": request.direction,
+                "call_type": request.call_type, "chosen": chosen.elevator_id,
+                "balancing": balancing, "busy_gate": busy_gate, "candidates": trace_rows, "excluded": excluded,
+                "cap": self.wear.config.max_penalty_seconds,
+            })
         chosen.stops.insert(index, Stop(request.origin_floor, "HALL", request.request_id))
-        self._event("ASSIGNMENT", chosen.elevator_id, f"Hall call {request.request_id} assigned")
+        self._event(
+            "ASSIGNMENT",
+            chosen.elevator_id,
+            f"Hall call {request.request_id} assigned (eta={eta}s, wear_penalty={penalty:.1f}s)",
+        )
         request.assigned_car = chosen.elevator_id
         request.transition("ASSIGNED")
 
+    _MAX_UNSYNCED_IDS = 100_000
+
+    def _prune_active_hall(self) -> None:
+        """Drop terminal requests from the active index (they stay in ``hall_calls``)."""
+        if len(self._hall_recently_closed) > self._MAX_UNSYNCED_IDS:
+            # Only reachable when no database sync is running; nothing is lost then.
+            del self._hall_recently_closed[: -self._MAX_UNSYNCED_IDS // 2]
+        if not self._active_hall:
+            return
+        active: dict[str, None] = {}
+        for rid in self._active_hall:
+            request = self.hall_calls.get(rid)
+            if request is None:
+                continue
+            if request.status in TERMINAL_STATUSES:
+                self._hall_recently_closed.append(rid)
+            else:
+                active[rid] = None
+        self._active_hall = active
+
+    def _prune_active_car(self) -> None:
+        if len(self._car_recently_closed) > self._MAX_UNSYNCED_IDS:
+            del self._car_recently_closed[: -self._MAX_UNSYNCED_IDS // 2]
+        if not self._active_car:
+            return
+        active: dict[str, None] = {}
+        for rid in self._active_car:
+            request = self.car_calls.get(rid)
+            if request is None:
+                continue
+            if request.status in CAR_TERMINAL_STATUSES:
+                self._car_recently_closed.append(rid)
+            else:
+                active[rid] = None
+        self._active_car = active
+
     def _reassign_pending(self) -> None:
         # Reassignment occurs after a car has been isolated and also when an
-        # eligible car returns while calls were queued.
-        for request in self.hall_calls.values():
+        # eligible car returns while calls were queued (oldest request first).
+        self._prune_active_hall()
+        for rid in list(self._active_hall):
+            request = self.hall_calls[rid]
             if request.status == "QUEUED" and request.assigned_car is None:
                 self._assign_request(request)
 
@@ -406,7 +589,8 @@ class OperationalSimulator:
                     self._record_command("HALL_CALL", None, "REJECTED", f"Invalid direction {direction} at floor {origin_floor}")
                     raise OperationalError("Invalid travel direction for endpoint floor")
 
-            for previous in self.hall_calls.values():
+            for rid in self._active_hall:
+                previous = self.hall_calls[rid]
                 if (previous.status not in TERMINAL_STATUSES
                     and previous.origin_floor == origin_floor
                     and previous.direction == direction
@@ -424,6 +608,7 @@ class OperationalSimulator:
                 traffic_profile=resolved_profile,
             )
             self.hall_calls[request.request_id] = request
+            self._active_hall[request.request_id] = None
             self._event("HALL_CALL", None, f"{call_type} hall call at {origin_floor}")
             request.transition("QUEUED")
             self._assign_request(request)
@@ -514,11 +699,29 @@ class OperationalSimulator:
             request.transition("AUTHORIZATION_CHECK")
             request.transition("QUEUED")
             self.car_calls[request.request_id] = request
+            self._active_car[request.request_id] = None
             self._record_command("CAR_CALL", elevator_id, "ACKNOWLEDGED", f"floor={destination_floor}")
             self._event("CAR_CALL", elevator_id, f"Authorized destination {destination_floor}")
-            car.stops.append(Stop(destination_floor, "CAR", request.request_id))
+            # Collective control: serve the destination on the way when the car passes it.
+            car.stops.insert(self._route_insert_index(car, destination_floor),
+                             Stop(destination_floor, "CAR", request.request_id))
+            self._note_boarding_from_car_call(car)
             self._check_backlog_event()
             return asdict(request)
+
+    def _note_boarding_from_car_call(self, car: Car) -> None:
+        """FR-1.21: a car call that follows a hall-call arrival on the same car and floor
+        within the boarding window is boarding evidence for that hall call."""
+        for rid in self._boarding_watch:
+            request = self.hall_calls[rid]
+            if (request.assigned_car == car.elevator_id
+                    and request.origin_floor == car.current_floor
+                    and request.boarding_evidence is None
+                    and request.boarding_deadline_tick is not None
+                    and self.sim_tick <= request.boarding_deadline_tick):
+                request.boarding_evidence = True
+                self._event("BOARDING_EVIDENCE", car.elevator_id,
+                            f"Car call after arrival; hall call {rid} boarded")
 
     def start_service_run(
         self,
@@ -553,6 +756,7 @@ class OperationalSimulator:
             request.transition("AUTHORIZATION_CHECK")
             request.transition("QUEUED")
             self.car_calls[request.request_id] = request
+            self._active_car[request.request_id] = None
             car.stops.append(Stop(destination_floor, "SERVICE", request.request_id))
             self._record_command("E5_SERVICE_RUN", "E5", "ACKNOWLEDGED", f"floor={destination_floor}")
             return asdict(request)
@@ -585,6 +789,7 @@ class OperationalSimulator:
             request.transition("AUTHORIZATION_CHECK")
             request.transition("REJECTED")
             self.car_calls[request.request_id] = request
+            self._car_recently_closed.append(request.request_id)
             return asdict(request)
 
     def _car(self, elevator_id: str) -> Car:
@@ -749,12 +954,6 @@ class OperationalSimulator:
         traversed = abs(_position(stop.floor) - _position(orig_floor))
         travel_sec = max(0.0, (now - dep_time).total_seconds())
         if traversed > 0 or stop.kind in ("CAR", "SERVICE"):
-            car.total_floors += traversed
-            car.total_trips += 1
-            car.floors_monthly += traversed
-            car.trips_monthly += 1
-            car.floors_six_months += traversed
-            car.trips_six_months += 1
             self.trips.append(
                 {
                     "trip_id": str(uuid4()),
@@ -772,16 +971,14 @@ class OperationalSimulator:
                 }
             )
         car.door_state = "OPEN"
-        car.dwell_remaining = 2
+        car.dwell_remaining = DOOR_DWELL_SECONDS
         car.direction = "IDLE"
-        if stop.kind == "HALL":
-            request = self.hall_calls[stop.request_id]
-            request.transition("ARRIVED")
-            request.arrived_at = now
-            request.wait_seconds = (request.arrived_at - request.accepted_at).total_seconds()
-            request.boarding_deadline_tick = self.sim_tick + 30
-            request.transition("COMPLETED")
-            self._event("HALL_ARRIVAL", car.elevator_id, f"Wait {request.wait_seconds:.0f}s")
+        self.wear.record_door_cycle(car.elevator_id)
+        if stop.kind in ("HALL", "CAR"):
+            self._complete_passenger_stop(car, stop, now)
+            # One door opening serves every passenger stop committed at this floor.
+            while car.stops and car.stops[0].floor == stop.floor and car.stops[0].kind in ("HALL", "CAR"):
+                self._complete_passenger_stop(car, car.stops.pop(0), now)
         elif stop.kind == "MEDICAL":
             car.medical_run = False
             car.message = "Responder floor reached; staff assistance requested"
@@ -791,24 +988,32 @@ class OperationalSimulator:
             car.dwell_remaining = car.rescue_wait_remaining
             car.message = "Rescue car waiting for Admin boarding confirmation"
             self._event("RESCUE_ARRIVAL", car.elevator_id, incident.incident_id)
+        else:  # SERVICE run on E5
+            request = self.car_calls[stop.request_id]
+            request.status = "COMPLETED"
+            request.completed_at = now
+            car.availability = "IN_SERVICE"
+
+    def _complete_passenger_stop(self, car: Car, stop: Stop, now: datetime) -> None:
+        if stop.kind == "HALL":
+            request = self.hall_calls[stop.request_id]
+            request.transition("ARRIVED")
+            request.arrived_at = now
+            request.wait_seconds = (request.arrived_at - request.accepted_at).total_seconds()
+            request.boarding_deadline_tick = self.sim_tick + BOARDING_WINDOW_SECONDS
+            request.transition("COMPLETED")
+            self._boarding_watch[request.request_id] = None
+            self._event("HALL_ARRIVAL", car.elevator_id, f"Wait {request.wait_seconds:.0f}s")
         else:
             request = self.car_calls[stop.request_id]
             request.status = "COMPLETED"
             request.completed_at = now
-            if stop.kind == "SERVICE":
-                car.availability = "IN_SERVICE"
 
     def _advance_locked(self, seconds: int) -> None:
         for _ in range(seconds):
             self.sim_tick += 1
-            if self.sim_tick > 0 and self.sim_tick % (30 * 86400) == 0:
-                for c in self.cars.values():
-                    c.floors_monthly = 0
-                    c.trips_monthly = 0
-            if self.sim_tick > 0 and self.sim_tick % (180 * 86400) == 0:
-                for c in self.cars.values():
-                    c.floors_six_months = 0
-                    c.trips_six_months = 0
+            if self.sim_tick >= self._wear_boundary_tick:
+                self._roll_wear_windows()
             if self.sim_tick % 10 == 0:
                 self.heartbeats.append({"timestamp": self._now(), "status": "UP"})
             self._escalate_incidents()
@@ -832,7 +1037,10 @@ class OperationalSimulator:
                             car.message = "Rescue wait expired; incident remains open"
                             self._clear_rescue_assignment(car.elevator_id, "RESCUE_EXPIRED")
                             self._event("RESCUE_RELEASE", car.elevator_id, "Wait expired")
-                        car.door_state = "CLOSED"
+                        # FR-1.15: the dwell ending never closes an obstructed door; it stays
+                        # OBSTRUCTED until the obstruction clears.
+                        if car.obstruction_started is None:
+                            car.door_state = "CLOSED"
                     continue
                 if not car.stops:
                     car.direction = "IDLE"
@@ -840,6 +1048,30 @@ class OperationalSimulator:
                 if car.obstruction_started is not None:
                     car.direction = "IDLE"  # synthetic interlock; never move with an active obstruction
                     continue
+                if car.door_state != "CLOSED":
+                    # Doors left open (e.g. right after an obstruction cleared): close them
+                    # first, move on the next step. A car never travels with open doors.
+                    car.door_state = "CLOSED"
+                    car.direction = "IDLE"
+                    continue
+                if self._full(car) and any(st.kind == "HALL" for st in car.stops):
+                    # Full-load bypass: nobody else fits, so pickups go back to the queue
+                    # (reassigned below, original acceptance time kept, FR-1.18).
+                    passed = []
+                    for st in [st for st in car.stops if st.kind == "HALL"]:
+                        request = self.hall_calls[st.request_id]
+                        car.stops.remove(st)
+                        if request.status not in TERMINAL_STATUSES:
+                            request.assigned_car = None
+                            request.reassignment_count += 1
+                            request.transition("QUEUED")
+                            passed.append(st.floor)
+                    if passed:
+                        self._event("FULL_LOAD_BYPASS", car.elevator_id,
+                                    "Full: pickups at " + ", ".join("B1" if f == -1 else str(f) for f in passed) + " requeued")
+                    if not car.stops:
+                        car.direction = "IDLE"
+                        continue
                 if car.elevator_id not in self._active_leg:
                     self._active_leg[car.elevator_id] = (
                         car.current_floor,
@@ -847,10 +1079,15 @@ class OperationalSimulator:
                     )
                 target = _position(car.stops[0].floor)
                 current = _position(car.current_floor)
+                was_moving = car.direction in ("UP", "DOWN")
                 car.direction = "UP" if target > current else "DOWN" if target < current else "IDLE"
                 if target != current:
                     current += 1 if target > current else -1
                     car.current_floor = _floor_from_position(current)
+                    # WEAR-1: trip counter (floors travelled) and motor starts per unit.
+                    if not was_moving:
+                        self.wear.record_start(car.elevator_id)
+                    self.wear.record_move(car.elevator_id)
                 if car.stops and car.stops[0].kind == "HALL":
                     request = self.hall_calls[car.stops[0].request_id]
                     if request.status == "ASSIGNED":
@@ -886,12 +1123,14 @@ class OperationalSimulator:
                     and not r.no_boarding
                     and r.boarding_deadline_tick is not None
                     and self.sim_tick < r.boarding_deadline_tick
-                    for r in self.hall_calls.values()
+                    for r in (self.hall_calls[rid] for rid in self._boarding_watch)
                 )
             )
             if is_idle and seconds > 60:
                 start_tick = self.sim_tick
                 self.sim_tick += seconds
+                if self.sim_tick >= self._wear_boundary_tick:
+                    self._roll_wear_windows()
                 for car in self.cars.values():
                     if car.connected:
                         car.last_seen_tick = self.sim_tick
@@ -933,12 +1172,10 @@ class OperationalSimulator:
             return [self._serialize_request(req) for req in self.hall_calls.values()]
 
     def _backlog_status(self) -> dict[str, int | bool]:
-        active_hall = sum(
-            1 for r in self.hall_calls.values() if r.status not in TERMINAL_STATUSES
-        )
-        active_car = sum(
-            1 for c in self.car_calls.values() if c.status not in CAR_TERMINAL_STATUSES
-        )
+        self._prune_active_hall()
+        self._prune_active_car()
+        active_hall = len(self._active_hall)
+        active_car = len(self._active_car)
         active_requests = active_hall + active_car
         exceeded = active_requests > self.backlog_limit
         return {
@@ -986,6 +1223,8 @@ class OperationalSimulator:
                     "active_fault": car.active_fault,
                     "medical_run": car.medical_run,
                     "rescue_active": car.rescue_active,
+                    "floors_month": self.wear.cars[car.elevator_id].floors_month,
+                    "floors_period": self.wear.cars[car.elevator_id].floors_period,
                     "message_to_occupants": car.message,
                     "message": "Software test-stub state; not connected to physical elevator equipment.",
                 } for car in self.cars.values()],
@@ -1038,7 +1277,15 @@ class OperationalSimulator:
         return incident
 
     def _detect_empty_calls(self) -> None:
-        for request in self.hall_calls.values():
+        if not self._boarding_watch:
+            return
+        expired = [rid for rid in self._boarding_watch
+                   if self.hall_calls[rid].boarding_deadline_tick is None
+                   or self.sim_tick >= self.hall_calls[rid].boarding_deadline_tick]  # type: ignore[operator]
+        for rid in expired:
+            self._boarding_watch.pop(rid, None)
+            self._hall_recently_closed.append(rid)  # no_boarding may have changed: re-sync once
+            request = self.hall_calls[rid]
             if (request.status == "COMPLETED" and request.boarding_evidence is False
                     and not request.no_boarding and request.boarding_deadline_tick is not None
                     and self.sim_tick >= request.boarding_deadline_tick):
@@ -1235,6 +1482,8 @@ class OperationalSimulator:
             car.obstruction_started = self.sim_tick if active else None
             car.obstruction_alerted = False
             car.door_state = "OBSTRUCTED" if active else "OPEN"
+            if not active:
+                car.dwell_remaining = max(car.dwell_remaining, 1)  # close after a short dwell
             self._event("OBSTRUCTION" if active else "OBSTRUCTION_CLEARED", elevator_id,
                         "synthetic sensor event")
             return self.fleet_status()
@@ -1259,6 +1508,8 @@ class OperationalSimulator:
             if car.rescue_active and action == "CLOSE":
                 self._record_command("DOOR_COMMAND", elevator_id, "REJECTED", "Rescue wait active")
                 raise OperationalError("Door close prohibited during active rescue wait")
+            if action == "OPEN" and car.door_state != "OPEN":
+                self.wear.record_door_cycle(elevator_id)
             car.door_state = "OPEN" if action == "OPEN" else "CLOSED"
             if car.rescue_active and action == "OPEN":
                 car.dwell_remaining = max(car.dwell_remaining, car.rescue_wait_remaining)
@@ -1656,14 +1907,89 @@ class OperationalSimulator:
                     "fleet_available": sum(self._eligible(c) for c in self.cars.values()),
                     "fleet_count": len(self.cars), "events_count": len(self.events)}
 
+    def compact_history(self, keep_seconds: int = 3600) -> list[HallRequest]:
+        """Drop finished history older than ``keep_seconds`` from memory.
+
+        For offline, database-free long runs only (``simulation/wear_benchmark.py``):
+        months of simulated traffic would otherwise keep millions of request, trip,
+        event and heartbeat objects in memory. Returns the removed hall requests so the
+        caller can aggregate their wait times first. Must not be used on a simulator
+        that syncs to PostgreSQL, because it rewrites the sync bookkeeping.
+        """
+        with self._lock:
+            horizon = self._now() - timedelta(seconds=keep_seconds)
+            self._prune_active_hall()
+            self._prune_active_car()
+            keep_ids = set(self._active_hall) | set(self._boarding_watch)
+            removed: list[HallRequest] = []
+            kept_hall: dict[str, HallRequest] = {}
+            for rid, request in self.hall_calls.items():
+                stamp = request.arrived_at or request.accepted_at
+                if rid not in keep_ids and request.status in TERMINAL_STATUSES and stamp < horizon:
+                    removed.append(request)
+                else:
+                    kept_hall[rid] = request
+            self.hall_calls = kept_hall
+            keep_car = set(self._active_car)
+            self.car_calls = {
+                rid: c for rid, c in self.car_calls.items()
+                if rid in keep_car or c.status not in CAR_TERMINAL_STATUSES
+                or (c.completed_at or c.accepted_at) >= horizon
+            }
+            self.trips = [t for t in self.trips if t["arrival_time"] >= horizon]
+            self.events = [e for e in self.events if e["sim_tick"] >= self.sim_tick - keep_seconds]
+            self.commands = [c for c in self.commands if c["created_at"] >= horizon]
+            self.heartbeats = [h for h in self.heartbeats if h["timestamp"] >= horizon]
+            self._hall_recently_closed.clear()
+            self._car_recently_closed.clear()
+            self._hall_synced_fp.clear()
+            self._car_synced_fp.clear()
+            self._synced_trips_idx = len(self.trips)
+            self._synced_heartbeats_idx = len(self.heartbeats)
+            self._synced_commands_idx = len(self.commands)
+            self.wear.unsynced_history.clear()
+            return removed
+
     async def sync_to_db(self, conn: object) -> None:
         """Asynchronously sync operational state (hall_calls, trips, car_calls, incidents, heartbeats, downtime) to PostgreSQL."""
         if conn is None:
             return
         try:
             with self._lock:
-                hall_calls_snapshot = list(self.hall_calls.values())
-                car_calls_snapshot = list(self.car_calls.values())
+                # Incremental sync: only requests that are active, inside the boarding
+                # window, or closed since the last sync are candidates, and only rows
+                # whose content changed are written (PERF-2 / CAP-1: the per-tick cost
+                # no longer grows with the whole request history).
+                self._prune_active_hall()
+                self._prune_active_car()
+                hall_ids = list(dict.fromkeys(
+                    [*self._active_hall, *self._boarding_watch, *self._hall_recently_closed]))
+                car_ids = list(dict.fromkeys([*self._active_car, *self._car_recently_closed]))
+                hall_final = set(hall_ids) - set(self._active_hall) - set(self._boarding_watch)
+                car_final = set(car_ids) - set(self._active_car)
+                closed_hall_len = len(self._hall_recently_closed)
+                closed_car_len = len(self._car_recently_closed)
+                hall_calls_snapshot = []
+                hall_fps: dict[str, tuple] = {}
+                for rid in hall_ids:
+                    r = self.hall_calls.get(rid)
+                    if r is None:
+                        continue
+                    fp = (r.status, r.assigned_car, r.arrived_at, r.wait_seconds,
+                          r.reassignment_count, r.no_boarding, r.cancellation_reason)
+                    hall_fps[rid] = fp
+                    if self._hall_synced_fp.get(rid) != fp:
+                        hall_calls_snapshot.append(HallRequest(**{**r.__dict__, "history": list(r.history)}))
+                car_calls_snapshot = []
+                car_fps: dict[str, tuple] = {}
+                for rid in car_ids:
+                    c = self.car_calls.get(rid)
+                    if c is None:
+                        continue
+                    fp = (c.status, c.completed_at, c.rejection_reason)
+                    car_fps[rid] = fp
+                    if self._car_synced_fp.get(rid) != fp:
+                        car_calls_snapshot.append(CarRequest(**{**c.__dict__, "history": list(c.history)}))
                 trips_to_sync = list(self.trips[self._synced_trips_idx:])
                 incidents_snapshot = list(self.incidents.values())
                 downtime_to_sync = [
@@ -1946,9 +2272,94 @@ class OperationalSimulator:
                 )
                 self._synced_heartbeats_idx = current_heartbeats_len
                 self._synced_commands_idx = current_commands_len
+                for rid, fp in hall_fps.items():
+                    if rid in hall_final:
+                        self._hall_synced_fp.pop(rid, None)  # final state written; forget it
+                    else:
+                        self._hall_synced_fp[rid] = fp
+                for rid, fp in car_fps.items():
+                    if rid in car_final:
+                        self._car_synced_fp.pop(rid, None)
+                    else:
+                        self._car_synced_fp[rid] = fp
+                del self._hall_recently_closed[:closed_hall_len]
+                del self._car_recently_closed[:closed_car_len]
         except Exception as exc:
             import logging
             logging.getLogger("srems.sync").debug("DB sync skipped or failed: %s", exc)
+            return
+        await self._sync_wear_to_db(conn)
+
+    async def _sync_wear_to_db(self, conn: object) -> None:
+        """Persist trip counters and closed month/period windows (WEAR-6, DAT-1).
+
+        Kept separate so an older database without the wear tables (seed.sql not
+        re-run) does not block the rest of the operational sync.
+        """
+        try:
+            with self._lock:
+                rows = self.wear.counter_rows(self._now())
+                fp = tuple(
+                    (r["elevator_id"], r["floors_month"], r["floors_period"], r["floors_lifetime"],
+                     r["starts_lifetime"], r["doors_lifetime"], r["month_start"], r["period_start"])
+                    for r in rows
+                )
+                history = list(self.wear.unsynced_history)
+                history_len = len(history)
+                write_counters = fp != self._wear_synced_fp
+            if write_counters:
+                for r in rows:
+                    await conn.execute(  # type: ignore[union-attr]
+                        """
+                        INSERT INTO elevator_wear_counters (
+                            elevator_id, wear_group, period_start, month_start,
+                            floors_month, floors_period, floors_lifetime,
+                            starts_month, starts_period, starts_lifetime,
+                            doors_month, doors_period, doors_lifetime, updated_at
+                        )
+                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+                        ON CONFLICT (elevator_id) DO UPDATE SET
+                            wear_group = EXCLUDED.wear_group,
+                            period_start = EXCLUDED.period_start,
+                            month_start = EXCLUDED.month_start,
+                            floors_month = EXCLUDED.floors_month,
+                            floors_period = EXCLUDED.floors_period,
+                            floors_lifetime = EXCLUDED.floors_lifetime,
+                            starts_month = EXCLUDED.starts_month,
+                            starts_period = EXCLUDED.starts_period,
+                            starts_lifetime = EXCLUDED.starts_lifetime,
+                            doors_month = EXCLUDED.doors_month,
+                            doors_period = EXCLUDED.doors_period,
+                            doors_lifetime = EXCLUDED.doors_lifetime,
+                            updated_at = EXCLUDED.updated_at;
+                        """,
+                        r["elevator_id"], r["group"], r["period_start"], r["month_start"],
+                        r["floors_month"], r["floors_period"], r["floors_lifetime"],
+                        r["starts_month"], r["starts_period"], r["starts_lifetime"],
+                        r["doors_month"], r["doors_period"], r["doors_lifetime"], r["updated_at"],
+                    )
+            for h in history:
+                await conn.execute(  # type: ignore[union-attr]
+                    """
+                    INSERT INTO elevator_wear_history (
+                        window_id, window_type, wear_group, window_start, window_end,
+                        per_car_floors, spread_pct, limit_pct, within_limit, closed_at
+                    )
+                    VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9, $10)
+                    ON CONFLICT (window_id) DO NOTHING;
+                    """,
+                    h["window_id"], h["window_type"], h["wear_group"],
+                    _normalize_utc(h["window_start"]), _normalize_utc(h["window_end"]),
+                    json.dumps(h["per_car_floors"]), float(h["spread_pct"]), float(h["limit_pct"]),
+                    bool(h["within_limit"]), _normalize_utc(h["closed_at"]),
+                )
+            with self._lock:
+                if write_counters:
+                    self._wear_synced_fp = fp
+                del self.wear.unsynced_history[:history_len]
+        except Exception as exc:
+            import logging
+            logging.getLogger("srems.sync").debug("Wear counter sync skipped or failed: %s", exc)
 
     async def load_from_db(self, conn: object) -> bool:
         """Load operational state previously persisted by `sync_to_db` from PostgreSQL.
@@ -2043,7 +2454,48 @@ class OperationalSimulator:
             logging.getLogger("srems.sync").debug("DB load skipped or failed: %s", exc)
             return False
 
-        if not (hall_rows or trip_rows or car_call_rows or incident_rows or downtime_rows or heartbeat_rows or command_rows):
+        wear_counter_rows: list[dict] = []
+        wear_history_rows: list[dict] = []
+        try:
+            wear_counter_rows = [
+                dict(r)
+                for r in await conn.fetch(  # type: ignore[union-attr]
+                    """
+                    SELECT elevator_id, wear_group, period_start, month_start,
+                           floors_month, floors_period, floors_lifetime,
+                           starts_month, starts_period, starts_lifetime,
+                           doors_month, doors_period, doors_lifetime
+                    FROM elevator_wear_counters
+                    ORDER BY elevator_id ASC
+                    """
+                )
+            ]
+            wear_history_rows = [
+                dict(r)
+                for r in await conn.fetch(  # type: ignore[union-attr]
+                    """
+                    SELECT window_id, window_type, wear_group, window_start, window_end,
+                           per_car_floors, spread_pct, limit_pct, within_limit, closed_at
+                    FROM elevator_wear_history
+                    ORDER BY window_start DESC
+                    LIMIT 200
+                    """
+                )
+            ]
+            for row in wear_history_rows:
+                if isinstance(row.get("per_car_floors"), str):
+                    row["per_car_floors"] = json.loads(row["per_car_floors"])
+                for key in ("window_start", "window_end", "closed_at"):
+                    if row.get(key) is not None:
+                        row[key] = _normalize_utc(row[key])
+            wear_counter_rows = [r for r in wear_counter_rows if r.get("month_start") and r.get("period_start")]
+        except Exception as exc:  # older database without the wear tables
+            import logging
+            logging.getLogger("srems.sync").debug("Wear counter load skipped: %s", exc)
+            wear_counter_rows, wear_history_rows = [], []
+
+        if not (hall_rows or trip_rows or car_call_rows or incident_rows or downtime_rows
+                or heartbeat_rows or command_rows or wear_counter_rows):
             return False
 
         reverse_kind_map = {
@@ -2135,6 +2587,8 @@ class OperationalSimulator:
                     history=history,
                 )
                 self.hall_calls[req.request_id] = req
+                if status not in TERMINAL_STATUSES:
+                    self._active_hall[req.request_id] = None
                 timestamps.append(req.accepted_at)
                 if req.arrived_at is not None:
                     timestamps.append(req.arrived_at)
@@ -2173,6 +2627,8 @@ class OperationalSimulator:
                     rejection_reason=row.get("cancellation_reason"),
                 )
                 self.car_calls[car_req.request_id] = car_req
+                if status not in CAR_TERMINAL_STATUSES:
+                    self._active_car[car_req.request_id] = None
                 timestamps.append(car_req.accepted_at)
                 if car_req.completed_at is not None:
                     timestamps.append(car_req.completed_at)
@@ -2349,68 +2805,14 @@ class OperationalSimulator:
                 if car.connected:
                     car.last_seen_tick = self.sim_tick
 
+            # 8. Wear-and-tear trip counters (WEAR-6): restore, then roll any month or
+            # 6-month window that ended while SREMS was down.
+            self.wear = WearTracker(self.ELEVATOR_IDS, now_utc, self._wear_config)
+            self.wear.restore(wear_counter_rows, wear_history_rows, now_utc)
+            self._wear_synced_fp = None
+            self._wear_boundary_tick = self._tick_for(self.wear.next_boundary())
+
         return True
-
-    def get_wear_tear_config(self) -> dict:
-        with self._lock:
-            if not hasattr(self, "wear_tear_config"):
-                self.wear_tear_config = WearTearConfig()
-            return self.wear_tear_config.to_dict()
-
-    def update_wear_tear_config(self, data: dict) -> dict:
-        with self._lock:
-            self.wear_tear_config = WearTearConfig.from_dict(data)
-            return self.wear_tear_config.to_dict()
-
-    def get_wear_tear_status(self) -> dict:
-        with self._lock:
-            if not hasattr(self, "wear_tear_config"):
-                self.wear_tear_config = WearTearConfig()
-            car_stats = {}
-            distances_monthly = {}
-            distances_six_months = {}
-            for cid in self.ELEVATOR_IDS:
-                car = self.cars[cid]
-                car_stats[cid] = {
-                    "elevator_id": cid,
-                    "total_floors": car.total_floors,
-                    "total_trips": car.total_trips,
-                    "floors_monthly": car.floors_monthly,
-                    "trips_monthly": car.trips_monthly,
-                    "floors_six_months": car.floors_six_months,
-                    "trips_six_months": car.trips_six_months,
-                }
-                if cid in ("E1", "E2", "E3", "E4"):
-                    distances_monthly[cid] = car.floors_monthly
-                    distances_six_months[cid] = car.floors_six_months
-
-            monthly_metrics = calculate_wear_metrics(distances_monthly, self.wear_tear_config)
-            six_month_metrics = calculate_wear_metrics(distances_six_months, self.wear_tear_config)
-
-            return {
-                "config": self.wear_tear_config.to_dict(),
-                "car_stats": car_stats,
-                "monthly": asdict(monthly_metrics),
-                "six_months": asdict(six_month_metrics),
-            }
-
-    def reset_wear_tear_counters(self, scope: str = "ALL") -> dict:
-        with self._lock:
-            scope_clean = str(scope).upper()
-            for car in self.cars.values():
-                if scope_clean in ("MONTHLY", "ALL"):
-                    car.floors_monthly = 0
-                    car.trips_monthly = 0
-                if scope_clean in ("SIX_MONTHS", "ALL"):
-                    car.floors_six_months = 0
-                    car.trips_six_months = 0
-                if scope_clean in ("LIFETIME", "ALL"):
-                    car.total_floors = 0
-                    car.total_trips = 0
-            if scope_clean in ("LIFETIME", "ALL"):
-                self.trips.clear()
-            return self.get_wear_tear_status()
-
 
 
 # The singleton drives demo API views; instantiate a new simulator for isolated tests.

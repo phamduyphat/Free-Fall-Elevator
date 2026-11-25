@@ -375,6 +375,42 @@ CREATE INDEX IF NOT EXISTS idx_elevator_commands_created_at ON elevator_commands
 CREATE INDEX IF NOT EXISTS idx_elevator_commands_status ON elevator_commands (status);
 CREATE INDEX IF NOT EXISTS idx_elevator_commands_elevator_id ON elevator_commands (elevator_id);
 
+-- 4.9 `elevator_wear_counters` (Trip counters per car - WEAR-1, WEAR-4, WEAR-6, ANA-5.4)
+--     floors_* = floors travelled; starts_* = motor starts; doors_* = door cycles.
+--     *_month resets on the 1st of every month (UTC); *_period resets every 6 months.
+CREATE TABLE IF NOT EXISTS elevator_wear_counters (
+    elevator_id      VARCHAR(5)  PRIMARY KEY CHECK (elevator_id IN ('E1', 'E2', 'E3', 'E4', 'E5')),
+    wear_group       VARCHAR(20) NOT NULL,
+    period_start     TIMESTAMPTZ NOT NULL,
+    month_start      TIMESTAMPTZ NOT NULL,
+    floors_month     BIGINT      NOT NULL DEFAULT 0 CHECK (floors_month >= 0),
+    floors_period    BIGINT      NOT NULL DEFAULT 0 CHECK (floors_period >= 0),
+    floors_lifetime  BIGINT      NOT NULL DEFAULT 0 CHECK (floors_lifetime >= 0),
+    starts_month     BIGINT      NOT NULL DEFAULT 0,
+    starts_period    BIGINT      NOT NULL DEFAULT 0,
+    starts_lifetime  BIGINT      NOT NULL DEFAULT 0,
+    doors_month      BIGINT      NOT NULL DEFAULT 0,
+    doors_period     BIGINT      NOT NULL DEFAULT 0,
+    doors_lifetime   BIGINT      NOT NULL DEFAULT 0,
+    updated_at       TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 4.10 `elevator_wear_history` (Closed month / 6-month windows - WEAR-2, WEAR-3, WEAR-5, DAT-2)
+CREATE TABLE IF NOT EXISTS elevator_wear_history (
+    window_id        VARCHAR(40)      PRIMARY KEY,
+    window_type      VARCHAR(10)      NOT NULL CHECK (window_type IN ('MONTH', 'PERIOD')),
+    wear_group       VARCHAR(20)      NOT NULL,
+    window_start     TIMESTAMPTZ      NOT NULL,
+    window_end       TIMESTAMPTZ      NOT NULL,
+    per_car_floors   JSONB            NOT NULL,
+    spread_pct       DOUBLE PRECISION NOT NULL,
+    limit_pct        DOUBLE PRECISION NOT NULL,
+    within_limit     BOOLEAN          NOT NULL,
+    closed_at        TIMESTAMPTZ      NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_wear_history_window_start ON elevator_wear_history (window_start);
+
 -- Idempotent schema alignment for existing databases created with earlier seed.sql revisions
 DO $$
 BEGIN
@@ -503,7 +539,9 @@ BEGIN
     ALTER TABLE audit_log_chain ALTER COLUMN timestamp TYPE TIMESTAMPTZ;
     ALTER TABLE trips ALTER COLUMN departure_time TYPE TIMESTAMPTZ;
     ALTER TABLE trips ALTER COLUMN arrival_time TYPE TIMESTAMPTZ;
-    ALTER TABLE trips ALTER COLUMN created_at TYPE TIMESTAMPTZ;
+    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'trips' AND column_name = 'created_at') THEN
+        ALTER TABLE trips ALTER COLUMN created_at TYPE TIMESTAMPTZ;  -- column only exists in pre-1.1 databases
+    END IF;
     ALTER TABLE hall_calls ALTER COLUMN created_at TYPE TIMESTAMPTZ;
     ALTER TABLE hall_calls ALTER COLUMN assigned_at TYPE TIMESTAMPTZ;
     ALTER TABLE hall_calls ALTER COLUMN approaching_at TYPE TIMESTAMPTZ;
@@ -515,7 +553,9 @@ BEGIN
     ALTER TABLE car_calls ALTER COLUMN completed_at TYPE TIMESTAMPTZ;
     ALTER TABLE car_downtime_intervals ALTER COLUMN started_at TYPE TIMESTAMPTZ;
     ALTER TABLE car_downtime_intervals ALTER COLUMN ended_at TYPE TIMESTAMPTZ;
-    ALTER TABLE car_downtime_intervals ALTER COLUMN created_at TYPE TIMESTAMPTZ;
+    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'car_downtime_intervals' AND column_name = 'created_at') THEN
+        ALTER TABLE car_downtime_intervals ALTER COLUMN created_at TYPE TIMESTAMPTZ;  -- column only exists in pre-1.1 databases
+    END IF;
     ALTER TABLE system_heartbeats ALTER COLUMN timestamp TYPE TIMESTAMPTZ;
     ALTER TABLE incidents ALTER COLUMN created_at TYPE TIMESTAMPTZ;
     ALTER TABLE incidents ALTER COLUMN acknowledged_at TYPE TIMESTAMPTZ;

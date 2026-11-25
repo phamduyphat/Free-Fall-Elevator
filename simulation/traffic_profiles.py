@@ -4,7 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 import random
-from typing import Any, Literal
+from typing import Literal
 
 from simulation.clock import MORNING_PEAK_BASE_TIME, OFF_PEAK_BASE_TIME
 from simulation.operational import OperationalSimulator
@@ -85,105 +85,4 @@ def run_traffic_profile(
         sim.advance(1)
 
     return request_ids
-
-
-def inject_load_burst(
-    sim: OperationalSimulator,
-    count: int = 50,
-    profile: str = "RANDOM",
-    auto_step_seconds: int = 0,
-    seed: int | None = None,
-) -> dict[str, Any]:
-    """Inject a burst of realistic simulated passenger calls into OperationalSimulator."""
-    rng = random.Random(seed) if seed is not None else random.Random()
-    profile_upper = str(profile).upper()
-    submitted = 0
-    merged = 0
-
-    for _ in range(max(1, min(1000, count))):
-        roll = rng.random()
-        if profile_upper == "MORNING_PEAK":
-            if roll < 0.70:
-                origin = rng.randint(2, 30)
-                direction = "DOWN"
-            elif roll < 0.90:
-                origin = -1 if rng.random() < 0.25 else 1
-                direction = "UP"
-            else:
-                origin = rng.randint(2, 29)
-                direction = "UP"
-            call_type = "ORDINARY"
-        elif profile_upper == "EVENING_PEAK":
-            if roll < 0.70:
-                origin = -1 if rng.random() < 0.25 else 1
-                direction = "UP"
-            elif roll < 0.90:
-                origin = rng.randint(2, 30)
-                direction = "DOWN"
-            else:
-                origin = rng.randint(2, 30)
-                direction = "DOWN"
-            call_type = "ORDINARY"
-        elif profile_upper == "FREIGHT":
-            if roll < 0.45 and sim.cars["E5"].availability == "IN_SERVICE":
-                origin = rng.randint(1, 30)
-                direction = None
-                call_type = "FREIGHT"
-            else:
-                origin = rng.randint(1, 30)
-                direction = "UP" if origin < 15 else "DOWN"
-                call_type = "ORDINARY"
-        elif profile_upper == "OFF_PEAK":
-            origin = rng.randint(-1, 30)
-            if origin == 0:
-                origin = 1
-            if origin == -1:
-                direction = "UP"
-            elif origin == 30:
-                direction = "DOWN"
-            else:
-                direction = "UP" if rng.random() < 0.5 else "DOWN"
-            call_type = "ORDINARY"
-        else:  # RANDOM / STRESS
-            origin = rng.randint(-1, 30)
-            if origin == 0:
-                origin = 1
-            if origin == -1:
-                direction = "UP"
-            elif origin == 30:
-                direction = "DOWN"
-            else:
-                direction = "UP" if rng.random() < 0.5 else "DOWN"
-            call_type = "ORDINARY"
-
-        try:
-            _, is_merged = sim.submit_hall_call(
-                origin_floor=origin,
-                direction=direction,  # type: ignore[arg-type]
-                call_type=call_type,  # type: ignore[arg-type]
-                traffic_profile=profile_upper if profile_upper in ("PEAK", "OFF_PEAK") else "NORMAL",
-            )
-            submitted += 1
-            if is_merged:
-                merged += 1
-        except Exception:
-            pass
-
-    if auto_step_seconds > 0:
-        sim.advance(auto_step_seconds)
-
-    active_calls = sum(
-        1 for r in sim.hall_calls.values() if r.status not in ("COMPLETED", "CANCELLED", "FAILED")
-    )
-
-    return {
-        "requested_count": count,
-        "submitted": submitted,
-        "merged": merged,
-        "new_requests": submitted - merged,
-        "active_hall_calls": active_calls,
-        "advanced_seconds": auto_step_seconds,
-        "profile": profile_upper,
-    }
-
 

@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#eef1f2">
+  <title>SREMS validation tests</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="player.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="../" title="Back to the SREMS dashboard">
+      <svg viewBox="0 0 28 28" aria-hidden="true"><rect x="6.5" y="2.5" width="15" height="23" rx="1.5"/><path d="M14 2.5v23"/><path class="led" d="M10.2 9.5l2-2.6 2 2.6zM15.8 18.5l2 2.6 2-2.6z"/></svg>
+      <span>SREMS</span>
+    </a>
+    <span class="crumb">Validation tests</span>
+    <button type="button" class="test-btn" id="open-picker" aria-haspopup="dialog" aria-controls="picker" title="Test register (S)">
+      <span class="vt" id="cur-vt"></span><span class="title" id="cur-title">Choose a test</span><span class="chev" aria-hidden="true"></span>
+    </button>
+    <button type="button" class="quiet" id="edit-test" hidden>Edit this test</button>
+    <button type="button" class="new-test" id="new-test" aria-haspopup="dialog" aria-controls="builder" title="Choose people, floors, timing and incidents yourself (N)">New test</button>
+    <div class="topbar-right">
+      <button type="button" class="quiet" id="rerun" title="Record this scenario again on the running backend">Re-run on server</button>
+      <a class="quiet" href="../">Dashboard</a>
+    </div>
+  </header>
+
+  <main class="stage">
+    <section class="drawing" aria-label="Section through the lift core">
+      <svg id="tower" role="img" aria-label="Section through the lift core: levels B1 to 30, five lift shafts"></svg>
+      <div class="banner" id="banner" role="alert" hidden></div>
+      <dl class="titleblock">
+        <div class="tb-drawing"><dt>Drawing</dt><dd>Lift core section</dd></div>
+        <div><dt>Test</dt><dd id="tb-test">—</dd></div>
+        <div class="tb-time"><dt>Simulated time</dt><dd><span id="clock-time">--:--:--</span> <small id="clock-date"></small></dd></div>
+        <div><dt>Elapsed</dt><dd id="clock-t">0.0 s</dd></div>
+        <div class="tb-key" aria-label="Key to the drawing">
+          <dt>Key</dt>
+          <dd>
+            <span><svg viewBox="0 0 12 12"><path d="M1 10L6 2l5 8z" fill="#d98200"/></svg>Call waiting</span>
+            <span><svg viewBox="0 0 12 12"><path d="M1 10L6 2l5 8z" fill="#1f55a6"/></svg>Call assigned</span>
+            <span><svg viewBox="0 0 12 12"><circle cx="6" cy="6" r="3.8" fill="none" stroke="#1f55a6" stroke-width="1.8"/></svg>Pickup</span>
+            <span><svg viewBox="0 0 12 12"><circle cx="6" cy="6" r="3.8" fill="#1f7a55"/></svg>Destination</span>
+            <span><svg viewBox="0 0 12 12"><path d="M1.5 6h9M6 1.5v9" stroke="#b42318" stroke-width="2.4"/></svg>Medical or rescue</span>
+            <span><svg viewBox="0 0 14 12"><rect x="1" y="1.5" width="12" height="9" fill="none" stroke="#46535f" stroke-width="1.2" stroke-dasharray="3 2"/></svg>Car in this step</span>
+          </dd>
+        </div>
+      </dl>
+    </section>
+
+    <aside class="record" aria-label="What happened and why">
+      <section class="moment-wrap" aria-live="polite">
+        <p class="tagline" id="tagline"></p>
+        <div class="moment" id="moment"></div>
+        <p class="reqs" id="reqs"></p>
+      </section>
+
+      <section class="modules" aria-label="Which SREMS module acted">
+        <div class="module-line" id="bus"></div>
+      </section>
+
+      <section class="step" id="event" aria-live="polite"></section>
+
+      <section class="compare" id="compare" hidden></section>
+
+      <section class="columns">
+        <div class="acceptance">
+          <h2>Acceptance record <span id="verdict" class="verdict"></span></h2>
+          <ol class="criteria" id="criteria"></ol>
+          <p class="signoff" id="signoff"></p>
+        </div>
+        <div class="readings-col">
+          <h2>Readings</h2>
+          <dl class="readings" id="readings"></dl>
+          <h3 id="trips-title">Floors travelled in this run</h3>
+          <div class="trips" id="trips"></div>
+        </div>
+      </section>
+
+      <section class="logbook">
+        <h2>Log <label class="small-toggle"><input type="checkbox" id="show-minor"> Show boarding and routine steps</label></h2>
+        <ol class="log" id="log"></ol>
+      </section>
+    </aside>
+  </main>
+
+  <footer class="transport">
+    <div class="buttons">
+      <button type="button" id="prev" aria-label="Previous step" title="Previous step (←)">
+        <svg viewBox="0 0 24 24"><path d="M6 6h2v12H6zM19 6v12l-9-6z"/></svg></button>
+      <button type="button" id="play" class="play" aria-label="Play" title="Play or pause (Space)">
+        <svg viewBox="0 0 24 24" id="play-icon"><path d="M8 5.5v13l10.5-6.5z"/></svg></button>
+      <button type="button" id="next" aria-label="Next step" title="Next step (→)">
+        <svg viewBox="0 0 24 24"><path d="M16 6h2v12h-2zM5 6v12l9-6z"/></svg></button>
+      <label class="speed">Speed
+        <select id="speed">
+          <option value="0.5">0.5×</option><option value="1">1×</option><option value="2" selected>2×</option>
+          <option value="4">4×</option><option value="8">8×</option>
+        </select>
+      </label>
+    </div>
+    <div class="timeline">
+      <div class="marks" id="marks" aria-hidden="true"></div>
+      <input type="range" id="scrub" min="0" max="100" step="0.05" value="0" aria-label="Simulated time">
+      <div class="time-row"><span id="t-now">0 s</span><span id="t-step"></span><span id="t-end">0 s</span></div>
+    </div>
+    <div class="toggles">
+      <label><input type="checkbox" id="autopause" checked> Stop at key moments</label>
+      <span class="source" id="source"></span>
+    </div>
+  </footer>
+
+  <div class="picker" id="picker" role="dialog" aria-modal="true" aria-labelledby="picker-title" hidden>
+    <div class="register">
+      <div class="register-head">
+        <div>
+          <h2 id="picker-title">Test register</h2>
+          <p>Choose a test to run it. Every run was recorded from the real simulator (<code>simulation/operational.py</code>); its pass criteria were checked against the simulator's state each simulated second.</p>
+        </div>
+        <button type="button" class="close" id="close-picker" aria-label="Close the test register">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+      </div>
+      <table class="register-table">
+        <thead><tr><th scope="col">Test</th><th scope="col">Scenario</th><th scope="col" class="num">Criteria</th><th scope="col" class="num">Length</th><th scope="col" class="num"><span class="sr">Shortcut</span></th></tr></thead>
+        <tbody id="picker-list"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="picker" id="builder" role="dialog" aria-modal="true" aria-labelledby="builder-title" hidden>
+    <form class="register builder" id="builder-form" novalidate>
+      <div class="register-head">
+        <div>
+          <h2 id="builder-title">New test</h2>
+          <p>Decide who uses the lifts, where they start, where they go and when; add incidents if you like. The backend runs it on the real simulator, then runs the same people under two simpler dispatch rules so you can see whether SREMS is actually doing better.</p>
+        </div>
+        <button type="button" class="close" data-close aria-label="Close without running">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+      </div>
+
+      <fieldset class="b-basics">
+        <legend>Scenario</legend>
+        <label class="wide">Name <input id="b-name" maxlength="80" required></label>
+        <label>Time of day <input id="b-start" type="time" step="1" required></label>
+        <label>Random seed <input id="b-seed" type="number" min="0" step="1" required>
+          <small>Same seed, same people</small></label>
+        <label>Target average wait <span class="unit"><input id="b-avg" type="number" min="1" step="1" required> s</span></label>
+        <label>Target 95th percentile <span class="unit"><input id="b-p95" type="number" min="1" step="1" required> s</span></label>
+      </fieldset>
+
+      <fieldset>
+        <legend>Start from a traffic pattern <small>(replaces the groups below)</small></legend>
+        <div class="presets" id="b-presets"></div>
+      </fieldset>
+
+      <fieldset>
+        <legend>People <span class="b-total" id="b-total"></span></legend>
+        <table class="b-table" id="b-groups">
+          <thead><tr><th>Who</th><th class="num">How many</th><th>From</th><th>To</th><th class="num">First at</th><th class="num">Spread over</th><th>Carrying</th><th><span class="sr">Remove</span></th></tr></thead>
+          <tbody></tbody>
+        </table>
+        <button type="button" class="add" id="b-add-group">Add a group</button>
+        <p class="b-help">From and To: the lobby, B1 parking, a band of floors (one is drawn per person), or your own floors, such as <code>12</code> or <code>12, 18, 25</code>. Each person appears at a random second between "first at" and "first at + spread over".</p>
+      </fieldset>
+
+      <fieldset>
+        <legend>Cars at the start</legend>
+        <table class="b-table b-cars" id="b-cars">
+          <thead><tr><th>Car</th><th>Floor</th><th>State</th><th class="num">Floors travelled this month</th></tr></thead>
+          <tbody></tbody>
+        </table>
+        <p class="b-help">Give one car fewer floors this month (for example 456,000 against 465,000) to watch wear balancing send it extra calls. E5 carries goods only.</p>
+      </fieldset>
+
+      <fieldset>
+        <legend>Incidents</legend>
+        <table class="b-table" id="b-incidents">
+          <thead><tr><th>What happens</th><th>Car</th><th class="num">At</th><th class="num">Lasts</th><th><span class="sr">Remove</span></th></tr></thead>
+          <tbody></tbody>
+        </table>
+        <button type="button" class="add" id="b-add-incident">Add an incident</button>
+      </fieldset>
+
+      <div class="b-foot">
+        <p class="b-status" id="b-status" role="status"></p>
+        <label class="file">Load a test file <input type="file" id="b-load" accept=".json,application/json"></label>
+        <button type="button" class="quiet" id="b-download">Save test file</button>
+        <button type="submit" class="run" id="b-run">Run test</button>
+      </div>
+    </form>
+  </div>
+
+  <div class="toast" id="toast" role="status" hidden></div>
+  <script src="stories.js"></script>
+  <script src="custom.js"></script>
+  <script src="player.js"></script>
+  <script src="builder.js"></script>
+</body>
+</html>

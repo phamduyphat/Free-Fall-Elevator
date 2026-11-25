@@ -38,6 +38,9 @@
 .PARAMETER DatabaseUrl
     Explicit PostgreSQL DATABASE_URL connection string override.
 
+.PARAMETER BuildingUtcOffsetHours
+    Building local-time offset from UTC used for PERF-8 peak/off-peak labels (default 7, Hanoi).
+
 .EXAMPLE
     .\start.ps1
     .\start.ps1 -Mode Background
@@ -55,7 +58,8 @@ param(
     [string]$HostAddress = "127.0.0.1",
     [switch]$NoBrowser,
     [string]$PythonPath = "",
-    [string]$DatabaseUrl = ""
+    [string]$DatabaseUrl = "",
+    [double]$BuildingUtcOffsetHours = 7
 )
 
 $ErrorActionPreference = "Stop"
@@ -258,9 +262,10 @@ if (-not $SkipBackend) {
     Write-Section "Starting SREMS Backend (FastAPI)"
     Write-Step "Binding to http://$($HostAddress):$Port ..."
 
-    $envScript = ""
+    # PERF-8 peak/off-peak windows are building-local clock times (Hanoi = UTC+7).
+    $envScript = "`$env:SREMS_BUILDING_UTC_OFFSET_HOURS = '$BuildingUtcOffsetHours'; "
     if ($DatabaseUrl) {
-        $envScript = "`$env:DATABASE_URL = '$DatabaseUrl'; "
+        $envScript += "`$env:DATABASE_URL = '$DatabaseUrl'; "
     }
 
     $backendCmd = if ($detectedPy -eq "py") {

@@ -1,11 +1,82 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 import os
 from typing import Any, Optional
 
 import asyncpg
 
 DEFAULT_DSN = "postgresql://srems_user:srems_password@localhost:5432/srems"
+
+
+async def setup_connection_codecs(conn: asyncpg.Connection) -> None:
+    """
+    Register codecs on an asyncpg connection to seamlessly support aware and naive datetimes.
+
+    When PostgreSQL columns are defined as `timestamp without time zone` (or before migrations
+    to TIMESTAMPTZ), asyncpg raises DataError if passed a Python timezone-aware datetime.
+    This codec automatically translates aware datetimes to UTC naive ISO strings on write,
+    and attaches UTC timezone on read.
+    """
+    def _encode_timestamp(dt: Any) -> str:
+        if isinstance(dt, datetime):
+            if dt.tzinfo is not None:
+                dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+            return dt.isoformat()
+        return str(dt)
+
+    def _decode_timestamp(s: Optional[str]) -> Optional[datetime]:
+        if not s:
+            return None
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=timezone.utc)
+        return dt
+
+    def _encode_timestamptz(dt: Any) -> str:
+        if isinstance(dt, datetime):
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.isoformat()
+        return str(dt)
+
+    def _decode_timestamptz(s: Optional[str]) -> Optional[datetime]:
+        if not s:
+            return None
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=timezone.utc)
+        return dt
+
+    try:
+        await conn.set_type_codec(
+            "timestamp",
+            encoder=_encode_timestamp,
+            decoder=_decode_timestamp,
+            schema="pg_catalog",
+            format="text",
+        )
+    except Exception:
+        pass
+
+    try:
+        await conn.set_type_codec(
+            "timestamptz",
+            encoder=_encode_timestamptz,
+            decoder=_decode_timestamptz,
+            schema="pg_catalog",
+            format="text",
+        )
+    except Exception:
+        pass
+
+
+async def connect_db(dsn: Optional[str] = None, **kwargs: Any) -> asyncpg.Connection:
+    """Establish a standalone asyncpg connection with registered datetime codecs."""
+    resolved_dsn = dsn or os.getenv("DATABASE_URL", DEFAULT_DSN)
+    conn = await asyncpg.connect(dsn=resolved_dsn, **kwargs)
+    await setup_connection_codecs(conn)
+    return conn
 
 
 class DbConnectionPool:
@@ -25,10 +96,18 @@ class DbConnectionPool:
         """Initialize the shared asyncpg connection pool if not already open."""
         if cls._pool is None:
             resolved_dsn = dsn or os.getenv("DATABASE_URL", DEFAULT_DSN)
+            caller_init = kwargs.pop("init", None)
+
+            async def _init_connection(conn: asyncpg.Connection) -> None:
+                await setup_connection_codecs(conn)
+                if caller_init is not None:
+                    await caller_init(conn)
+
             cls._pool = await asyncpg.create_pool(
                 dsn=resolved_dsn,
                 min_size=min_size,
                 max_size=max_size,
+                init=_init_connection,
                 **kwargs,
             )
         return cls._pool
@@ -75,6 +154,8 @@ class DbConnectionPool:
         async with cls.transaction() as conn:
             # Delete in child-to-parent order to respect foreign key constraints
             await conn.execute("DELETE FROM elevator_commands WHERE TRUE;")
+            await conn.execute("DELETE FROM elevator_wear_history WHERE TRUE;")
+            await conn.execute("DELETE FROM elevator_wear_counters WHERE TRUE;")
             await conn.execute("DELETE FROM incidents WHERE TRUE;")
             await conn.execute("DELETE FROM car_downtime_intervals WHERE TRUE;")
             await conn.execute("DELETE FROM trips WHERE TRUE;")

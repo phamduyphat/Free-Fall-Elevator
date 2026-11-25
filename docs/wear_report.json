@@ -1,0 +1,848 @@
+{
+  "generated_by": "python -m simulation.wear_benchmark",
+  "args": {
+    "months": 6,
+    "seed": 2030,
+    "start": "2026-01-01",
+    "demand_scale": 1.0,
+    "outages": true,
+    "compare": true,
+    "out": "docs/wear_report.json"
+  },
+  "results": [
+    {
+      "label": "wear-balancing ON",
+      "balancing_enabled": true,
+      "months": 6,
+      "seed": 2030,
+      "start": "2026-01-01T00:00:00+00:00",
+      "end": "2026-07-01T00:00:00+00:00",
+      "journeys": 1017405,
+      "hall_calls_completed": 880813,
+      "wall_seconds": 316.51,
+      "month_windows": [
+        {
+          "window_id": "MONTH:2026-01:RESIDENTIAL",
+          "window_type": "MONTH",
+          "wear_group": "RESIDENTIAL",
+          "window_start": "2026-01-01T00:00:00+00:00",
+          "window_end": "2026-02-01T00:00:00+00:00",
+          "per_car_floors": {
+            "E1": 631278,
+            "E2": 631201,
+            "E3": 631294,
+            "E4": 631434
+          },
+          "spread_pct": 0.0369,
+          "limit_pct": 2.0,
+          "within_limit": true,
+          "closed_at": "2026-02-01T00:00:00+00:00"
+        },
+        {
+          "window_id": "MONTH:2026-01:FREIGHT",
+          "window_type": "MONTH",
+          "wear_group": "FREIGHT",
+          "window_start": "2026-01-01T00:00:00+00:00",
+          "window_end": "2026-02-01T00:00:00+00:00",
+          "per_car_floors": {
+            "E5": 103602
+          },
+          "spread_pct": 0.0,
+          "limit_pct": 2.0,
+          "within_limit": true,
+          "closed_at": "2026-02-01T00:00:00+00:00"
+        },
+        {
+          "window_id": "MONTH:2026-02:RESIDENTIAL",
+          "window_type": "MONTH",
+          "wear_group": "RESIDENTIAL",
+          "window_start": "2026-02-01T00:00:00+00:00",
+          "window_end": "2026-03-01T00:00:00+00:00",
+          "per_car_floors": {
+            "E1": 570262,
+            "E2": 570378,
+            "E3": 570283,
+            "E4": 570283
+          },
+          "spread_pct": 0.0203,
+          "limit_pct": 2.0,
+          "within_limit": true,
+          "closed_at": "2026-03-01T00:00:00+00:00"
+        },
+        {
+          "window_id": "MONTH:2026-02:FREIGHT",
+          "window_type": "MONTH",
+          "wear_group": "FREIGHT",
+          "window_start": "2026-02-01T00:00:00+00:00",
+          "window_end": "2026-03-01T00:00:00+00:00",
+          "per_car_floors": {
+            "E5": 93764
+          },
+          "spread_pct": 0.0,
+          "limit_pct": 2.0,
+          "within_limit": true,
+          "closed_at": "2026-03-01T00:00:00+00:00"
+        },
+        {
+          "window_id": "MONTH:2026-03:RESIDENTIAL",
+          "window_type": "MONTH",
+          "wear_group": "RESIDENTIAL",
+          "window_start": "2026-03-01T00:00:00+00:00",
+          "window_end": "2026-04-01T00:00:00+00:00",
+          "per_car_floors": {
+            "E1": 631279,
+            "E2": 631355,
+            "E3": 631178,
+            "E4": 631287
+          },
+          "spread_pct": 0.028,
+          "limit_pct": 2.0,
+          "within_limit": true,
+          "closed_at": "2026-04-01T00:00:00+00:00"
+        },
+        {
+          "window_id": "MONTH:2026-03:FREIGHT",
+          "window_type": "MONTH",
+          "wear_group": "FREIGHT",
+          "window_start": "2026-03-01T00:00:00+00:00",
+          "window_end": "2026-04-01T00:00:00+00:00",
+          "per_car_floors": {
+            "E5": 104842
+          },
+          "spread_pct": 0.0,
+          "limit_pct": 2.0,
+          "within_limit": true,
+          "closed_at": "2026-04-01T00:00:00+00:00"
+        },
+        {
+          "window_id": "MONTH:2026-04:RESIDENTIAL",
+          "window_type": "MONTH",
+          "wear_group": "RESIDENTIAL",
+          "window_start": "2026-04-01T00:00:00+00:00",
+          "window_end": "2026-05-01T00:00:00+00:00",
+          "per_car_floors": {
+            "E1": 609360,
+            "E2": 609429,
+            "E3": 609358,
+            "E4": 609379
+          },
+          "spread_pct": 0.0117,
+          "limit_pct": 2.0,
+          "within_limit": true,
+          "closed_at": "2026-05-01T00:00:00+00:00"
+        },
+        {
+          "window_id": "MONTH:2026-04:FREIGHT",
+          "window_type": "MONTH",
+          "wear_group": "FREIGHT",
+          "window_start": "2026-04-01T00:00:00+00:00",
+          "window_end": "2026-05-01T00:00:00+00:00",
+          "per_car_floors": {
+            "E5": 101418
+          },
+          "spread_pct": 0.0,
+          "limit_pct": 2.0,
+          "within_limit": true,
+          "closed_at": "2026-05-01T00:00:00+00:00"
+        },
+        {
+          "window_id": "MONTH:2026-05:RESIDENTIAL",
+          "window_type": "MONTH",
+          "wear_group": "RESIDENTIAL",
+          "window_start": "2026-05-01T00:00:00+00:00",
+          "window_end": "2026-06-01T00:00:00+00:00",
+          "per_car_floors": {
+            "E1": 634116,
+            "E2": 634290,
+            "E3": 634219,
+            "E4": 634258
+          },
+          "spread_pct": 0.0274,
+          "limit_pct": 2.0,
+          "within_limit": true,
+          "closed_at": "2026-06-01T00:00:00+00:00"
+        },
+        {
+          "window_id": "MONTH:2026-05:FREIGHT",
+          "window_type": "MONTH",
+          "wear_group": "FREIGHT",
+          "window_start": "2026-05-01T00:00:00+00:00",
+          "window_end": "2026-06-01T00:00:00+00:00",
+          "per_car_floors": {
+            "E5": 104692
+          },
+          "spread_pct": 0.0,
+          "limit_pct": 2.0,
+          "within_limit": true,
+          "closed_at": "2026-06-01T00:00:00+00:00"
+        },
+        {
+          "window_id": "MONTH:2026-06:RESIDENTIAL",
+          "window_type": "MONTH",
+          "wear_group": "RESIDENTIAL",
+          "window_start": "2026-06-01T00:00:00+00:00",
+          "window_end": "2026-07-01T00:00:00+00:00",
+          "per_car_floors": {
+            "E1": 612701,
+            "E2": 612740,
+            "E3": 612721,
+            "E4": 612754
+          },
+          "spread_pct": 0.0086,
+          "limit_pct": 2.0,
+          "within_limit": true,
+          "closed_at": "2026-07-01T00:00:00+00:00"
+        },
+        {
+          "window_id": "MONTH:2026-06:FREIGHT",
+          "window_type": "MONTH",
+          "wear_group": "FREIGHT",
+          "window_start": "2026-06-01T00:00:00+00:00",
+          "window_end": "2026-07-01T00:00:00+00:00",
+          "per_car_floors": {
+            "E5": 101961
+          },
+          "spread_pct": 0.0,
+          "limit_pct": 2.0,
+          "within_limit": true,
+          "closed_at": "2026-07-01T00:00:00+00:00"
+        }
+      ],
+      "period_windows": [
+        {
+          "window_id": "PERIOD:2026-01:RESIDENTIAL",
+          "window_type": "PERIOD",
+          "wear_group": "RESIDENTIAL",
+          "window_start": "2026-01-01T00:00:00+00:00",
+          "window_end": "2026-07-01T00:00:00+00:00",
+          "per_car_floors": {
+            "E1": 3688996,
+            "E2": 3689393,
+            "E3": 3689053,
+            "E4": 3689395
+          },
+          "spread_pct": 0.0108,
+          "limit_pct": 5.0,
+          "within_limit": true,
+          "closed_at": "2026-07-01T00:00:00+00:00"
+        },
+        {
+          "window_id": "PERIOD:2026-01:FREIGHT",
+          "window_type": "PERIOD",
+          "wear_group": "FREIGHT",
+          "window_start": "2026-01-01T00:00:00+00:00",
+          "window_end": "2026-07-01T00:00:00+00:00",
+          "per_car_floors": {
+            "E5": 610279
+          },
+          "spread_pct": 0.0,
+          "limit_pct": 5.0,
+          "within_limit": true,
+          "closed_at": "2026-07-01T00:00:00+00:00"
+        }
+      ],
+      "per_car_floors_total": {
+        "E1": 3688996,
+        "E2": 3689393,
+        "E3": 3689053,
+        "E4": 3689395,
+        "E5": 610279
+      },
+      "per_car_starts_total": {
+        "E1": 395948,
+        "E2": 395449,
+        "E3": 394683,
+        "E4": 396319,
+        "E5": 59988
+      },
+      "per_car_doors_total": {
+        "E1": 434640,
+        "E2": 434468,
+        "E3": 433754,
+        "E4": 434837,
+        "E5": 60961
+      },
+      "wait": {
+        "PEAK": {
+          "count": 393439,
+          "mean_seconds": 9.02,
+          "p95_seconds": 25.0
+        },
+        "OFF_PEAK": {
+          "count": 39095,
+          "mean_seconds": 5.38,
+          "p95_seconds": 19.0
+        },
+        "NORMAL": {
+          "count": 448279,
+          "mean_seconds": 6.46,
+          "p95_seconds": 21.0
+        },
+        "ALL": {
+          "count": 880813,
+          "mean_seconds": 7.55,
+          "p95_seconds": 24.0
+        }
+      },
+      "outages": [
+        {
+          "elevator_id": "E2",
+          "start": "2026-01-03T09:00:00+00:00",
+          "hours": 8.0
+        },
+        {
+          "elevator_id": "E4",
+          "start": "2026-01-08T09:00:00+00:00",
+          "hours": 8.0
+        },
+        {
+          "elevator_id": "E1",
+          "start": "2026-01-11T06:00:00+00:00",
+          "hours": 48.0
+        },
+        {
+          "elevator_id": "E3",
+          "start": "2026-01-23T09:00:00+00:00",
+          "hours": 8.0
+        },
+        {
+          "elevator_id": "E1",
+          "start": "2026-01-26T09:00:00+00:00",
+          "hours": 8.0
+        },
+        {
+          "elevator_id": "E4",
+          "start": "2026-02-10T09:00:00+00:00",
+          "hours": 8.0
+        },
+        {
+          "elevator_id": "E3",
+          "start": "2026-02-18T09:00:00+00:00",
+          "hours": 8.0
+        },
+        {
+          "elevator_id": "E2",
+          "start": "2026-02-22T09:00:00+00:00",
+          "hours": 8.0
+        },
+        {
+          "elevator_id": "E1",
+          "start": "2026-02-23T09:00:00+00:00",
+          "hours": 8.0
+        },
+        {
+          "elevator_id": "E1",
+          "start": "2026-03-14T09:00:00+00:00",
+          "hours": 8.0
+        },
+        {
+          "elevator_id": "E3",
+          "start": "2026-03-22T09:00:00+00:00",
+          "hours": 8.0
+        },
+        {
+          "elevator_id": "E4",
+          "start": "2026-03-26T09:00:00+00:00",
+          "hours": 8.0
+        },
+        {
+          "elevator_id": "E2",
+          "start": "2026-03-28T09:00:00+00:00",
+          "hours": 8.0
+        },
+        {
+          "elevator_id": "E1",
+          "start": "2026-04-18T09:00:00+00:00",
+          "hours": 8.0
+        },
+        {
+          "elevator_id": "E2",
+          "start": "2026-04-18T09:00:00+00:00",
+          "hours": 8.0
+        },
+        {
+          "elevator_id": "E3",
+          "start": "2026-04-18T09:00:00+00:00",
+          "hours": 8.0
+        },
+        {
+          "elevator_id": "E4",
+          "start": "2026-04-27T09:00:00+00:00",
+          "hours": 8.0
+        },
+        {
+          "elevator_id": "E3",
+          "start": "2026-05-02T09:00:00+00:00",
+          "hours": 8.0
+        },
+        {
+          "elevator_id": "E2",
+          "start": "2026-05-04T09:00:00+00:00",
+          "hours": 8.0
+        },
+        {
+          "elevator_id": "E4",
+          "start": "2026-05-05T09:00:00+00:00",
+          "hours": 8.0
+        },
+        {
+          "elevator_id": "E1",
+          "start": "2026-05-26T09:00:00+00:00",
+          "hours": 8.0
+        },
+        {
+          "elevator_id": "E2",
+          "start": "2026-06-03T09:00:00+00:00",
+          "hours": 8.0
+        },
+        {
+          "elevator_id": "E3",
+          "start": "2026-06-08T09:00:00+00:00",
+          "hours": 8.0
+        },
+        {
+          "elevator_id": "E1",
+          "start": "2026-06-10T09:00:00+00:00",
+          "hours": 8.0
+        },
+        {
+          "elevator_id": "E4",
+          "start": "2026-06-10T09:00:00+00:00",
+          "hours": 8.0
+        }
+      ],
+      "verdict": {
+        "monthly_max_spread_pct": 0.0369,
+        "monthly_all_within_2pct": true,
+        "period_spreads_pct": [
+          0.0108
+        ],
+        "period_all_within_5pct": true,
+        "cumulative_spread_pct": 0.0108,
+        "month_to_date_spread_pct": 0.0,
+        "perf9_peak_mean_ok": true,
+        "perf9_peak_p95_ok": true,
+        "perf10_offpeak_mean_ok": true
+      }
+    },
+    {
+      "label": "baseline (balancing OFF)",
+      "balancing_enabled": false,
+      "months": 6,
+      "seed": 2030,
+      "start": "2026-01-01T00:00:00+00:00",
+      "end": "2026-07-01T00:00:00+00:00",
+      "journeys": 1017405,
+      "hall_calls_completed": 882406,
+      "wall_seconds": 303.53,
+      "month_windows": [
+        {
+          "window_id": "MONTH:2026-01:RESIDENTIAL",
+          "window_type": "MONTH",
+          "wear_group": "RESIDENTIAL",
+          "window_start": "2026-01-01T00:00:00+00:00",
+          "window_end": "2026-02-01T00:00:00+00:00",
+          "per_car_floors": {
+            "E1": 672492,
+            "E2": 679349,
+            "E3": 618976,
+            "E4": 561282
+          },
+          "spread_pct": 17.3794,
+          "limit_pct": 2.0,
+          "within_limit": false,
+          "closed_at": "2026-02-01T00:00:00+00:00"
+        },
+        {
+          "window_id": "MONTH:2026-01:FREIGHT",
+          "window_type": "MONTH",
+          "wear_group": "FREIGHT",
+          "window_start": "2026-01-01T00:00:00+00:00",
+          "window_end": "2026-02-01T00:00:00+00:00",
+          "per_car_floors": {
+            "E5": 103602
+          },
+          "spread_pct": 0.0,
+          "limit_pct": 2.0,
+          "within_limit": true,
+          "closed_at": "2026-02-01T00:00:00+00:00"
+        },
+        {
+          "window_id": "MONTH:2026-02:RESIDENTIAL",
+          "window_type": "MONTH",
+          "wear_group": "RESIDENTIAL",
+          "window_start": "2026-02-01T00:00:00+00:00",
+          "window_end": "2026-03-01T00:00:00+00:00",
+          "per_car_floors": {
+            "E1": 649722,
+            "E2": 594188,
+            "E3": 544717,
+            "E4": 495605
+          },
+          "spread_pct": 23.7205,
+          "limit_pct": 2.0,
+          "within_limit": false,
+          "closed_at": "2026-03-01T00:00:00+00:00"
+        },
+        {
+          "window_id": "MONTH:2026-02:FREIGHT",
+          "window_type": "MONTH",
+          "wear_group": "FREIGHT",
+          "window_start": "2026-02-01T00:00:00+00:00",
+          "window_end": "2026-03-01T00:00:00+00:00",
+          "per_car_floors": {
+            "E5": 93764
+          },
+          "spread_pct": 0.0,
+          "limit_pct": 2.0,
+          "within_limit": true,
+          "closed_at": "2026-03-01T00:00:00+00:00"
+        },
+        {
+          "window_id": "MONTH:2026-03:RESIDENTIAL",
+          "window_type": "MONTH",
+          "wear_group": "RESIDENTIAL",
+          "window_start": "2026-03-01T00:00:00+00:00",
+          "window_end": "2026-04-01T00:00:00+00:00",
+          "per_car_floors": {
+            "E1": 714981,
+            "E2": 666778,
+            "E3": 603675,
+            "E4": 542433
+          },
+          "spread_pct": 24.1332,
+          "limit_pct": 2.0,
+          "within_limit": false,
+          "closed_at": "2026-04-01T00:00:00+00:00"
+        },
+        {
+          "window_id": "MONTH:2026-03:FREIGHT",
+          "window_type": "MONTH",
+          "wear_group": "FREIGHT",
+          "window_start": "2026-03-01T00:00:00+00:00",
+          "window_end": "2026-04-01T00:00:00+00:00",
+          "per_car_floors": {
+            "E5": 104842
+          },
+          "spread_pct": 0.0,
+          "limit_pct": 2.0,
+          "within_limit": true,
+          "closed_at": "2026-04-01T00:00:00+00:00"
+        },
+        {
+          "window_id": "MONTH:2026-04:RESIDENTIAL",
+          "window_type": "MONTH",
+          "wear_group": "RESIDENTIAL",
+          "window_start": "2026-04-01T00:00:00+00:00",
+          "window_end": "2026-05-01T00:00:00+00:00",
+          "per_car_floors": {
+            "E1": 688934,
+            "E2": 634416,
+            "E3": 579617,
+            "E4": 533627
+          },
+          "spread_pct": 22.5431,
+          "limit_pct": 2.0,
+          "within_limit": false,
+          "closed_at": "2026-05-01T00:00:00+00:00"
+        },
+        {
+          "window_id": "MONTH:2026-04:FREIGHT",
+          "window_type": "MONTH",
+          "wear_group": "FREIGHT",
+          "window_start": "2026-04-01T00:00:00+00:00",
+          "window_end": "2026-05-01T00:00:00+00:00",
+          "per_car_floors": {
+            "E5": 101418
+          },
+          "spread_pct": 0.0,
+          "limit_pct": 2.0,
+          "within_limit": true,
+          "closed_at": "2026-05-01T00:00:00+00:00"
+        },
+        {
+          "window_id": "MONTH:2026-05:RESIDENTIAL",
+          "window_type": "MONTH",
+          "wear_group": "RESIDENTIAL",
+          "window_start": "2026-05-01T00:00:00+00:00",
+          "window_end": "2026-06-01T00:00:00+00:00",
+          "per_car_floors": {
+            "E1": 715450,
+            "E2": 670008,
+            "E3": 602878,
+            "E4": 547185
+          },
+          "spread_pct": 23.5188,
+          "limit_pct": 2.0,
+          "within_limit": false,
+          "closed_at": "2026-06-01T00:00:00+00:00"
+        },
+        {
+          "window_id": "MONTH:2026-05:FREIGHT",
+          "window_type": "MONTH",
+          "wear_group": "FREIGHT",
+          "window_start": "2026-05-01T00:00:00+00:00",
+          "window_end": "2026-06-01T00:00:00+00:00",
+          "per_car_floors": {
+            "E5": 104692
+          },
+          "spread_pct": 0.0,
+          "limit_pct": 2.0,
+          "within_limit": true,
+          "closed_at": "2026-06-01T00:00:00+00:00"
+        },
+        {
+          "window_id": "MONTH:2026-06:RESIDENTIAL",
+          "window_type": "MONTH",
+          "wear_group": "RESIDENTIAL",
+          "window_start": "2026-06-01T00:00:00+00:00",
+          "window_end": "2026-07-01T00:00:00+00:00",
+          "per_car_floors": {
+            "E1": 695398,
+            "E2": 644511,
+            "E3": 587588,
+            "E4": 529567
+          },
+          "spread_pct": 23.8469,
+          "limit_pct": 2.0,
+          "within_limit": false,
+          "closed_at": "2026-07-01T00:00:00+00:00"
+        },
+        {
+          "window_id": "MONTH:2026-06:FREIGHT",
+          "window_type": "MONTH",
+          "wear_group": "FREIGHT",
+          "window_start": "2026-06-01T00:00:00+00:00",
+          "window_end": "2026-07-01T00:00:00+00:00",
+          "per_car_floors": {
+            "E5": 101961
+          },
+          "spread_pct": 0.0,
+          "limit_pct": 2.0,
+          "within_limit": true,
+          "closed_at": "2026-07-01T00:00:00+00:00"
+        }
+      ],
+      "period_windows": [
+        {
+          "window_id": "PERIOD:2026-01:RESIDENTIAL",
+          "window_type": "PERIOD",
+          "wear_group": "RESIDENTIAL",
+          "window_start": "2026-01-01T00:00:00+00:00",
+          "window_end": "2026-07-01T00:00:00+00:00",
+          "per_car_floors": {
+            "E1": 4136977,
+            "E2": 3889250,
+            "E3": 3537451,
+            "E4": 3209699
+          },
+          "spread_pct": 22.4144,
+          "limit_pct": 5.0,
+          "within_limit": false,
+          "closed_at": "2026-07-01T00:00:00+00:00"
+        },
+        {
+          "window_id": "PERIOD:2026-01:FREIGHT",
+          "window_type": "PERIOD",
+          "wear_group": "FREIGHT",
+          "window_start": "2026-01-01T00:00:00+00:00",
+          "window_end": "2026-07-01T00:00:00+00:00",
+          "per_car_floors": {
+            "E5": 610279
+          },
+          "spread_pct": 0.0,
+          "limit_pct": 5.0,
+          "within_limit": true,
+          "closed_at": "2026-07-01T00:00:00+00:00"
+        }
+      ],
+      "per_car_floors_total": {
+        "E1": 4136977,
+        "E2": 3889250,
+        "E3": 3537451,
+        "E4": 3209699,
+        "E5": 610279
+      },
+      "per_car_starts_total": {
+        "E1": 439781,
+        "E2": 415516,
+        "E3": 379035,
+        "E4": 346501,
+        "E5": 59988
+      },
+      "per_car_doors_total": {
+        "E1": 483144,
+        "E2": 457106,
+        "E3": 418013,
+        "E4": 382664,
+        "E5": 60961
+      },
+      "wait": {
+        "PEAK": {
+          "count": 394704,
+          "mean_seconds": 8.86,
+          "p95_seconds": 25.0
+        },
+        "OFF_PEAK": {
+          "count": 39116,
+          "mean_seconds": 5.1,
+          "p95_seconds": 19.0
+        },
+        "NORMAL": {
+          "count": 448586,
+          "mean_seconds": 6.35,
+          "p95_seconds": 21.0
+        },
+        "ALL": {
+          "count": 882406,
+          "mean_seconds": 7.42,
+          "p95_seconds": 23.0
+        }
+      },
+      "outages": [
+        {
+          "elevator_id": "E2",
+          "start": "2026-01-03T09:00:00+00:00",
+          "hours": 8.0
+        },
+        {
+          "elevator_id": "E4",
+          "start": "2026-01-08T09:00:00+00:00",
+          "hours": 8.0
+        },
+        {
+          "elevator_id": "E1",
+          "start": "2026-01-11T06:00:00+00:00",
+          "hours": 48.0
+        },
+        {
+          "elevator_id": "E3",
+          "start": "2026-01-23T09:00:00+00:00",
+          "hours": 8.0
+        },
+        {
+          "elevator_id": "E1",
+          "start": "2026-01-26T09:00:00+00:00",
+          "hours": 8.0
+        },
+        {
+          "elevator_id": "E4",
+          "start": "2026-02-10T09:00:00+00:00",
+          "hours": 8.0
+        },
+        {
+          "elevator_id": "E3",
+          "start": "2026-02-18T09:00:00+00:00",
+          "hours": 8.0
+        },
+        {
+          "elevator_id": "E2",
+          "start": "2026-02-22T09:00:00+00:00",
+          "hours": 8.0
+        },
+        {
+          "elevator_id": "E1",
+          "start": "2026-02-23T09:00:00+00:00",
+          "hours": 8.0
+        },
+        {
+          "elevator_id": "E1",
+          "start": "2026-03-14T09:00:00+00:00",
+          "hours": 8.0
+        },
+        {
+          "elevator_id": "E3",
+          "start": "2026-03-22T09:00:00+00:00",
+          "hours": 8.0
+        },
+        {
+          "elevator_id": "E4",
+          "start": "2026-03-26T09:00:00+00:00",
+          "hours": 8.0
+        },
+        {
+          "elevator_id": "E2",
+          "start": "2026-03-28T09:00:00+00:00",
+          "hours": 8.0
+        },
+        {
+          "elevator_id": "E1",
+          "start": "2026-04-18T09:00:00+00:00",
+          "hours": 8.0
+        },
+        {
+          "elevator_id": "E2",
+          "start": "2026-04-18T09:00:00+00:00",
+          "hours": 8.0
+        },
+        {
+          "elevator_id": "E3",
+          "start": "2026-04-18T09:00:00+00:00",
+          "hours": 8.0
+        },
+        {
+          "elevator_id": "E4",
+          "start": "2026-04-27T09:00:00+00:00",
+          "hours": 8.0
+        },
+        {
+          "elevator_id": "E3",
+          "start": "2026-05-02T09:00:00+00:00",
+          "hours": 8.0
+        },
+        {
+          "elevator_id": "E2",
+          "start": "2026-05-04T09:00:00+00:00",
+          "hours": 8.0
+        },
+        {
+          "elevator_id": "E4",
+          "start": "2026-05-05T09:00:00+00:00",
+          "hours": 8.0
+        },
+        {
+          "elevator_id": "E1",
+          "start": "2026-05-26T09:00:00+00:00",
+          "hours": 8.0
+        },
+        {
+          "elevator_id": "E2",
+          "start": "2026-06-03T09:00:00+00:00",
+          "hours": 8.0
+        },
+        {
+          "elevator_id": "E3",
+          "start": "2026-06-08T09:00:00+00:00",
+          "hours": 8.0
+        },
+        {
+          "elevator_id": "E1",
+          "start": "2026-06-10T09:00:00+00:00",
+          "hours": 8.0
+        },
+        {
+          "elevator_id": "E4",
+          "start": "2026-06-10T09:00:00+00:00",
+          "hours": 8.0
+        }
+      ],
+      "verdict": {
+        "monthly_max_spread_pct": 24.1332,
+        "monthly_all_within_2pct": false,
+        "period_spreads_pct": [
+          22.4144
+        ],
+        "period_all_within_5pct": false,
+        "cumulative_spread_pct": 22.4144,
+        "month_to_date_spread_pct": 0.0,
+        "perf9_peak_mean_ok": true,
+        "perf9_peak_p95_ok": true,
+        "perf10_offpeak_mean_ok": true
+      }
+    }
+  ],
+  "settings": {
+    "wear_busy_calls_per_car": 1.0,
+    "max_penalty_seconds": 15.0
+  }
+}

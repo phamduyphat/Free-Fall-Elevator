@@ -7,7 +7,6 @@ It currently provides the application shell and views for:
 
 - fleet overview;
 - simulation and 30-floor visual shaft;
-- wear & tear balancing and 6-month benchmark visualization;
 - elevator monitoring and service matrix;
 - credential management;
 - security alerts and incident handling;

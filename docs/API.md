@@ -335,3 +335,23 @@ Serialize summary KPIs and optional per-request call/trip rows into `JSON` or `C
 | `POST /api/v1/system/reset` | Bearer (`ADMIN`) | Resets PostgreSQL tables, clears ACS in-memory sessions/windows, and resets `SimulationClock` (`base_time`, `sim_seconds_per_tick`, `tick_interval_seconds`, `start_loop`). |
 | `POST /api/v1/system/clock/tick` | Bearer (`ADMIN`) | Manually advances `SimulationClock` by `steps` (`0`–`100000`, default `1`). |
 
+
+---
+
+## 5. Scenario player recordings (`api/stories.py`)
+
+Used by the validation-test player at `/player/` (`frontend/public/player`). Each call runs the
+scenario on a **private** `OperationalSimulator` (no database, no background thread), so it never
+touches the live simulator and writes nothing to PostgreSQL. Output is labelled software
+test-stub output (SWI-2).
+
+| Method & Path | Auth | Purpose |
+| :--- | :--- | :--- |
+| `GET /api/v1/operational/stories` | None | Lists the 12 scenarios: `key`, `title`, `vt` (VT IDs), `mode`, `tagline`, `requirements`, `until` (simulated seconds), `criteria` (count). |
+| `GET /api/v1/operational/stories/{key}` | None | Records one scenario now and returns it: `frames` (one per simulated second: cars, hall calls, people, incidents, metrics), `events` (what each module did, with `why` explanations and `code` references), `criteria` (`passed_at` per criterion). `404` for an unknown key; `500` if a pass criterion was not met. |
+
+| `POST /api/v1/operational/stories/custom` | None | Runs **your** scenario (body: spec JSON, see `simulation/custom_scenario.py`: `name`, `start`, `seed`, `cars`, `groups` of people with `count`/`from`/`to`/`start`/`over`/`kind`, `incidents`, `targets`) under three dispatch rules on the same people. Returns the SREMS recording plus `comparison.policies[].kpis` and `comparison.verdict`. Failing criteria are returned, not refused. `422` names the invalid field. |
+
+Offline equivalent: `python -m simulation.story_recorder` writes all recordings to
+`frontend/public/player/stories.js`.
+Custom scenarios offline: `python -m simulation.custom_scenario my_test.json --player`.
